@@ -5,6 +5,8 @@
     "data_path": "../data",
     // common
     "config_sensors_ext": "config_sensors_ext.json",
+    // preprocessing
+    "config_bbox_filter": "config_bbox_filter.json",
     // odometry
     "config_imu_prediction": "config_imu_prediction.json",
     "config_velocity_suppressor": "config_velocity_suppressor.json",

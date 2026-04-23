@@ -1,0 +1,7 @@
+{
+  "bbox_filter": {
+    "crop_bbox_frame": "lidar", // lidar or imu
+    "crop_bbox_min": [-1.0, -1.0, -1.0],
+    "crop_bbox_max": [1.0, 1.0, 1.0]
+  }
+}
