@@ -10,9 +10,20 @@ ament_auto_find_build_dependencies()
 
 set(CMAKE_CXX_STANDARD 17)
 
-ament_auto_add_library(deskewing SHARED
+ament_auto_add_library(deskewing_core SHARED
   src/glim_ext/deskewing_module.cpp
   src/glim_ext/deskewing_module_ros2.cpp
+)
+target_include_directories(deskewing_core PUBLIC
+  include
+)
+target_link_libraries(deskewing_core
+  glim::glim
+  Iridescence::iridescence
+  glim_ext
+)
+
+ament_auto_add_library(deskewing SHARED
   src/glim_ext/deskewing_module_create.cpp
 )
 target_include_directories(deskewing PRIVATE
@@ -22,4 +33,7 @@ target_link_libraries(deskewing
   glim::glim
   Iridescence::iridescence
   glim_ext
+  deskewing_core
 )
+
+install(DIRECTORY include/ DESTINATION include)
