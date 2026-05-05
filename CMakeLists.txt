@@ -78,7 +78,7 @@ endif()
 
 if(ENABLE_DESKEWING)
   add_subdirectory(modules/odometry/deskewing)
-  list(APPEND glim_ext_LIBRARIES deskewing)
+  list(APPEND glim_ext_LIBRARIES deskewing deskewing_core)
 endif()
 
 if(ENABLE_FASTLIO2)
@@ -143,6 +143,8 @@ install(TARGETS ${glim_ext_LIBRARIES}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
+install(DIRECTORY include/ DESTINATION include)
+
 #################
 ## ROS-related ##
 #################
@@ -152,6 +154,7 @@ if(DEFINED ENV{ROS_VERSION})
     install(DIRECTORY config DESTINATION share/glim_ext)
     ament_target_dependencies(glim_ext glim)
     ament_export_libraries(${glim_ext_LIBRARIES})
+    ament_export_include_directories(include)
     ament_package()
   elseif($ENV{ROS_VERSION} EQUAL 1)
     # ROS1

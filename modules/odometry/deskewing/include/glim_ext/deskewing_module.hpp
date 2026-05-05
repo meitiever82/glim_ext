@@ -17,6 +17,18 @@
 
 namespace glim {
 
+struct DeskewingParams {
+public:
+  DeskewingParams();
+  ~DeskewingParams();
+
+public:
+  bool save_ply;
+  bool save_points_lidar;
+  bool save_points_imu;
+  std::string ply_path;
+};
+
 struct DeskewingResult {
   using Ptr = std::shared_ptr<DeskewingResult>;
   using ConstPtr = std::shared_ptr<const DeskewingResult>;
@@ -29,11 +41,14 @@ struct DeskewingResult {
 
 class DeskewingModule : public ExtensionModuleROS2 {
 public:
-  DeskewingModule();
+  DeskewingModule(const DeskewingParams& params = DeskewingParams(), const std::string& logger_name = "deskew");
   ~DeskewingModule();
 
-private:
+protected:
+  virtual void on_deskeweing_result(const DeskewingResult::Ptr& result) {}
   std::vector<GenericTopicSubscription::Ptr> create_subscriptions(rclcpp::Node& node) override;
+
+private:
   bool needs_wait() const override;
   void task();
 
@@ -43,14 +58,11 @@ private:
   void save_deskewed_frame(const DeskewingResult::Ptr& result);
   void publish_deskewed_frame(const DeskewingResult::Ptr& result);
 
-private:
+protected:
+  const DeskewingParams params;
+
   std::atomic_bool kill_switch;
   std::thread thread;
-
-  bool save_ply;
-  bool save_points_lidar;
-  bool save_points_imu;
-  std::string ply_path;
 
   // Input and output queues
   ConcurrentVector<EstimationFrame::ConstPtr> input_frame_queue;
@@ -65,9 +77,9 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr deskewed_points_scanend_aligned_pub;
 
   //
-  Eigen::Isometry3d T_lidar_imu;
   std::unique_ptr<CloudDeskewing> deskewing;
 
+protected:
   // logging
   std::shared_ptr<spdlog::logger> logger;
 };
