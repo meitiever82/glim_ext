@@ -71,7 +71,7 @@ private:
   State state_ = State::UNINITIALIZED;
   Eigen::Isometry3d T_map_odom_ = Eigen::Isometry3d::Identity();
   double cooldown_until_stamp_ = -1.0;
-  std::mt19937 mt_{12345};
+  std::mt19937 mt_{12345};  // fixed seed: point subsampling is non-safety-critical; reproducible runs
 
   gtsam::NonlinearFactorGraph pending_factors_;
   std::mutex pending_mutex_;
