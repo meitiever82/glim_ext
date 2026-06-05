@@ -12,6 +12,9 @@ option(ENABLE_GRAVITY "Enable Gravity estimation and correction module" ON)
 option(ENABLE_DESKEWING "Enable Point Cloud Deskewing module" ON)
 option(ENABLE_FASTLIO2 "Enable FAST-LIO2 odometry" OFF)
 
+# Localization modules
+option(ENABLE_PRIOR_MAP_LOC "Enable prior-map localization" ON)
+
 # Local and global mapping modules
 option(ENABLE_SCAN_CONTEXT "Enable ScanContext Loop Detector" OFF)
 option(ENABLE_DBOW "Enable DBoW Loop Detector" OFF)
@@ -108,6 +111,11 @@ if(ENABLE_FLATEARTHER)
   list(APPEND glim_ext_LIBRARIES flat_earther)
 endif()
 
+if(ENABLE_PRIOR_MAP_LOC)
+  add_subdirectory(modules/localization/prior_map_localization)
+  list(APPEND glim_ext_LIBRARIES prior_map_localization)
+endif()
+
 #############
 ## Install ##
 #############
@@ -148,18 +156,9 @@ install(DIRECTORY include/ DESTINATION include)
 #################
 ## ROS-related ##
 #################
-if(DEFINED ENV{ROS_VERSION})
-  if($ENV{ROS_VERSION} EQUAL 2)
-    # ROS2
-    install(DIRECTORY config DESTINATION share/glim_ext)
-    ament_target_dependencies(glim_ext glim)
-    ament_export_libraries(${glim_ext_LIBRARIES})
-    ament_export_include_directories(include)
-    ament_package()
-  elseif($ENV{ROS_VERSION} EQUAL 1)
-    # ROS1
-    catkin_package(
-      LIBRARIES ${glim_ext_LIBRARIES}
-    )
-  endif()
-endif()
+
+# ROS2
+install(DIRECTORY config DESTINATION share/glim_ext)
+ament_target_dependencies(glim_ext glim)
+ament_export_libraries(${glim_ext_LIBRARIES})
+ament_package()

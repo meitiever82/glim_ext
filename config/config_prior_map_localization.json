@@ -1,0 +1,29 @@
+{
+  "prior_map_localization": {
+    "prior_map_path": "/path/to/prior_map.pcd",
+    "assume_gravity_aligned": true,   // map must be z-up gravity-aligned (MVP: declaration only; warns if false)
+
+    "voxel_resolution": 0.5,
+    "min_overlap": 0.05,              // hysteresis enter; exit at 0.8x this
+    "s2m_points_ratio": 1.0,          // random source subsample ratio = S2M strength knob
+    "s2m_num_threads": 4,
+
+    "relocalization_cooldown_sec": 5.0, // raised at startup to >= smoother_lag + margin
+
+    // Initial pose: 2D /initialpose is completed to 6DoF (z from map, roll/pitch from IMU).
+    // Set has_default_init_pose=true to use default_init_pose [x,y,z,yaw] instead of waiting for /initialpose.
+    "has_default_init_pose": false,
+    "default_init_pose": [0, 0, 0, 0],
+    "ground_grid_resolution": 1.0,
+    "imu_height_above_ground": 0.0,
+
+    // Frame IDs (keep consistent with config_ros.json glim_ros.*_frame_id)
+    "map_frame_id": "map",
+    "odom_frame_id": "odom",
+
+    // --- Reserved for v2 (NOT read by the MVP) ---
+    "max_corr_dist": 1.0,            // reserved
+    "full_weight_overlap": 0.30,     // reserved: continuous down-weighting
+    "use_gpu": false                 // reserved: GPU S2M factor
+  }
+}
