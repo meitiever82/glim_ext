@@ -20,3 +20,11 @@ TEST(PriorMapManager, BuildsVoxelmap) {
   ASSERT_NE(mgr.voxelmap(), nullptr);
   EXPECT_NEAR(mgr.voxelmap()->voxel_resolution(), 0.5, 1e-9);
 }
+
+TEST(PriorMapManager, EmptyInputNoCrash) {
+  PriorMapManager::Config cfg;
+  PriorMapManager mgr(cfg);
+  mgr.build_from_points({});                       // must not crash
+  EXPECT_EQ(mgr.voxelmap(), nullptr);
+  EXPECT_FALSE(mgr.query_ground_height(0.0, 0.0).has_value());
+}

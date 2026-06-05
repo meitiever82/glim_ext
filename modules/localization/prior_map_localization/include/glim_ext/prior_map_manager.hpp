@@ -23,7 +23,8 @@ public:
 
   explicit PriorMapManager(const Config& config);
 
-  // Build from in-memory points (homogeneous x,y,z,1). Releases the raw cloud after building.
+  // Build from in-memory points (homogeneous x,y,z,1). The raw cloud is NOT retained —
+  // only the voxelmap + 2D height grid are kept.
   void build_from_points(const std::vector<Eigen::Vector4d>& points);
 
   // Load a .pcd via PCL, then build_from_points. Returns false on read failure / empty.

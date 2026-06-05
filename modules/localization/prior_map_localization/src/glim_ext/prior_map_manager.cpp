@@ -10,13 +10,21 @@
 
 namespace glim {
 
-PriorMapManager::PriorMapManager(const Config& config) : config_(config) {}
+PriorMapManager::PriorMapManager(const Config& config)
+  : config_(config),
+    map_min_(Eigen::Vector3d::Constant(std::numeric_limits<double>::max())),
+    map_max_(Eigen::Vector3d::Constant(std::numeric_limits<double>::lowest())) {}
 
 long long PriorMapManager::grid_key(int ix, int iy) const {
-  return static_cast<long long>(ix) * 1000000LL + static_cast<long long>(iy);
+  return (static_cast<long long>(ix) << 32) | static_cast<long long>(static_cast<unsigned int>(iy));
 }
 
 void PriorMapManager::build_from_points(const std::vector<Eigen::Vector4d>& points) {
+  if (points.empty()) {
+    voxelmap_.reset();
+    height_grid_.clear();
+    return;
+  }
   auto covs = gtsam_points::estimate_covariances(points, config_.cov_k_neighbors, config_.num_threads);
   auto pc = std::make_shared<gtsam_points::PointCloudCPU>(points);
   pc->add_covs(covs);
@@ -69,11 +77,12 @@ bool PriorMapManager::is_in_bounds(const Eigen::Vector3d& p) const {
 double PriorMapManager::compute_overlap_ratio(const gtsam_points::PointCloud::ConstPtr& cloud,
                                               const Eigen::Isometry3d& T_map_sensor) const {
   if (!voxelmap_ || !cloud || cloud->size() == 0) return 0.0;
+  const Eigen::Matrix4d T = T_map_sensor.matrix();
   int hits = 0;
   for (size_t i = 0; i < cloud->size(); ++i) {
-    Eigen::Vector4d ps = cloud->points[i];
-    Eigen::Vector4d pm = T_map_sensor.matrix() * Eigen::Vector4d(ps.x(), ps.y(), ps.z(), 1.0);
-    Eigen::Vector3i c = voxelmap_->voxel_coord(pm);
+    const Eigen::Vector4d& p = cloud->points[i];
+    const Eigen::Vector4d pm = T * Eigen::Vector4d(p.x(), p.y(), p.z(), 1.0);
+    const Eigen::Vector3i c = voxelmap_->voxel_coord(pm);
     if (voxelmap_->lookup_voxel_index(c) >= 0) ++hits;
   }
   return static_cast<double>(hits) / static_cast<double>(cloud->size());
