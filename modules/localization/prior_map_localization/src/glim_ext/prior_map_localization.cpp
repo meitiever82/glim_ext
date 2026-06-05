@@ -46,6 +46,9 @@ PriorMapLocalization::PriorMapLocalization() : logger_(create_module_logger("pri
     }
   }
 
+  map_frame_ = config.param<std::string>(sec, "map_frame_id", "map");
+  odom_frame_ = config.param<std::string>(sec, "odom_frame_id", "odom");
+
   inject_ = InjectDecision(config_.min_overlap);
 
   // Cooldown lower-bound = smoother_lag + margin (correctness constraint).
@@ -70,6 +73,11 @@ PriorMapLocalization::PriorMapLocalization() : logger_(create_module_logger("pri
     logger_->error("failed to load prior map: '{}'", config_.prior_map_path);
   } else {
     logger_->info("prior map loaded: {}", config_.prior_map_path);
+  }
+
+  if (!config_.assume_gravity_aligned) {
+    logger_->warn("assume_gravity_aligned=false: this module assumes a z-up gravity-aligned prior map; "
+                  "initial-pose z/roll/pitch handling is undefined otherwise (strict validation is a v2 feature)");
   }
 
   if (config_.has_default_init_pose) {
