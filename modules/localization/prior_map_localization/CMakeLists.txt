@@ -18,6 +18,7 @@ target_include_directories(prior_map_localization PUBLIC
 )
 target_link_libraries(prior_map_localization
   glim::glim
+  glim_ext
   gtsam_points::gtsam_points
   ${PCL_LIBRARIES}
 )
