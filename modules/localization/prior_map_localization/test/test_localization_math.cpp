@@ -24,3 +24,13 @@ TEST(LocalizationMath, ComposeTakesRollPitchFromXt) {
   Eigen::Vector3d up = T.linear() * Eigen::Vector3d::UnitZ();
   EXPECT_NEAR(std::acos(up.z()), 0.2, 1e-6);
 }
+
+TEST(LocalizationMath, ComposeStripsExistingYawFromXt) {
+  // X_t has a yaw of 1.0 rad. compose_initial_pose with the user's yaw=0 must
+  // produce a pose whose yaw is 0 (X_t's yaw is stripped, not added).
+  Eigen::Isometry3d X_t = Eigen::Isometry3d::Identity();
+  X_t.linear() = Eigen::AngleAxisd(1.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  Eigen::Isometry3d T = glim::compose_initial_pose(0.0, 0.0, 0.0, 0.0, X_t);
+  const double out_yaw = std::atan2(T.linear()(1, 0), T.linear()(0, 0));
+  EXPECT_NEAR(out_yaw, 0.0, 1e-9);
+}

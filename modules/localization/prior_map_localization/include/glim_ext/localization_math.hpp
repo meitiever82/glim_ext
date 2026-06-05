@@ -8,6 +8,7 @@ namespace glim {
 
 // Extract yaw (Z) from a rotation, returning the roll/pitch-only rotation (yaw removed).
 inline Eigen::Matrix3d roll_pitch_of(const Eigen::Matrix3d& R) {
+  // NOTE: undefined at pitch ~= +-90 deg (gimbal lock); safe for ground-vehicle use.
   const double yaw = std::atan2(R(1, 0), R(0, 0));
   const Eigen::Matrix3d Rz_inv = Eigen::AngleAxisd(-yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
   return Rz_inv * R;
