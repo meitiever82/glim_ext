@@ -1,0 +1,18 @@
+{
+  "prior_map_localization": {
+    "prior_map_path": "/path/to/prior_map.pcd",
+    "assume_gravity_aligned": true,
+    "voxel_resolution": 0.5,
+    "min_overlap": 0.05,
+    "max_corr_dist": 1.0,
+    "s2m_points_ratio": 1.0,
+    "s2m_num_threads": 4,
+    "relocalization_cooldown_sec": 5.0,
+    "has_default_init_pose": false,
+    "default_init_pose": [0, 0, 0, 0],
+    "ground_grid_resolution": 1.0,
+    "imu_height_above_ground": 0.0,
+    "full_weight_overlap": 0.30,
+    "use_gpu": false
+  }
+}
