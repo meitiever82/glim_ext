@@ -12,4 +12,4 @@
 	url = https://github.com/koide3/ORB_SLAM3.git
 [submodule "modules/odometry/fastlio2/thirdparty/FAST_LIO"]
 	path = modules/odometry/fastlio2/thirdparty/FAST_LIO
-	url = git@github.com:koide3/FAST_LIO
+	url = https://github.com/koide3/FAST_LIO.git
