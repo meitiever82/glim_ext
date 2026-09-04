@@ -35,6 +35,8 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_types test/test_types.cpp)
   target_link_libraries(test_types gnss_core)
+  ament_add_gtest(test_geodetic test/test_geodetic.cpp)
+  target_link_libraries(test_geodetic gnss_core)
 endif()
 
 ament_package()
