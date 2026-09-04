@@ -41,6 +41,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_rtk_fix_buffer gnss_core)
   ament_add_gtest(test_rtk_noise_policy test/test_rtk_noise_policy.cpp)
   target_link_libraries(test_rtk_noise_policy gnss_core)
+  ament_add_gtest(test_frame_aligner test/test_frame_aligner.cpp)
+  target_link_libraries(test_frame_aligner gnss_core)
 endif()
 
 ament_package()
