@@ -1,7 +1,7 @@
 # ----------------------------------------------------------------------------
 #   Basic Configuration
 # ----------------------------------------------------------------------------
-CMAKE_MINIMUM_REQUIRED(VERSION 2.8)
+CMAKE_MINIMUM_REQUIRED(VERSION 3.22)
 
 set(CMAKE_CXX_STANDARD 11)
 
@@ -76,7 +76,7 @@ IF (INSTALL_DOC)
     INCLUDE("${PROJECT_SOURCE_DIR}/generateDoc.cmake")
     GENERATE_DOCUMENTATION(${PROJECT_SOURCE_DIR}/dox.in)
 ENDIF()
- 
+
 # ----------------------------------------------------------------------------
 #   Uninstall target, for "make uninstall"
 # ----------------------------------------------------------------------------

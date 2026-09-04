@@ -43,9 +43,16 @@ private:
   // ROS-related
   std::string imu_frame_id;
   std::string odom_frame_id;
+  std::string map_frame_id;
 
-  double min_publish_interval;
+  double publish_interval;
+  double next_publish_time;
   double last_publish_time;
+
+  std::mutex mutex_T_world_odom;
+  Eigen::Isometry3d T_world_odom;         // World to odom frame transformation accessed from IMU-rate processing (no locking).
+  Eigen::Isometry3d locked_T_world_odom;  // World to odom frame transformation accessed from point-cloud-rate processing (with locking).
+
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pred_odom_pub;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pred_pose_pub;
 

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.22)
 project(DBoW2)
 include(ExternalProject)
 
@@ -22,7 +22,7 @@ set(HDRS
   include/DBoW2/QueryResults.h        include/DBoW2/TemplatedDatabase.h   include/DBoW2/FORB.h
   include/DBoW2/DBoW2.h               include/DBoW2/FClass.h              include/DBoW2/FeatureVector.h
   include/DBoW2/ScoringObject.h       include/DBoW2/TemplatedVocabulary.h)
-set(SRCS 
+set(SRCS
   src/BowVector.cpp     src/FBrief.cpp        src/FORB.cpp
   src/FeatureVector.cpp src/QueryResults.cpp  src/ScoringObject.cpp)
 
@@ -59,7 +59,7 @@ if(BUILD_DBoW2)
 endif()
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/DBoW2Config.cmake"
   DESTINATION ${CMAKE_INSTALL_PREFIX}/include/${PROJECT_NAME})
-install(FILES "${PROJECT_BINARY_DIR}/DBoW2Config.cmake" 
+install(FILES "${PROJECT_BINARY_DIR}/DBoW2Config.cmake"
   DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/cmake/DBoW2/)
 install(DIRECTORY ${DEPENDENCY_INSTALL_DIR}/ DESTINATION ${CMAKE_INSTALL_PREFIX} OPTIONAL)
 

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.22)
 project(odometry_estimation_fastlio2)
 
 add_compile_options(-std=c++17)

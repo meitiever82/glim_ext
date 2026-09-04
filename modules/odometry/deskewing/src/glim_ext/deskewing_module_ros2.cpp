@@ -18,6 +18,11 @@ std::vector<GenericTopicSubscription::Ptr> DeskewingModule::create_subscriptions
 }
 
 void DeskewingModule::publish_deskewed_frame(const DeskewingResult::Ptr& result) {
+  if (!deskewed_points_imu_pub) {
+    // This can happen if the module is not running in ROS2 mode
+    return;
+  }
+
   const auto& raw_points = result->frame->raw_frame->raw_points;
 
   auto frame = std::make_shared<gtsam_points::PointCloudCPU>();
@@ -54,6 +59,10 @@ void DeskewingModule::publish_deskewed_frame(const DeskewingResult::Ptr& result)
   }
 
   // Scan-end points
+  if (result->frame->imu_rate_trajectory.size() == 0) {
+    logger->warn("IMU rate trajectory is empty. Set save_imu_rate_trajectory=true in config_odometry_*.json");
+    return;
+  }
   const auto& imu_rate_traj = result->frame->imu_rate_trajectory;
   const Eigen::Matrix<double, 8, 1> imu_begin = imu_rate_traj.col(0);
   const Eigen::Matrix<double, 8, 1> imu_end = imu_rate_traj.col(imu_rate_traj.cols() - 1);

@@ -229,6 +229,18 @@ struct OdometryEstimationFastLIO2::Impl {
     Config sensor_config(GlobalConfig::get_config_path("config_sensors"));
     T_lidar_imu = sensor_config.param<Eigen::Isometry3d>("sensors", "T_lidar_imu", Eigen::Isometry3d::Identity());
 
+    const double imu_acc_std = sensor_config.param<double>("sensors", "imu_acc_noise", 0.05);
+    const double imu_gyr_std = sensor_config.param<double>("sensors", "imu_gyro_noise", 0.01);
+    const double imu_int_std = sensor_config.param<double>("sensors", "imu_int_noise", 0.001);
+    const double imu_bias_acc_std = sensor_config.param<double>("sensors", "imu_bias_noise_acc", 1e-5);
+    const double imu_bias_gyr_std = sensor_config.param<double>("sensors", "imu_bias_noise_gyro", 1e-6);
+
+    const double rate = 100.0;
+    const double acc_cov = imu_acc_std * imu_acc_std * rate;
+    const double gyr_cov = imu_gyr_std * imu_gyr_std * rate;
+    const double b_acc_cov = imu_bias_acc_std * imu_bias_acc_std * rate;
+    const double b_gyr_cov = imu_bias_gyr_std * imu_bias_gyr_std * rate;
+
     // T_lidar_imu transforms points from IMU frame to LiDAR frame
     // FAST-LIO2 uses Lidar_R_wrt_IMU and Lidar_T_wrt_IMU which is T_imu_lidar
     // i.e., the LiDAR pose expressed in the IMU frame
@@ -246,10 +258,10 @@ struct OdometryEstimationFastLIO2::Impl {
     mean_gyr = V3D::Zero();
     cov_acc = V3D(0.1, 0.1, 0.1);
     cov_gyr = V3D(0.1, 0.1, 0.1);
-    cov_acc_scale = V3D(p.acc_cov, p.acc_cov, p.acc_cov);
-    cov_gyr_scale = V3D(p.gyr_cov, p.gyr_cov, p.gyr_cov);
-    cov_bias_gyr = V3D(p.b_gyr_cov, p.b_gyr_cov, p.b_gyr_cov);
-    cov_bias_acc = V3D(p.b_acc_cov, p.b_acc_cov, p.b_acc_cov);
+    cov_acc_scale = V3D(acc_cov, acc_cov, acc_cov);
+    cov_gyr_scale = V3D(gyr_cov, gyr_cov, gyr_cov);
+    cov_bias_gyr = V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov);
+    cov_bias_acc = V3D(b_acc_cov, b_acc_cov, b_acc_cov);
     angvel_last = V3D::Zero();
     acc_s_last = V3D::Zero();
     first_lidar_time = 0.0;
@@ -702,11 +714,6 @@ OdometryEstimationFastLIO2Params::OdometryEstimationFastLIO2Params() {
   cube_side_length = config.param<double>("odometry_estimation", "cube_side_length", 1000.0);
   det_range = config.param<double>("odometry_estimation", "det_range", 300.0);
 
-  gyr_cov = config.param<double>("odometry_estimation", "gyr_cov", 0.1);
-  acc_cov = config.param<double>("odometry_estimation", "acc_cov", 0.1);
-  b_gyr_cov = config.param<double>("odometry_estimation", "b_gyr_cov", 0.0001);
-  b_acc_cov = config.param<double>("odometry_estimation", "b_acc_cov", 0.0001);
-
   extrinsic_est_en = config.param<bool>("odometry_estimation", "extrinsic_est_en", false);
 }
 
@@ -801,9 +808,26 @@ EstimationFrame::ConstPtr OdometryEstimationFastLIO2::insert_frame(const Preproc
   impl->lasermap_fov_segment();
 
   // Downsample
+  const double leaf_size_surf0 = impl->downSizeFilterSurf.getLeafSize()[0];
+  impl->downSizeFilterSurf.setLeafSize(leaf_size_surf0, leaf_size_surf0, leaf_size_surf0);
   impl->downSizeFilterSurf.setInputCloud(impl->feats_undistort);
   impl->downSizeFilterSurf.filter(*(impl->feats_down_body));
   impl->feats_down_size = impl->feats_down_body->points.size();
+
+  // If it failed to downsample due to too large voxel size, increase the voxel size and try again until we have a reasonable number of points
+  double leaf_size_surf = leaf_size_surf0;
+  while (impl->feats_down_size > 1000 && impl->feats_undistort->size() == impl->feats_down_size && leaf_size_surf < 5.0) {
+    leaf_size_surf *= 1.5;
+    std::cout << "Failed to downsample, |original|=" << impl->feats_undistort->size() << ", |downsampled|=" << impl->feats_down_size << ", increasing voxel size to "
+              << leaf_size_surf << std::endl;
+    std::cout << "Increasing voxel size to " << leaf_size_surf << std::endl;
+
+    impl->downSizeFilterSurf.setLeafSize(leaf_size_surf, leaf_size_surf, leaf_size_surf);
+    impl->downSizeFilterSurf.setInputCloud(impl->feats_undistort);
+    impl->downSizeFilterSurf.filter(*(impl->feats_down_body));
+    impl->feats_down_size = impl->feats_down_body->points.size();
+  }
+  impl->downSizeFilterSurf.setLeafSize(leaf_size_surf0, leaf_size_surf0, leaf_size_surf0);
 
   // Initialize the map kdtree if needed
   if (impl->ikdtree.Root_Node == nullptr) {

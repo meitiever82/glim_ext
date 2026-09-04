@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.22)
 project(glim_ext)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_LIST_DIR}/cmake")
@@ -49,6 +49,9 @@ list(APPEND glim_ext_LIBRARIES glim_ext)
 # Examples
 add_subdirectory(modules/example/glim_callback_demo)
 list(APPEND glim_ext_LIBRARIES glim_callback_demo)
+
+add_subdirectory(modules/example/logger_hook_demo)
+list(APPEND glim_ext_LIBRARIES logger_hook_demo)
 
 # Odometry estimation modules
 if(ENABLE_ORBSLAM)
@@ -152,7 +155,6 @@ if(DEFINED ENV{ROS_VERSION})
   if($ENV{ROS_VERSION} EQUAL 2)
     # ROS2
     install(DIRECTORY config DESTINATION share/glim_ext)
-    ament_target_dependencies(glim_ext glim)
     ament_export_libraries(${glim_ext_LIBRARIES})
     ament_export_include_directories(include)
     ament_package()

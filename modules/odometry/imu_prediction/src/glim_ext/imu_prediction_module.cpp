@@ -5,6 +5,8 @@
 #include <glim/util/config.hpp>
 #include <glim/util/logging.hpp>
 #include <glim/odometry/callbacks.hpp>
+#include <glim/mapping/callbacks.hpp>
+#include <glim/mapping/sub_map.hpp>
 #include <glim_ext/util/config_ext.hpp>
 
 #include <guik/viewer/light_viewer.hpp>
@@ -20,17 +22,39 @@ IMUPredictionModule::IMUPredictionModule() : logger(create_module_logger("imupre
   imu_params->integrationCovariance = gtsam::Matrix3::Identity();
   integration = std::make_unique<gtsam::PreintegratedImuMeasurements>(imu_params);
 
-  const Config config(GlobalConfigExt::get_config_path("config_imu_prediction"));
-  min_publish_interval = 1.0 / config.param<double>("imu_prediction", "max_publish_rate", 25.0);
+  const std::string config_path = GlobalConfigExt::get_config_path("config_imu_prediction");
+  logger->info("config_path: {}", config_path);
+
+  const Config config(config_path);
+  publish_interval = 1.0 / config.param<double>("imu_prediction", "max_publish_rate", 1000.0);
+
+  next_publish_time = 0.0;
   last_publish_time = 0.0;
+
+  T_world_odom.setIdentity();
+  locked_T_world_odom.setIdentity();
 
   const Config config_ros(GlobalConfig::get_config_path("config_ros"));
   imu_frame_id = config_ros.param<std::string>("glim_ros", "imu_frame_id", "");
   odom_frame_id = config_ros.param<std::string>("glim_ros", "odom_frame_id", "");
+  map_frame_id = config_ros.param<std::string>("glim_ros", "map_frame_id", "");
 
   OdometryEstimationCallbacks::on_insert_imu.add(
     [this](const double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel) { this->on_insert_imu(stamp, linear_acc, angular_vel); });
   OdometryEstimationCallbacks::on_update_new_frame.add([this](const EstimationFrame::ConstPtr& frame) { this->on_update_new_frame(frame); });
+  GlobalMappingCallbacks::on_update_submaps.add([this](const std::vector<SubMap::Ptr>& submaps) {
+    if (submaps.empty()) {
+      return;
+    }
+
+    const auto& latest_submap = submaps.back();
+    const auto& T_world_origin = latest_submap->T_world_origin;
+    const auto& T_odom_origin = latest_submap->origin_odom_frame()->T_world_imu;
+    const Eigen::Isometry3d T_world_odom = T_world_origin * T_odom_origin.inverse();
+
+    std::lock_guard<std::mutex> lock(mutex_T_world_odom);
+    this->locked_T_world_odom = T_world_odom;
+  });
 
   logger->info("ready");
 }
@@ -101,6 +125,9 @@ void IMUPredictionModule::on_update_new_frame(const EstimationFrame::ConstPtr& f
   }
 
   imu_queue.erase(imu_queue.begin(), imu_queue.begin() + remove_loc);
+
+  std::lock_guard<std::mutex> lock(mutex_T_world_odom);
+  T_world_odom = locked_T_world_odom;
 }
 
 }  // namespace glim
