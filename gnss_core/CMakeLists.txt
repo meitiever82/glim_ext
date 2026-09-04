@@ -37,6 +37,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_types gnss_core)
   ament_add_gtest(test_geodetic test/test_geodetic.cpp)
   target_link_libraries(test_geodetic gnss_core)
+  ament_add_gtest(test_rtk_fix_buffer test/test_rtk_fix_buffer.cpp)
+  target_link_libraries(test_rtk_fix_buffer gnss_core)
 endif()
 
 ament_package()
