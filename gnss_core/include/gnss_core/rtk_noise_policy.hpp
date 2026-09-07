@@ -12,7 +12,9 @@ struct NoisePolicyConfig {
   double max_diff_age = 15.0;
   int min_sats = 6;
   std::array<double, 5> quality_sigma_scale = {0.0, 50.0, 20.0, 5.0, 1.0};
-  Eigen::Vector3d sigma_floor = {0.02, 0.02, 0.05};
+  // σ 下限(m,E/N/U)。杆臂未标定期间默认 1.0 m(spec §7.5 v2,防止未建模的杆臂误差被当高精度约束);
+  // 杆臂标定后改为 {0.02, 0.02, 0.05}。
+  Eigen::Vector3d sigma_floor = {1.0, 1.0, 1.0};
   double vertical_scale = 3.0;
   std::string robust_kernel = "huber";    // none|huber|cauchy
   double robust_delta = 1.345;
@@ -20,6 +22,8 @@ struct NoisePolicyConfig {
 
 class RtkNoisePolicy {
 public:
+  // cfg 非法(min_quality∉[0,4]、sigma_floor 任一 ≤0、robust_kernel 非 none|huber|cauchy)
+  // 抛 std::invalid_argument
   explicit RtkNoisePolicy(const NoisePolicyConfig& cfg);
   gtsam::SharedNoiseModel evaluate(const RtkFixSample& s) const;  // 过门限→model,否则 nullptr
 private:

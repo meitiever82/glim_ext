@@ -7,8 +7,9 @@ FrameAligner::FrameAligner(double min_baseline) : min_baseline_(min_baseline) {}
 void FrameAligner::add(const Eigen::Vector3d& submap_xyz, const Eigen::Vector3d& enu) {
   est_.push_back(submap_xyz);
   enu_.push_back(enu);
-  if (initialized_ || est_.size() < 2) return;
+  if (initialized_ || est_.size() < 2) return;   // 已冻结:只累积不重解
   if ((est_.back() - est_.front()).norm() < min_baseline_) return;
+  if ((enu_.back() - enu_.front()).norm() < min_baseline_) return;   // ENU 侧也要有基线
 
   // 2D Umeyama(仅 yaw + 平移):在 XY 平面上对齐 enu → est
   Eigen::Vector3d mean_est = Eigen::Vector3d::Zero(), mean_enu = Eigen::Vector3d::Zero();
@@ -22,6 +23,7 @@ void FrameAligner::add(const Eigen::Vector3d& submap_xyz, const Eigen::Vector3d&
     cov += (enu_[i].head<2>() - mean_enu.head<2>()) * (est_[i].head<2>() - mean_est.head<2>()).transpose();
 
   Eigen::JacobiSVD<Eigen::Matrix2d> svd(cov, Eigen::ComputeFullU | Eigen::ComputeFullV);
+  if (svd.singularValues()(0) <= 1e-6) return;   // 协方差退化(一侧静止):yaw 不可观,不初始化
   Eigen::Matrix2d R2 = svd.matrixV() * svd.matrixU().transpose();
   if (R2.determinant() < 0) { Eigen::Matrix2d V = svd.matrixV(); V.col(1) *= -1; R2 = V * svd.matrixU().transpose(); }
 

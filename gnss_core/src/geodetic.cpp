@@ -14,4 +14,10 @@ Eigen::Vector3d LlaToEnu::forward(double lat, double lon, double alt) const {
   return {e, n, u};
 }
 
+Eigen::Vector3d LlaToEnu::reverse(const Eigen::Vector3d& enu) const {
+  double lat, lon, alt;
+  impl_->Reverse(enu.x(), enu.y(), enu.z(), lat, lon, alt);
+  return {lat, lon, alt};
+}
+
 }  // namespace gnss_core

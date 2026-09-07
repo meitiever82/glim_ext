@@ -6,12 +6,13 @@ namespace GeographicLib { class LocalCartesian; }
 
 namespace gnss_core {
 
-// 经纬高 → 局部 ENU(米)。原点固定于构造时给定的 lat0/lon0/alt0。
+// 经纬高 ↔ 局部 ENU(米)。原点固定于构造时给定的 lat0/lon0/alt0。
 class LlaToEnu {
 public:
   LlaToEnu(double lat0, double lon0, double alt0);
   ~LlaToEnu();
   Eigen::Vector3d forward(double lat, double lon, double alt) const;  // 返回 [E,N,U]
+  Eigen::Vector3d reverse(const Eigen::Vector3d& enu) const;          // [E,N,U] → [lat,lon,alt](deg/deg/m)
 private:
   std::unique_ptr<GeographicLib::LocalCartesian> impl_;
 };

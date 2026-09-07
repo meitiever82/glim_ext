@@ -39,3 +39,48 @@ TEST(RtkFixBuffer, PruneDropsOld) {
   b.prune(30.0, 161.0);                     // 丢弃 < 131
   EXPECT_EQ(b.size(), 1u);
 }
+
+TEST(RtkFixBuffer, LatestStampTracksBack) {
+  RtkFixBuffer b;
+  EXPECT_DOUBLE_EQ(b.latest_stamp(), 0.0);          // 空缓冲
+  b.push(mk(100.0, Quality::FIXED, 44.0));
+  EXPECT_DOUBLE_EQ(b.latest_stamp(), 100.0);
+  b.push(mk(102.0, Quality::FIXED, 46.0));
+  EXPECT_DOUBLE_EQ(b.latest_stamp(), 102.0);
+  b.push(mk(101.0, Quality::FIXED, 45.0));          // 乱序到达:插入中间,不改 latest
+  EXPECT_DOUBLE_EQ(b.latest_stamp(), 102.0);
+  b.prune(0.5, b.latest_stamp());                   // 以数据时间 prune,只剩 102
+  EXPECT_EQ(b.size(), 1u);
+  EXPECT_DOUBLE_EQ(b.latest_stamp(), 102.0);
+}
+
+TEST(RtkFixBuffer, InterpolatesRawStamps) {
+  RtkFixBuffer b;
+  auto a = mk(100.0, Quality::FIXED, 44.0); a.header_stamp = 100.02; a.gnss_time = 100.0;
+  auto c = mk(102.0, Quality::FIXED, 46.0); c.header_stamp = 102.04; c.gnss_time = 102.0;
+  b.push(a); b.push(c);
+  auto r = b.interpolate(101.0);
+  ASSERT_TRUE(r.has_value());
+  EXPECT_DOUBLE_EQ(r->stamp, 101.0);
+  EXPECT_NEAR(r->header_stamp, 101.03, 1e-9);       // 线性插值
+  EXPECT_NEAR(r->gnss_time, 101.0, 1e-9);
+}
+
+TEST(RtkFixBuffer, MaxGapRejectsWideBracket) {
+  RtkFixBuffer b;
+  b.push(mk(100.0, Quality::FIXED, 44.0));
+  b.push(mk(160.0, Quality::FIXED, 46.0));   // 两端相隔 60 s
+  EXPECT_FALSE(b.interpolate(130.0, 2.5).has_value());   // 超过 max_gap_s → nullopt
+  EXPECT_TRUE(b.interpolate(130.0, 60.0).has_value());   // 恰好等于 gap 仍可插值
+  EXPECT_TRUE(b.interpolate(130.0).has_value());         // 不传 → 无限制,保持旧行为
+}
+
+TEST(RtkFixBuffer, OldestStampTracksFront) {
+  RtkFixBuffer b;
+  EXPECT_DOUBLE_EQ(b.oldest_stamp(), 0.0);          // 空缓冲
+  b.push(mk(102.0, Quality::FIXED, 46.0));
+  b.push(mk(100.0, Quality::FIXED, 44.0));          // 乱序到达:插到最前
+  EXPECT_DOUBLE_EQ(b.oldest_stamp(), 100.0);
+  b.prune(1.0, b.latest_stamp());                   // 丢弃 < 101 → 只剩 102
+  EXPECT_DOUBLE_EQ(b.oldest_stamp(), 102.0);
+}

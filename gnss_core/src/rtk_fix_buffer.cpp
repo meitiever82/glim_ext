@@ -10,7 +10,7 @@ void RtkFixBuffer::push(const RtkFixSample& s) {
   buf_.insert(it, s);
 }
 
-std::optional<RtkFixSample> RtkFixBuffer::interpolate(double t) const {
+std::optional<RtkFixSample> RtkFixBuffer::interpolate(double t, double max_gap_s) const {
   if (buf_.size() < 2) return std::nullopt;
   if (t < buf_.front().stamp || t > buf_.back().stamp) return std::nullopt;
   auto right = std::lower_bound(buf_.begin(), buf_.end(), t,
@@ -18,9 +18,12 @@ std::optional<RtkFixSample> RtkFixBuffer::interpolate(double t) const {
   if (right == buf_.begin()) return *right;          // t == front
   auto left = right - 1;
   const double tl = left->stamp, tr = right->stamp;
+  if (tr - tl > max_gap_s) return std::nullopt;      // 两端间隔过大,拒绝跨断链插值
   const double p = (tr > tl) ? (t - tl) / (tr - tl) : 0.0;
   RtkFixSample out;
   out.stamp = t;
+  out.header_stamp = (1 - p) * left->header_stamp + p * right->header_stamp;
+  out.gnss_time = (1 - p) * left->gnss_time + p * right->gnss_time;
   out.lat = (1 - p) * left->lat + p * right->lat;
   out.lon = (1 - p) * left->lon + p * right->lon;
   out.alt = (1 - p) * left->alt + p * right->alt;
@@ -35,6 +38,7 @@ std::optional<RtkFixSample> RtkFixBuffer::interpolate(double t) const {
 }
 
 void RtkFixBuffer::prune(double horizon_s, double now) {
+  // now 为数据时间(见头文件),不是壁钟
   const double cutoff = now - horizon_s;
   while (!buf_.empty() && buf_.front().stamp < cutoff) buf_.pop_front();
 }
