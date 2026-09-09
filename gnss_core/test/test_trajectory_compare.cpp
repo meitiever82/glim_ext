@@ -21,8 +21,9 @@ TEST(TrajCompare, PerfectMatchZeroRmse) {
 
 TEST(TrajCompare, KnownHorizontalOffset) {
   // test 相对 ref 北偏 ~1m。RTKLIB Q=2 才是 float(Q=3 是 SBAS,映射为 NONE)。
+  // ref 用 FIXED(Q=1):默认 ref_min_q=1 只接受 FIXED 基准;分档按 test 的 Q。
   const double dlat = 1.0 / 111320.0;
-  std::vector<PosRecord> ref = {rec(100, 44.5, 90.28, 617, 2, 0.1)};
+  std::vector<PosRecord> ref = {rec(100, 44.5, 90.28, 617, 1, 0.01)};
   std::vector<PosRecord> test = {rec(100, 44.5 + dlat, 90.28, 617, 2, 0.1)};
   auto s = compare_by_quality(ref, test);
   ASSERT_EQ(s.count(Quality::FLOAT), 1u);
@@ -58,7 +59,7 @@ TEST(TrajCompare, UnpairedBeyondToleranceSkipped) {
 
 TEST(TrajCompare, ZeroSigmaCountedButExcludedFromRatio) {
   const double dlat = 1.0 / 111320.0;
-  std::vector<PosRecord> ref = {rec(100, 44.5, 90.28, 617, 5, 0.0), rec(101, 44.5, 90.28, 617, 5, 0.5)};
+  std::vector<PosRecord> ref = {rec(100, 44.5, 90.28, 617, 1, 0.0), rec(101, 44.5, 90.28, 617, 1, 0.5)};  // FIXED 基准
   std::vector<PosRecord> test = {rec(100, 44.5 + dlat, 90.28, 617, 5, 0.0), rec(101, 44.5 + dlat, 90.28, 617, 5, 0.5)};
   auto s = compare_by_quality(ref, test);
   ASSERT_EQ(s[Quality::SINGLE].n, 2);
@@ -78,4 +79,45 @@ TEST(TrajCompare, VerticalErrorAndMixedQualities) {
   EXPECT_NEAR(s[Quality::FIXED].rmse_v, 2.0, 1e-3);
   EXPECT_EQ(s[Quality::FLOAT].n, 1);
   EXPECT_NEAR(s[Quality::FLOAT].rmse_h, 0.0, 1e-6);
+}
+
+// ---- ref_min_q:默认只用 FIXED(Q=1) 的 ref 记录;传 0 不过滤 ----
+TEST(TrajCompare, RefFloatSkippedByDefault) {
+  std::vector<PosRecord> ref = {rec(100, 44.5, 90.28, 617, 2, 0.1),    // FLOAT ref → 默认跳过
+                                rec(101, 44.5, 90.28, 617, 1, 0.01)};  // FIXED ref
+  std::vector<PosRecord> test = {rec(100, 44.5, 90.28, 617, 1, 0.01),
+                                 rec(101, 44.5, 90.28, 617, 1, 0.01)};
+  auto s = compare_by_quality(ref, test);
+  ASSERT_EQ(s.count(Quality::FIXED), 1u);
+  EXPECT_EQ(s[Quality::FIXED].n, 1);          // 只配上 t=101
+  auto s3 = compare_by_quality(ref, test, 0.1);   // 三参数调用仍兼容,同默认
+  EXPECT_EQ(s3[Quality::FIXED].n, 1);
+}
+
+TEST(TrajCompare, RefMinQZeroUsesAllRef) {
+  std::vector<PosRecord> ref = {rec(100, 44.5, 90.28, 617, 2, 0.1),
+                                rec(101, 44.5, 90.28, 617, 1, 0.01)};
+  std::vector<PosRecord> test = {rec(100, 44.5, 90.28, 617, 1, 0.01),
+                                 rec(101, 44.5, 90.28, 617, 1, 0.01)};
+  auto s = compare_by_quality(ref, test, 0.1, 0);
+  ASSERT_EQ(s.count(Quality::FIXED), 1u);
+  EXPECT_EQ(s[Quality::FIXED].n, 2);
+}
+
+TEST(TrajCompare, RefMinQTwoAcceptsFloatRejectsNoFix) {
+  std::vector<PosRecord> ref = {rec(100, 44.5, 90.28, 617, 2, 0.1),   // FLOAT:ref_min_q=2 接受
+                                rec(101, 44.5, 90.28, 617, 5, 1.0),   // SINGLE:跳过
+                                rec(102, 44.5, 90.28, 617, 0, 0.0)};  // Q=0 无解:跳过
+  std::vector<PosRecord> test = {rec(100, 44.5, 90.28, 617, 1, 0.01),
+                                 rec(101, 44.5, 90.28, 617, 1, 0.01),
+                                 rec(102, 44.5, 90.28, 617, 1, 0.01)};
+  auto s = compare_by_quality(ref, test, 0.1, 2);
+  ASSERT_EQ(s.count(Quality::FIXED), 1u);
+  EXPECT_EQ(s[Quality::FIXED].n, 1);
+}
+
+TEST(TrajCompare, AllRefFilteredReturnsEmpty) {
+  std::vector<PosRecord> ref = {rec(100, 44.5, 90.28, 617, 5, 1.0)};
+  std::vector<PosRecord> test = {rec(100, 44.5, 90.28, 617, 1, 0.01)};
+  EXPECT_TRUE(compare_by_quality(ref, test).empty());
 }

@@ -16,6 +16,8 @@ option(ENABLE_FASTLIO2 "Enable FAST-LIO2 odometry" OFF)
 option(ENABLE_SCAN_CONTEXT "Enable ScanContext Loop Detector" OFF)
 option(ENABLE_DBOW "Enable DBoW Loop Detector" OFF)
 option(ENABLE_GNSS "Enable GNSS module (ROS1 is not supported)" ON)
+option(ENABLE_RTK_GLOBAL "Enable quality-aware RTK global constraint module (ROS2 only; needs gnss_core + gnss_msgs)" ON)
+option(ENABLE_RTK_ODOMETRY "Enable quality-aware RTK odometry-frame constraint module (ROS2 only; needs gnss_core + gnss_msgs)" ON)
 option(ENABLE_FLATEARTHER "Enable flat earth assumption module" ON)
 
 #################
@@ -104,6 +106,16 @@ endif()
 if(ENABLE_GNSS)
   add_subdirectory(modules/mapping/gnss_global)
   list(APPEND glim_ext_LIBRARIES gnss_global)
+endif()
+
+if(ENABLE_RTK_GLOBAL AND DEFINED ENV{ROS_VERSION} AND "$ENV{ROS_VERSION}" EQUAL 2)
+  add_subdirectory(modules/mapping/rtk_global)
+  list(APPEND glim_ext_LIBRARIES rtk_global)
+endif()
+
+if(ENABLE_RTK_ODOMETRY AND DEFINED ENV{ROS_VERSION} AND "$ENV{ROS_VERSION}" EQUAL 2)
+  add_subdirectory(modules/odometry/rtk_odometry)
+  list(APPEND glim_ext_LIBRARIES rtk_odometry)
 endif()
 
 if(ENABLE_FLATEARTHER)

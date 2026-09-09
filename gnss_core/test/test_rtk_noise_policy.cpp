@@ -109,3 +109,62 @@ TEST(NoisePolicy, NonFiniteSigmaReturnsNullptr) {
   auto s2 = good(); s2.sigma_enu = {0.01, std::numeric_limits<double>::infinity(), 0.02};
   EXPECT_EQ(p.evaluate(s2), nullptr);
 }
+
+// ---- evaluate_verdict:每种拒绝原因各一条 ----
+TEST(NoisePolicyVerdict, AcceptedHasModelAndNoneReason) {
+  RtkNoisePolicy p{NoisePolicyConfig{}};
+  auto v = p.evaluate_verdict(good());
+  EXPECT_TRUE(static_cast<bool>(v));
+  ASSERT_NE(v.model, nullptr);
+  EXPECT_EQ(v.reason, RejectReason::None);
+}
+
+TEST(NoisePolicyVerdict, QualityOutOfRange) {
+  NoisePolicyConfig cfg; cfg.min_quality = 0;
+  RtkNoisePolicy p{cfg};
+  auto s = good(); s.quality = static_cast<Quality>(7);
+  auto v = p.evaluate_verdict(s);
+  EXPECT_FALSE(static_cast<bool>(v));
+  EXPECT_EQ(v.reason, RejectReason::QualityOutOfRange);
+}
+
+TEST(NoisePolicyVerdict, BelowMinQuality) {
+  RtkNoisePolicy p{NoisePolicyConfig{}};
+  auto s = good(); s.quality = Quality::SINGLE;
+  auto v = p.evaluate_verdict(s);
+  EXPECT_FALSE(static_cast<bool>(v));
+  EXPECT_EQ(v.reason, RejectReason::BelowMinQuality);
+}
+
+TEST(NoisePolicyVerdict, DiffAge) {
+  RtkNoisePolicy p{NoisePolicyConfig{}};
+  auto s = good(); s.diff_age = 30.0;
+  EXPECT_EQ(p.evaluate_verdict(s).reason, RejectReason::DiffAge);
+}
+
+TEST(NoisePolicyVerdict, Sats) {
+  RtkNoisePolicy p{NoisePolicyConfig{}};
+  auto s = good(); s.sats_used = 4;
+  EXPECT_EQ(p.evaluate_verdict(s).reason, RejectReason::Sats);
+}
+
+TEST(NoisePolicyVerdict, NonFiniteSigma) {
+  RtkNoisePolicy p{NoisePolicyConfig{}};
+  auto s = good(); s.sigma_enu = {0.01, std::numeric_limits<double>::infinity(), 0.02};
+  EXPECT_EQ(p.evaluate_verdict(s).reason, RejectReason::NonFiniteSigma);
+}
+
+TEST(NoisePolicyVerdict, NonPositiveScale) {
+  NoisePolicyConfig cfg; cfg.min_quality = 0;
+  cfg.quality_sigma_scale = {0.0, 50.0, 20.0, 5.0, 1.0};   // NONE(0) 的 scale 为 0
+  RtkNoisePolicy p{cfg};
+  auto s = good(); s.quality = static_cast<Quality>(0);
+  EXPECT_EQ(p.evaluate_verdict(s).reason, RejectReason::NonPositiveScale);
+}
+
+TEST(NoisePolicyVerdict, EvaluateMatchesVerdictModel) {
+  RtkNoisePolicy p{NoisePolicyConfig{}};
+  auto s = good(); s.quality = Quality::SINGLE;
+  EXPECT_EQ(p.evaluate(s), nullptr);
+  EXPECT_NE(p.evaluate(good()), nullptr);
+}

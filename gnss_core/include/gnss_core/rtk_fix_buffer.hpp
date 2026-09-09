@@ -12,7 +12,7 @@ class RtkFixBuffer {
 public:
   void push(const RtkFixSample& s);              // 按 stamp 递增维护;乱序到达则插到正确位置
 
-  // t 落在两样本之间 → 线性插值 lat/lon/alt/sigma/diff_age/heading/header_stamp/gnss_time,
+  // t 落在两样本之间 → 线性插值 lat/lon/alt/sigma/diff_age/header_stamp/gnss_time(heading 按最短弧回绕插值,结果∈[0,360)),
   // quality 取两端较差者(数值较小者),sats_used 取较小者;
   // t 越界、缓冲不足两个样本、或左右样本间隔 > max_gap_s → std::nullopt。
   // max_gap_s 默认无穷(不限制);在线场景建议传 2~3 s,避免跨越长时间断链的假插值。

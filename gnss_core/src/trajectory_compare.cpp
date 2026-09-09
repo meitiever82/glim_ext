@@ -27,16 +27,22 @@ double median_of(std::vector<double> v) {
 }  // namespace
 
 std::map<Quality, QualityStats> compare_by_quality(
-    const std::vector<PosRecord>& ref, const std::vector<PosRecord>& test, double tol_s) {
+    const std::vector<PosRecord>& ref, const std::vector<PosRecord>& test, double tol_s,
+    int ref_min_q) {
   std::map<Quality, QualityStats> out;
   if (ref.empty() || test.empty()) return out;
 
-  // ref 按 stamp 排序后的索引,便于二分
-  std::vector<size_t> order(ref.size());
-  for (size_t i = 0; i < ref.size(); ++i) order[i] = i;
+  // 过滤后的 ref 索引(ref_min_q=0 不过滤),按 stamp 排序,便于二分
+  std::vector<size_t> order;
+  order.reserve(ref.size());
+  for (size_t i = 0; i < ref.size(); ++i) {
+    if (ref_min_q > 0 && (ref[i].q == 0 || ref[i].q > ref_min_q)) continue;
+    order.push_back(i);
+  }
+  if (order.empty()) return out;
   std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return ref[a].stamp < ref[b].stamp; });
-  std::vector<double> ref_stamps(ref.size());
-  for (size_t i = 0; i < ref.size(); ++i) ref_stamps[i] = ref[order[i]].stamp;
+  std::vector<double> ref_stamps(order.size());
+  for (size_t i = 0; i < order.size(); ++i) ref_stamps[i] = ref[order[i]].stamp;
 
   std::unique_ptr<LlaToEnu> conv;   // 原点:首个配对成功的 ref 记录
   std::map<Quality, std::vector<Sample>> samples;

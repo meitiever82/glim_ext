@@ -21,6 +21,7 @@ add_library(gnss_core SHARED
   src/pos_io.cpp
   src/synth.cpp
   src/lever_arm_estimator.cpp
+  src/anchor_pipeline.cpp
 )
 target_include_directories(gnss_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -76,6 +77,7 @@ if(BUILD_TESTING)
   gnss_core_add_test(test_trajectory_compare)
   gnss_core_add_test(test_synth)
   gnss_core_add_test(test_lever_arm_estimator)
+  gnss_core_add_test(test_anchor_pipeline)
 endif()
 
 if(ament_cmake_FOUND)

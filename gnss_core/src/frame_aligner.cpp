@@ -5,9 +5,10 @@ namespace gnss_core {
 FrameAligner::FrameAligner(double min_baseline) : min_baseline_(min_baseline) {}
 
 void FrameAligner::add(const Eigen::Vector3d& submap_xyz, const Eigen::Vector3d& enu) {
+  if (initialized_) return;   // 冻结:不再累积(odometry 壳以帧率喂,长时间运行内存才不会增长)
   est_.push_back(submap_xyz);
   enu_.push_back(enu);
-  if (initialized_ || est_.size() < 2) return;   // 已冻结:只累积不重解
+  if (est_.size() < 2) return;   // 已冻结:只累积不重解
   if ((est_.back() - est_.front()).norm() < min_baseline_) return;
   if ((enu_.back() - enu_.front()).norm() < min_baseline_) return;   // ENU 侧也要有基线
 

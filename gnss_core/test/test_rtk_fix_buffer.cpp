@@ -84,3 +84,33 @@ TEST(RtkFixBuffer, OldestStampTracksFront) {
   b.prune(1.0, b.latest_stamp());                   // 丢弃 < 101 → 只剩 102
   EXPECT_DOUBLE_EQ(b.oldest_stamp(), 102.0);
 }
+
+// ---- 航向回绕插值:角度差归一到 (-180,180] 后插值,结果归一到 [0,360) ----
+static double interp_heading(double h0, double h1) {
+  RtkFixBuffer b;
+  auto a = mk(100.0, Quality::FIXED, 44.0); a.heading = h0; a.heading_valid = true;
+  auto c = mk(102.0, Quality::FIXED, 44.0); c.heading = h1; c.heading_valid = true;
+  b.push(a); b.push(c);
+  auto r = b.interpolate(101.0);
+  EXPECT_TRUE(r.has_value());
+  EXPECT_TRUE(r->heading_valid);
+  return r->heading;
+}
+
+TEST(RtkFixBuffer, HeadingWrapsAcrossZero) {
+  EXPECT_NEAR(interp_heading(359.0, 1.0), 0.0, 1e-9);
+}
+
+TEST(RtkFixBuffer, HeadingWrapsAcrossZeroReverse) {
+  EXPECT_NEAR(interp_heading(10.0, 350.0), 0.0, 1e-9);
+}
+
+TEST(RtkFixBuffer, HeadingPlainMidpoint) {
+  EXPECT_NEAR(interp_heading(90.0, 180.0), 135.0, 1e-9);
+}
+
+TEST(RtkFixBuffer, HeadingResultInZeroTo360) {
+  double h = interp_heading(350.0, 10.0);   // 中点 0
+  EXPECT_GE(h, 0.0); EXPECT_LT(h, 360.0);
+  EXPECT_NEAR(h, 0.0, 1e-9);
+}

@@ -1,4 +1,4 @@
-// calibrate_sigma_scale <ref.pos> <test.pos> [tol_s]
+// calibrate_sigma_scale <ref.pos> <test.pos> [tol_s] [ref_min_q]
 //
 // 以 ref.pos(后处理基准或质量最高的轨迹)为真值,把 test.pos 按 test 的解质量分档,
 // 打印各档 n / RMSE / 三种 "实际水平误差 / 板卡报 σ_h" 比值,并给出建议的
@@ -31,11 +31,13 @@ const char* quality_name(Quality q) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::cerr << "usage: calibrate_sigma_scale <ref.pos> <test.pos> [tol_s=0.1]\n"
-                 "  ref/test 均为 RTKLIB .pos(头部 time=GPST|UTC 自动识别,默认 GPST,闰秒 18 s)\n";
+    std::cerr << "usage: calibrate_sigma_scale <ref.pos> <test.pos> [tol_s=0.1] [ref_min_q=1]\n"
+                 "  ref/test 均为 RTKLIB .pos(头部 time=GPST|UTC 自动识别,默认 GPST,闰秒 18 s)\n"
+                 "  ref_min_q: 只用 Q<=ref_min_q 的 ref 记录作基准(1=仅 FIXED;0=不过滤)\n";
     return 1;
   }
   const double tol = (argc > 3) ? std::atof(argv[3]) : 0.1;
+  const int ref_min_q = (argc > 4) ? std::atoi(argv[4]) : 1;
 
   std::vector<PosRecord> ref, test;
   try {
@@ -45,11 +47,12 @@ int main(int argc, char** argv) {
     std::cerr << "error: " << e.what() << "\n";
     return 2;
   }
-  const auto stats = compare_by_quality(ref, test, tol);
+  const auto stats = compare_by_quality(ref, test, tol, ref_min_q);
 
   std::printf("ref : %s (%zu records)\n", argv[1], ref.size());
   std::printf("test: %s (%zu records)\n", argv[2], test.size());
-  std::printf("pair tolerance: %.3f s\n\n", tol);
+  std::printf("pair tolerance: %.3f s; ref_min_q: %d (%s)\n\n", tol, ref_min_q,
+              ref_min_q > 0 ? "ref records with Q==0 or Q>ref_min_q ignored" : "no ref filtering");
   if (stats.empty()) {
     std::printf("no epochs paired within tolerance -- check time system (GPST vs UTC) and overlap.\n");
     return 3;
@@ -75,5 +78,8 @@ int main(int argc, char** argv) {
     std::printf("\nnote: FIXED tier raw median ratio = %.3f; if far from 1, also scale sigma_floor / "
                 "the board sigma globally by this amount.\n", fixed_ratio);
   }
+  std::printf("note: ratio_median is biased -- for a well-calibrated board err_h/sigma_h is "
+              "Rayleigh(1/sqrt2), median ~= 0.83, not 1; ratio_rms (expected 1) is the unbiased "
+              "estimate but is outlier-sensitive. Read both.\n");
   return 0;
 }

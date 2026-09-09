@@ -6,7 +6,7 @@ spec §9(v2)。这些工具只依赖 `gnss_core`(纯 C++)与 Python 3,不需要 
 | 文件 | 用途 |
 |---|---|
 | `calibrate_sigma_scale.cpp` | `calibrate_sigma_scale <ref.pos> <test.pos> [tol_s]`:按 test 解质量分档统计 RMSE 与 "实际误差 / 板卡 σ" 三种比值,给出建议系数 |
-| `export_bag_to_pos.py` | rtk-monitor 既有录包(SQLite)→ 标准 `.pos`(轨迹 1–3:can / gpchc / rtkrcv)。**SQLite 读取部分是骨架,现场按 schema 填**(见文件头 TODO);`--pos` 输入路径可直接用 |
+| `export_bag_to_pos.py` | rtk-monitor 既有录包(SQLite `epochs` 表)→ 标准 `.pos`(轨迹 1–3:can / gpchc / rtkrcv);`--pos` 输入做时间系统/列规范化。测试:`python3 -m unittest tests/test_export_bag_to_pos.py` |
 | `make_synthetic_pos.py` | 生成一对已知偏移的合成 `.pos`,用于自检工具本身 |
 | `synth_rtk_fix.cpp` | GLIM 轨迹(TUM)→ 合成 RTK 观测(含四种故障注入)→ `.pos`(+ `--truth` 真值);spec §12.3,Task 13 |
 | `pos_to_rtkfix_bag.py` | `.pos` → `gnss_msgs/RtkFix` rosbag2,`--merge` 与 LiDAR bag 归并成单包。**只能在 Orin 跑,未在无 ROS 环境验证** |
@@ -26,6 +26,24 @@ spec §9(v2)。这些工具只依赖 `gnss_core`(纯 C++)与 Python 3,不需要 
 | 4 | 后处理基准(参考真值) | `rnx2rtkp -p 3 -k conf.conf rover.obs base.obs nav -o ref.pos` | **GPST**(RTKLIB 默认;头部 `time=GPST`) |
 
 `ref` 优先选 4;没有后处理时取质量最高的一条(通常 3)。
+
+### `export_bag_to_pos.py --db`
+
+```bash
+export_bag_to_pos.py --db data/2026-09-03.db --src can    --out can.pos
+export_bag_to_pos.py --db data/2026-09-03.db --src rtkrcv --out rtkrcv.pos --t0 1757300000 --t1 1757303600
+export_bag_to_pos.py --db data/2026-09-03.db --src gpchc  --out gpchc.pos --keep-nofix
+```
+
+rtk-monitor 的 schema(`rtk_monitor/storage/epochs.py`):
+`epochs(t REAL UTC unix 秒, src ∈{rtkrcv,gpchc,can}, q, sats, age, lat, lon, alt, sde, sdn, sdu, ratio, …)`。
+
+- `q` 按 `src` 解释:`rtkrcv` 是 RTKLIB Q 原样透传;`gpchc`/`can` 是 CGI-610 `satellite_status`,映射
+  4/8→fix(1)、5/9→float(2)、2/7→dgps(4)、1/6/3→single(5)、0/未知→无解。
+- 无解历元默认**跳过**;`--keep-nofix` 保留并写 `Q=0`(`read_pos` 映射为 NONE;`compare_by_quality`
+  默认 `ref_min_q=1` 时作为 ref 也会被忽略)。
+- DB 的 σ 列顺序是 `sde sdn sdu`,输出按 `.pos` 约定写 `sdn sde sdu`;`sats/age/ratio/σ` 为 NULL 写 0。
+- `--t0/--t1` 为 UTC unix 秒闭区间;输出头固定 `time=UTC`,按时间升序。
 
 **时间系统**:`gnss_core::read_pos` 会读 `%` 头里的 `time=GPST` / `time=UTC` 并统一成 UTC unix 秒
 (GPST 减 18 s 闰秒,可配)。**没有头部标注时按 GPST 处理**(RTKLIB 约定)。如果 `calibrate_sigma_scale`
@@ -54,8 +72,14 @@ Orin 上 colcon 构建后可执行在 `install/gnss_core/lib/gnss_core/calibrate
 
 ```bash
 python3 gnss_core/tools/make_synthetic_pos.py /tmp/synth      # 600 历元,FIXED/FLOAT/SINGLE 各 200
-./build/calibrate_sigma_scale /tmp/synth/synth_ref.pos /tmp/synth/synth_test.pos
+./build/calibrate_sigma_scale /tmp/synth/synth_ref.pos /tmp/synth/synth_test.pos [tol_s=0.1] [ref_min_q=1]
 ```
+
+`ref_min_q`:只用 `Q<=ref_min_q` 且 `Q!=0` 的 ref 记录作基准(默认 1 = 仅 FIXED;传 0 不过滤)。
+合成 ref 全是 FIXED,默认即可;真实 rnx2rtkp 基准含 FLOAT 段时默认会把这些段剔除。
+
+**读数注意**:`ratio_median` 有偏——板卡 σ 完全可信时 `err_h/σ_h` 服从 Rayleigh(1/√2),中位数 ≈ 0.83
+而不是 1;`ratio_rms` 期望才是 1(无偏),但受外点影响。两列对照看。
 
 注入设定:FIXED 真实误差 std = 板卡 σ(σ 可信);FLOAT 真实误差是板卡 σ 的 3 倍;SINGLE 是 2 倍。
 理论期望 `ratio_rms` = 1 / 3 / 2,`ratio_median` = 0.83 × 同值(瑞利中位数 1.177σ ÷ √2)。
@@ -123,7 +147,8 @@ tools/run_injection_suite.sh <lidar_bag_dir> /tmp/inj_suite
 
 ## 6. 现场待办
 
-- [ ] `export_bag_to_pos.py::load_epochs_from_db` 按 rtk-monitor 实际 SQLite schema 实现(表名、时间列单位/系统、各源质量码 → RTKLIB Q、σ 列是否存在)
+- [x] `export_bag_to_pos.py::load_epochs_from_db` 按 rtk-monitor 实际 SQLite schema 实现(见 §1)
+- [ ] 在真实 `.db` 上跑一次 `--src can/gpchc/rtkrcv`,核对 CGI-610 状态码映射与 `t` 的时间系统(脚本假定 UTC unix 秒)
 - [ ] 拿到一段有 rnx2rtkp 后处理基准的数据,跑 `calibrate_sigma_scale ref.pos rtkrcv.pos`,把输出替换本 README §2 的合成示例
 - [ ] 结果写入 `glim_ext/config/config_rtk_global.json` 的 `quality_sigma_scale`
 - [ ] Orin 上首次运行 `pos_to_rtkfix_bag.py`(短 `.pos` 试跑 + `ros2 bag info` 核对),再跑 `run_injection_suite.sh`,把 `summary.txt` 贴到本 README

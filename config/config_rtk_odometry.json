@@ -1,0 +1,74 @@
+{
+  /*** rtk_odometry: quality-aware RTK position constraints on odometry frames (fixed-lag smoother) ***/
+  // Can run together with librtk_global.so (different graphs, separate T_world_enu).
+  //
+  // --- input ---
+  // rtk_fix_topic       : gnss_msgs/RtkFix topic (gnss_chcnav node "gnss_cgi610" publishes ~/rtk_fix)
+  // stamp_source        : "gnss_time" (board GPS time; falls back to header when 0) | "header" (ROS arrival stamp)
+  // time_offset         : seconds added to every sample time; estimate with gnss_core estimate_lever_arm
+  //
+  // --- gates: any failure -> no factor for that epoch ---
+  // min_quality         : 0 NONE, 1 SINGLE, 2 DGPS, 3 FLOAT, 4 FIXED (values > 4 are a config error)
+  // max_diff_age        : s; differential-correction outage guard
+  // min_sats            : satellites used
+  // fix_max_gap         : s; do not interpolate across an RTK gap longer than this (2-3 RTK periods)
+  //
+  // --- noise model ---
+  // quality_sigma_scale : per-tier multiplier on the board sigma [NONE, SINGLE, DGPS, FLOAT, FIXED];
+  //                       index 0 is never used (gated by min_quality). Calibrate with calibrate_sigma_scale.
+  // sigma_floor         : ENU lower bound (m). WHILE T_imu_gnss IS UNCALIBRATED KEEP THIS AT LEVER-ARM
+  //                       MAGNITUDE (~1.0 m): with a cm-level floor the Huber kernel treats the lever-arm
+  //                       residual in turns as an outlier and down-weights good fixes (spec §7.3 v2).
+  //                       After the lever arm is filled in, lower to e.g. [0.02, 0.02, 0.05].
+  // vertical_scale      : extra multiplier on the U sigma
+  // robust_kernel       : none | huber | cauchy
+  // robust_delta        : kernel parameter (Huber 1.345 ~ 95% Gaussian efficiency)
+  //
+  // --- extrinsics ---
+  // T_imu_gnss          : antenna position in the IMU frame (m). Estimate with estimate_lever_arm or measure.
+  //
+  // --- frame alignment ---
+  // min_baseline        : m of travel before T_world_enu is solved once and frozen. Deferred constraints
+  //                       for frames before bootstrap are released then, but only those still inside the
+  //                       lag window make it into the smoother (the first ~min_baseline of odometry runs
+  //                       without RTK, which is fine: it is fixed-lag, not the map).
+  // enu_origin          : [] = first accepted fix; or [lat, lon, alt] to pin the ENU origin
+  //
+  // --- odometry-specific ---
+  // smoother_lag_margin : s; a factor is only inserted for frames newer than (smoother_lag - margin)
+  //                       behind the latest frame, otherwise its key may already be marginalized.
+  //                       smoother_lag itself is read from config_odometry.
+  //
+  // --- buffer / time sanity ---
+  // fix_buffer_horizon  : s of RTK samples kept behind the latest sample. Must exceed the lag of global
+  //                       mapping behind the RTK stream plus the longest submap duration (a truck parked
+  //                       at the loading point can stretch one submap over minutes); 600 s is cheap (10 Hz).
+  // max_stamp_skew      : s; samples whose |gnss_time - header.stamp| exceeds this (+|time_offset|) are dropped
+  //                       so one bogus board time cannot flush the buffer. 0 disables.
+  "rtk_odometry": {
+    "rtk_fix_topic": "/gnss_cgi610/rtk_fix",
+    "stamp_source": "gnss_time",
+    "time_offset": 0.0,
+
+    "min_quality": 3,
+    "max_diff_age": 15.0,
+    "min_sats": 6,
+    "fix_max_gap": 2.5,
+
+    "quality_sigma_scale": [0.0, 50.0, 20.0, 5.0, 1.0],
+    "sigma_floor": [1.0, 1.0, 1.0],
+    "vertical_scale": 3.0,
+    "robust_kernel": "huber",
+    "robust_delta": 1.345,
+
+    "T_imu_gnss": [0.0, 0.0, 0.0],
+
+    "smoother_lag_margin": 1.0,
+
+    "min_baseline": 50.0,
+    "enu_origin": [],
+
+    "fix_buffer_horizon": 600.0,
+    "max_stamp_skew": 5.0
+  }
+}

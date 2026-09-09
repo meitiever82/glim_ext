@@ -9,5 +9,7 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>glim</depend>
+  <depend>gnss_core</depend>
+  <depend>gnss_msgs</depend>
 
 </package>

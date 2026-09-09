@@ -1,7 +1,21 @@
 #include "gnss_core/rtk_fix_buffer.hpp"
 #include <algorithm>
+#include <cmath>
 
 namespace gnss_core {
+
+namespace {
+// 航向按最短弧插值:差值归一到 (-180,180],插值后归一到 [0,360)
+double interpolate_heading_deg(double h0, double h1, double p) {
+  double d = std::fmod(h1 - h0, 360.0);
+  if (d <= -180.0) d += 360.0;
+  else if (d > 180.0) d -= 360.0;
+  double h = std::fmod(h0 + p * d, 360.0);
+  if (h < 0.0) h += 360.0;
+  if (h >= 360.0) h -= 360.0;   // 防 fmod 后浮点舍入到 360.0
+  return h;
+}
+}  // namespace
 
 void RtkFixBuffer::push(const RtkFixSample& s) {
   if (buf_.empty() || s.stamp >= buf_.back().stamp) { buf_.push_back(s); return; }
@@ -32,7 +46,7 @@ std::optional<RtkFixSample> RtkFixBuffer::interpolate(double t, double max_gap_s
   out.sats_used = std::min(left->sats_used, right->sats_used);
   out.quality = static_cast<Quality>(std::min(
       static_cast<uint8_t>(left->quality), static_cast<uint8_t>(right->quality)));
-  out.heading = (1 - p) * left->heading + p * right->heading;
+  out.heading = interpolate_heading_deg(left->heading, right->heading, p);
   out.heading_valid = left->heading_valid && right->heading_valid;
   return out;
 }
