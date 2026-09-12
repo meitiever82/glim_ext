@@ -6,6 +6,7 @@
 #include <chrono>
 #include <string>
 #include <thread>
+#include <vector>
 #include "gnss_bringup/local_reserver.hpp"
 using namespace gnss_bringup;
 
@@ -126,4 +127,52 @@ TEST(LocalReserver, StopWithoutStartLeavesNoBoundPort) {
   r.stop();
   EXPECT_EQ(r.bound_port(), -1);
   EXPECT_EQ(r.client_count(), 0u);
+}
+
+// --- Fix-round-1 additions: direct coverage of broadcast()'s own drop policy ---
+
+TEST(LocalReserver, BroadcastDropsAStalledClientWithoutBlocking) {
+  LocalReserver r;
+  ASSERT_TRUE(r.start(0));
+  const int c = connect_to(r.bound_port());
+  ASSERT_GE(c, 0);
+  ASSERT_TRUE(wait_clients(r, 1));
+
+  // 故意不读:让内核发送缓冲被灌满,逼 broadcast() 走 EAGAIN/短写的丢弃
+  // 路径,而不是像 DropsDisconnectedClientFromCount 那样靠对端整个断开连接
+  // 触发 accept_loop 自己的 recv()==0 检测——这里要单独证明 broadcast()
+  // 本身的丢弃逻辑确实起作用,而且不会被一个不读数据的客户端拖住。
+  const std::string chunk(64 * 1024, 'x');  // 64KiB,远大于典型默认发送缓冲
+  const auto t0 = std::chrono::steady_clock::now();
+  bool dropped = false;
+  for (int i = 0; i < 2000 && !dropped; ++i) {
+    r.broadcast(reinterpret_cast<const uint8_t*>(chunk.data()), chunk.size());
+    if (r.client_count() == 0) dropped = true;
+  }
+  const auto elapsed = std::chrono::steady_clock::now() - t0;
+  EXPECT_TRUE(dropped) << "写不动的客户端始终没有被摘除";
+  // broadcast() 本身绝不阻塞:哪怕客户端从不读、每次都要面对 64KiB 的写,
+  // 2000 次调用也应该在几秒内就把它摘掉,不应该顶到测试框架的超时量级。
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(), 10);
+  ::close(c);
+  r.stop();
+}
+
+TEST(LocalReserver, BroadcastDeliversMultipleChunksInOrderExactlyOnce) {
+  LocalReserver r;
+  ASSERT_TRUE(r.start(0));
+  const int c = connect_to(r.bound_port());
+  ASSERT_GE(c, 0);
+  ASSERT_TRUE(wait_clients(r, 1));
+
+  const std::vector<std::string> chunks = {"first-", "second-", "third"};
+  std::string expected;
+  for (const auto& chunk : chunks) {
+    r.broadcast(reinterpret_cast<const uint8_t*>(chunk.data()), chunk.size());
+    expected += chunk;
+  }
+  // 顺序、恰好一次、不被篡改地送达——LocalReserver 存在的唯一理由。
+  EXPECT_EQ(recv_n(c, expected.size()), expected);
+  ::close(c);
+  r.stop();
 }
