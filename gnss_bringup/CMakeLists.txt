@@ -1,0 +1,37 @@
+cmake_minimum_required(VERSION 3.16)
+project(gnss_bringup)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_compile_options(-Wall -Wextra)
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(gnss_msgs REQUIRED)
+# gnss_core 的 ament_cmake_export_dependencies-extras.cmake 会重新 find_package(GeographicLib),
+# 但不会带上 gnss_core 自己 CMakeLists.txt 里追加的 CMAKE_MODULE_PATH,
+# 下游包(本包)必须自己补上,否则找不到 FindGeographicLib.cmake。
+list(APPEND CMAKE_MODULE_PATH "/usr/share/cmake/geographiclib")
+find_package(gnss_core REQUIRED)
+
+# 不依赖 ROS 的 I/O 与进程管理,便于单测
+add_library(gnss_bringup_io SHARED
+  src/tcp_stream.cpp
+)
+target_include_directories(gnss_bringup_io PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(gnss_bringup_io pthread)
+
+install(DIRECTORY include/ DESTINATION include)
+install(TARGETS gnss_bringup_io EXPORT gnss_bringup-targets
+  LIBRARY DESTINATION lib ARCHIVE DESTINATION lib RUNTIME DESTINATION bin)
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_tcp_stream test/test_tcp_stream.cpp)
+  target_link_libraries(test_tcp_stream gnss_bringup_io)
+endif()
+
+ament_export_targets(gnss_bringup-targets HAS_LIBRARY_TARGET)
+ament_package()
