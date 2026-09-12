@@ -27,6 +27,11 @@ install(DIRECTORY include/ DESTINATION include)
 install(TARGETS gnss_bringup_io EXPORT gnss_bringup-targets
   LIBRARY DESTINATION lib ARCHIVE DESTINATION lib RUNTIME DESTINATION bin)
 
+add_executable(rtcm_bridge src/rtcm_bridge_node.cpp)
+target_link_libraries(rtcm_bridge gnss_bringup_io)
+ament_target_dependencies(rtcm_bridge rclcpp gnss_msgs)
+install(TARGETS rtcm_bridge DESTINATION lib/${PROJECT_NAME})
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_tcp_stream test/test_tcp_stream.cpp)
