@@ -30,6 +30,14 @@ rtkrcv_node:
   ros__parameters:
     binary: "rtkrcv"            # RTKLIB demo5;开发机未安装,见 README 缺口登记
     run_dir: "/tmp/rtkrcv_run"
+    # 故意不用 RtkrcvConfParams 的内置默认值(rtkrcv_conf.hpp 里 corr_port=15031、
+    # obs_port=15032)——那两个端口号与上面 rtcm_bridge.rtcm_corrections.port
+    # (15031)、rtcm_bridge.raw_obs.port(15032)撞了。当前两者互不冲突是因为
+    # rtcm_bridge 两路流都是 listen=false(主动去连平台/板卡,不在本机绑定这两个
+    # 端口);但这四项都在"现场待确认"名单里(见 README),一旦某路改成
+    # listen=true(平台改成推流),就会在本机绑定同一个端口号,与 rtkrcv_node
+    # 这里的 LocalReserver 抢占同一个端口。这里用 15041/15042 这组不重叠的端口号
+    # 从根上避免这个坑——**不要**把它们"顺手"改回 15031/15032 的库内置默认值。
     corr_port: 15041
     obs_port: 15042
     sol_port: 15020

@@ -44,9 +44,14 @@ public:
     cfg.host = host;
     cfg.port = static_cast<int>(port);  // 已校验在 [0, 65535],转换安全
     cfg.listen = listen;
-    cfg.initial_backoff_s = node->declare_parameter<double>(p + "initial_backoff_s", 1.0);
-    cfg.max_backoff_s = node->declare_parameter<double>(p + "max_backoff_s", 30.0);
-    cfg.idle_timeout_s = node->declare_parameter<double>(p + "idle_timeout_s", 30.0);
+    cfg.initial_backoff_s = declare_positive_seconds(p, "initial_backoff_s", 1.0);
+    cfg.max_backoff_s = declare_positive_seconds(p, "max_backoff_s", 30.0);
+    // idle_timeout_s<=0 会被 TcpStream::pump() 当成"彻底关闭空闲检测"的哨兵值
+    // (timeout_ms=-1,poll() 永久阻塞直到有数据或被 stop() 打断)——这是本节点
+    // 断线自愈能力的核心,不允许通过 YAML 里的 0 在现场被悄悄关掉。与
+    // rtkrcv_node 对 sol_idle_timeout_s 的处理是同一个决定(见
+    // gnss_bringup::is_positive_finite_backoff_seconds 的注释)。
+    cfg.idle_timeout_s = declare_positive_seconds(p, "idle_timeout_s", 30.0);
 
     RCLCPP_INFO(node->get_logger(), "%s: %s %s:%d -> %s", name.c_str(),
                 listen ? "listen" : "connect", host.c_str(), static_cast<int>(port), topic.c_str());
@@ -64,6 +69,21 @@ public:
   ~BridgedStream() { if (stream_) stream_->stop(); }
 
 private:
+  // 校验一个"必须是正数秒"的参数(重连退避、空闲超时)。与 is_valid_port 的
+  // 端口校验同一个道理:提前挡住、报得清楚,报错里点名是哪条流、哪个字段、
+  // 收到了什么值,而不是让它在 TcpStream 内部变成一个隐蔽的钉死行为。
+  double declare_positive_seconds(const std::string& prefix, const std::string& field,
+                                   double default_value) {
+    const double v = node_->declare_parameter<double>(prefix + field, default_value);
+    if (!gnss_bringup::is_positive_finite_backoff_seconds(v)) {
+      RCLCPP_ERROR(node_->get_logger(), "%s: %s 必须是正数秒(收到 %f)", name_.c_str(),
+                   field.c_str(), v);
+      throw std::invalid_argument(name_ + "." + field + ": 必须是正数秒(收到 " +
+                                   std::to_string(v) + ")");
+    }
+    return v;
+  }
+
   void publish(const uint8_t* d, size_t n) {
     gnss_msgs::msg::RawStream msg;
     msg.header.stamp = node_->now();

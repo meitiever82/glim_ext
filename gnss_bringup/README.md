@@ -82,11 +82,31 @@ TCP、不含 NTRIP(参考实现 rtk-monitor 全仓无 NTRIP);待确认的只是�
 - **rtkrcv 对 SIGTERM 的真实响应**——`ProcessSupervisor` 的信号/超时升级逻辑
   本身已用假二进制验证过,但真实 rtkrcv 收到 SIGTERM 后是否会先 flush 完
   `.stat`/解算流再退出,未知。
+- **崩溃循环退避在真实 conf 错误下的表现**——例如一个 rtkrcv 无法识别的 conf
+  字段导致它秒退,`crash_loop_life_s` 退避是否如预期触发,未用真实二进制验证过
+  (退避逻辑本身已用 `fake_rtkrcv.sh` 单测覆盖,这里只是没有用真实二进制复现过)。
+- **多客户端/大流量下 `LocalReserver` 与 rtkrcv 的真实交互**——目前只验证了单个
+  自制 TCP 客户端收到 `LocalReserver` 广播的字节;rtkrcv 作为 `tcpcli` 连入后的
+  真实读取节奏、断线重连行为,未验证。
 - **端到端**——`rtcm_bridge` → `rtkrcv_node` → `~/rtk_fix` 的全链路需要真实的
   差分流与观测流,现场设备到位前无法验证。
 
-装上 demo5 版 RTKLIB 后,建议按上面五条逐一补验,而不是假定管道跑通了就等于
+装上 demo5 版 RTKLIB 后,建议按上面七条逐一补验,而不是假定管道跑通了就等于
 解算正确。
+
+## 已知问题
+
+- **`rtkrcv_node` 的 `args` 参数不能在 YAML 里写成空列表**——`args: []` 会让
+  ROS2 的 YAML 参数加载器因为无法从空列表推断元素类型而在节点启动时抛
+  `InvalidParameterValueException`,直接 `std::terminate()`(已实测复现)。
+  当前的规避方式是 `config/gnss_bringup.yaml` 里干脆不写这个 key(节点侧
+  `args` 参数本身默认值就是空列表,不写等价于"不传额外参数")。
+  这只是绕开了症状,没有解决根因:任何人往这份 YAML 里加一行 `args: []`
+  仍然会复现同样的崩溃,而且报错信息不会指向这份 README。正确的修复是在
+  `rtkrcv_node.cpp` 声明该参数时,显式指定 `rcl_interfaces::msg::ParameterDescriptor`
+  把类型固定为字符串数组(而不是依赖默认值推断类型),或者干脆换成一个用分隔符
+  拼接的字符串参数(例如 `extra_args: "-s"`,按空格切分)。这不属于 Task 8 的
+  修改范围(会改到 `rtkrcv_node.cpp`),记在这里留给后续任务处理。
 
 ## 不装 RTKLIB 也能跑起来:用 `test/fake_rtkrcv.sh`
 
