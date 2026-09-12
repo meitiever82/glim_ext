@@ -35,6 +35,11 @@ target_link_libraries(rtcm_bridge gnss_bringup_io)
 ament_target_dependencies(rtcm_bridge rclcpp gnss_msgs)
 install(TARGETS rtcm_bridge DESTINATION lib/${PROJECT_NAME})
 
+add_executable(rtkrcv_node src/rtkrcv_node.cpp)
+target_link_libraries(rtkrcv_node gnss_bringup_io gnss_core::gnss_core)
+ament_target_dependencies(rtkrcv_node rclcpp gnss_msgs)
+install(TARGETS rtkrcv_node DESTINATION lib/${PROJECT_NAME})
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_tcp_stream test/test_tcp_stream.cpp)
@@ -57,6 +62,13 @@ if(BUILD_TESTING)
   target_link_libraries(test_process_supervisor gnss_bringup_io)
   target_compile_definitions(test_process_supervisor PRIVATE
     FAKE_RTKRCV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test/fake_rtkrcv.sh")
+
+  # rtk_fix_mapping.hpp 是纯函数(不碰 ROS 节点),含 LineSplitter 这个供
+  # rtkrcv_node 按行切分 TcpStream 字节流用的纯逻辑,单独可测。
+  ament_add_gtest(test_rtk_fix_mapping test/test_rtk_fix_mapping.cpp)
+  target_link_libraries(test_rtk_fix_mapping gnss_core::gnss_core)
+  target_include_directories(test_rtk_fix_mapping PRIVATE include)
+  ament_target_dependencies(test_rtk_fix_mapping gnss_msgs)
 endif()
 
 ament_export_targets(gnss_bringup-targets HAS_LIBRARY_TARGET)
