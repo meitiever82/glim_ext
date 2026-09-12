@@ -78,6 +78,17 @@ if(BUILD_TESTING)
   gnss_core_add_test(test_synth)
   gnss_core_add_test(test_lever_arm_estimator)
   gnss_core_add_test(test_anchor_pipeline)
+
+  # tools/ 下的 Python 工具测试(unittest)。
+  # 注意目录是 tests/(与 C++ 的 test/ 分开),必须显式注册,否则这些用例不会被 colcon test 跑到。
+  # 用 unittest 而非 pytest:ROS Humble 自带的 launch_testing pytest 插件与新版 pytest(>=8)
+  # 不兼容(PluginValidationError: hookimpl 用了已移除的 `path` 参数),而 unittest 不加载任何
+  # pytest 插件,因此在装了较新 pytest 的机器上也能跑。测试文件自身用 sys.path 定位 tools/,
+  # 与 cwd 无关。
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME test_export_bag_to_pos
+    COMMAND ${Python3_EXECUTABLE} -m unittest discover
+            -s ${CMAKE_CURRENT_SOURCE_DIR}/tests -p "test_*.py" -v)
 endif()
 
 if(ament_cmake_FOUND)

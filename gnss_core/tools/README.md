@@ -6,7 +6,7 @@ spec §9(v2)。这些工具只依赖 `gnss_core`(纯 C++)与 Python 3,不需要 
 | 文件 | 用途 |
 |---|---|
 | `calibrate_sigma_scale.cpp` | `calibrate_sigma_scale <ref.pos> <test.pos> [tol_s]`:按 test 解质量分档统计 RMSE 与 "实际误差 / 板卡 σ" 三种比值,给出建议系数 |
-| `export_bag_to_pos.py` | rtk-monitor 既有录包(SQLite `epochs` 表)→ 标准 `.pos`(轨迹 1–3:can / gpchc / rtkrcv);`--pos` 输入做时间系统/列规范化。测试:`python3 -m unittest tests/test_export_bag_to_pos.py` |
+| `export_bag_to_pos.py` | rtk-monitor 既有录包(SQLite `epochs` 表)→ 标准 `.pos`(轨迹 1–3:can / gpchc / rtkrcv);`--pos` 输入做时间系统/列规范化。测试:随 `colcon test --packages-select gnss_core` 一并运行;单独跑用 `python3 -m pytest gnss_core/tests/test_export_bag_to_pos.py` |
 | `make_synthetic_pos.py` | 生成一对已知偏移的合成 `.pos`,用于自检工具本身 |
 | `synth_rtk_fix.cpp` | GLIM 轨迹(TUM)→ 合成 RTK 观测(含四种故障注入)→ `.pos`(+ `--truth` 真值);spec §12.3,Task 13 |
 | `pos_to_rtkfix_bag.py` | `.pos` → `gnss_msgs/RtkFix` rosbag2,`--merge` 与 LiDAR bag 归并成单包。**只能在 Orin 跑,未在无 ROS 环境验证** |
