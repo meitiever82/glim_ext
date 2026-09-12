@@ -14,14 +14,32 @@
 namespace gnss_bringup {
 
 namespace {
-// 对整个进程组发信号,统一处理"进程组已经不存在"的预期情况。stop() 和
-// run() 自己(见 run() 里 fork()/child_pid_ 赋值之间竞态窗口的说明)都要
-// 用同一套逻辑发信号,抽成一个函数避免两处实现慢慢长歪。
-void signal_group(pid_t pid, int sig) {
+// 给一个子进程发信号:直接对 pid 本身发一次,再对它所在的整个进程组
+// (-pid)发一次,合起来只算"发一次"这个信号级别。
+//
+// review round 2:为什么两次都要发、但都只发一次——
+//   - kill(pid, sig) 直接找 pid 本身:从 fork() 成功那一刻起 pid 就是
+//     有效目标,不依赖进程组是否已经建立(子进程调用 setsid() 生效
+//     之前,父进程这边可能已经开始发信号了,谁先谁后没有保证),保证
+//     这一次尝试一定有真实进程可以收到,不需要重试。
+//   - kill(-pid, sig) 找进程组:覆盖 rtkrcv 这类会派生孙进程的目标程序。
+//     这次如果 setsid() 还没跑完,可能会因为进程组尚不存在而扑空
+//     (ESRCH)——但那意味着子进程才刚 fork 出来,不可能已经有孙进程,
+//     扑空没有任何实际影响,不需要因此重试。
+//   - 早期版本靠"每 20ms 无条件重发同一个信号"来规避上面这个 setsid()
+//     竞态,结果是一个愿意在退出前 flush 数据的目标程序(rtkrcv 正是
+//     如此)在等待期里会收到几十上百次同一个信号,处理函数不断被新到
+//     的信号打断(EINTR),反而可能永远做不完那次收尾——完全违背了
+//     "先发 SIGTERM 给它一个机会,再等一等才 SIGKILL"这个设计本身的
+//     用意。改成直接对 pid 发送之后,不再需要重发就能保证送达,一个
+//     信号级别只需要真正调用一次。
+void signal_child(pid_t pid, int sig) {
+  if (::kill(pid, sig) != 0 && errno != ESRCH) {
+    // ESRCH(进程已经不存在,自己退出/被回收了)是预期情况;其它 errno
+    // 这里也没有更好的处理方式。
+  }
   if (::kill(-pid, sig) != 0 && errno != ESRCH) {
-    // ESRCH(进程组已经不存在,子进程恰好在这一刻自己退出/被回收)是预期
-    // 情况,忽略;其它 errno 这里也没有更好的补救办法,调用方通常会在
-    // 下一次循环里用最新状态重试。
+    // 同上,针对进程组的那一次。
   }
 }
 }  // namespace
@@ -69,34 +87,51 @@ void ProcessSupervisor::stop() {
     (void)written;  // 只是个唤醒信号,写失败也无妨(线程可能已经在退出路上)
   }
 
-  // 对进程组发信号,直到 run() 线程把 child_pid_ 收回成 -1(说明它已经
-  // waitpid() 把子进程回收了)为止;超过 5 s 还没死就升级成 SIGKILL。
-  // 每一轮都重新读取 child_pid_,而不是只在进入 stop() 时读一次缓存:
-  // run() 完全可能在这期间已经因为子进程自然退出而重启出下一个子进程,
-  // 如果只信号"进来时那一个 pid",新起的这个就会被漏掉、白白多活一轮。
+  // 对子进程发信号,直到 run() 线程把 child_pid_ 收回成 -1(说明它已经
+  // waitpid() 把子进程回收了)为止。每一轮都重新读取 child_pid_,而不是
+  // 只在进入 stop() 时读一次缓存:run() 完全可能在这期间已经因为子进程
+  // 自然退出而重启出下一个子进程,如果只信号"进来时那一个 pid",新起的
+  // 这个就会被漏掉、白白多活一轮——一旦发现 pid 变了(新的子进程),就把
+  // "这个信号级别发过没有"的状态和升级时限一起重置,当成一个全新的目标
+  // 从头处理。
+  //
+  // review round 2:每个信号级别(SIGTERM / 升级后的 SIGKILL)只真正调用
+  // 一次 signal_child(),不再是"每 20ms 无条件重发"——原因见 signal_child()
+  // 上面的注释。这里仍然按 20ms 一轮轮询 child_pid_ 是否已经被回收,只是
+  // 轮询不等于重发。
   //
   // review round 1 的 Important:这个循环原来唯一的退出条件是
   // child_pid_<=0,如果子进程卡在不可中断的 D 状态(挂死的 I/O),或者
   // kill() 一直失败(比如 EPERM),就会永远每 20 ms 转一圈、永不退出。
-  // 这里加一个独立的绝对放弃时限——超过之后不再继续在这里发信号,直接
-  // 往下走到 join()。放弃并不代表子进程杀不死:run() 线程自己也在跑同一套
-  // 发信号/升级逻辑(见下面 run() 里的说明),这里放弃只是不想让 stop()
-  // 这个循环自己也跟着永远转下去;真正卡在内核 D 状态的极端情况,任何
-  // 用户态代码都无能为力,join() 之后会一直阻塞到子进程真的退出为止。
-  const auto escalate_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  // 这里加一个独立的绝对放弃时限——超过之后不再继续在这里轮询,直接
+  // 往下走到 join()。放弃并不代表子进程杀不死:run() 线程自己在竞态窗口
+  // 被触发时也会走同一套发信号/升级逻辑(见下面 run() 里的说明),这里
+  // 放弃只是不想让 stop() 这个循环自己也跟着永远转下去;真正卡在内核
+  // D 状态的极端情况,任何用户态代码都无能为力,join() 之后会一直阻塞到
+  // 子进程真的退出为止。
   const auto abort_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  int last_pid_seen = -1;
+  bool sigterm_sent = false;
+  bool sigkill_sent = false;
+  std::chrono::steady_clock::time_point escalate_deadline{};
   for (;;) {
     const int pid = child_pid_.load();
     if (pid <= 0) break;  // 已经被 run() 回收,或者从未 start() 过
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= abort_deadline) {
-      break;  // 放弃继续在这里重发信号,交给 run() 线程自己的逻辑和/或
-              // 内核去把子进程收尾
+    if (pid != last_pid_seen) {
+      last_pid_seen = pid;
+      sigterm_sent = false;
+      sigkill_sent = false;
+      escalate_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     }
-    const int sig = (now >= escalate_deadline) ? SIGKILL : SIGTERM;
-    // 对整个进程组(-pid)发信号,而不是只发给直接子进程本身:rtkrcv 之类
-    // 的目标程序会派生孙进程,只杀直接子进程会把孙进程留成孤儿。
-    signal_group(pid, sig);
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= abort_deadline) break;
+    if (!sigterm_sent) {
+      sigterm_sent = true;
+      signal_child(pid, SIGTERM);
+    } else if (!sigkill_sent && now >= escalate_deadline) {
+      sigkill_sent = true;
+      signal_child(pid, SIGKILL);
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
 
@@ -200,9 +235,10 @@ void ProcessSupervisor::run() {
   for (auto& a : arg_storage) argv.push_back(const_cast<char*>(a.c_str()));
   argv.push_back(nullptr);
 
-  // 同样的道理:子进程用来"关掉继承下来的 fd"的上限也在 fork() 之前算好
-  // ——sysconf() 是否会分配内存不在异步信号安全的保证范围内,放在父进程
-  // 这边调用没有任何顾虑。
+  // 子进程关闭继承 fd 时,close_range() 万一在这台内核上不可用,退化到
+  // 逐个 close() 的老办法要用到的上限——同样在 fork() 之前算好:
+  // sysconf() 是否会分配内存不在异步信号安全的保证范围内,放在父进程这边
+  // 调用没有任何顾虑。
   const long max_fd = ::sysconf(_SC_OPEN_MAX);
 
   while (running_.load()) {
@@ -251,9 +287,32 @@ void ProcessSupervisor::run() {
       // Task 7 会用到的 LocalReserver 的监听 socket)未必是——不清掉的话,
       // rtkrcv 或者它派生的孙进程会一直攥着那个 fd 的一份拷贝,父进程这边
       // close() 掉监听 socket 也不能真正释放端口,下次重新绑定会失败。
-      // close() 是异步信号安全的,循环本身不分配内存。
-      for (long fd = 3; fd < max_fd; ++fd) {
-        ::close(fd);
+      //
+      // review round 2 的 Important:第一版在这里逐个 fd 调 close(),循环
+      // 上限是 sysconf(_SC_OPEN_MAX) 也就是 RLIMIT_NOFILE。这台机器上软
+      // 限制是 1048576,实测这个循环要占子进程 ~95ms 的 CPU 时间(execv
+      // 之前);容器环境里 RLIMIT_NOFILE 默认到 2^30 级别很常见,那样一次
+      // spawn 会在 close() 里卡上几分钟,表现得像是卡死。而且 sysconf()
+      // 失败时返回 -1,原来的写法完全没处理这种情况——`fd < max_fd` 因为
+      // max_fd==-1 恒为假,一个 fd 都不会关,悄悄地把这一轮之前刚堵上的
+      // fd 继承漏洞又重新打开了,不会有任何报错或提示。
+      //
+      // 换成优先用 close_range(3, ~0u, 0)(glibc 2.34+/内核 5.9+都支持):
+      // 它直接对内核维护的 fd 表操作,耗时只取决于"真正打开了多少个 fd",
+      // 和 RLIMIT_NOFILE 这个上限无关;close_range() 本身也在异步信号
+      // 安全的清单里,fork()/execv() 之间调用没有问题。只有在它失败时
+      // (比如运行在更老、没有这个系统调用的内核上,返回 ENOSYS)才退化到
+      // 逐个 close() 的老办法,并且这次显式处理 sysconf() 返回 -1 的情况
+      // ——用一个保守的兜底上限,而不是让循环因为上限是 -1 而直接跳过、
+      // 什么都不关。
+      if (::close_range(3, ~0u, 0) != 0) {
+        long fallback_max_fd = max_fd;
+        if (fallback_max_fd < 0) {
+          fallback_max_fd = 65536;  // sysconf 说不清楚上限时的保守兜底
+        }
+        for (long fd = 3; fd < fallback_max_fd; ++fd) {
+          ::close(fd);
+        }
       }
 
       if (!cfg_.cwd.empty() && ::chdir(cfg_.cwd.c_str()) != 0) {
@@ -283,41 +342,28 @@ void ProcessSupervisor::run() {
     // 会再唤醒它,join() 因此永久卡死(已经用真实的调用栈复现:主线程卡
     // 在 pthread_join,工作线程卡在 waitpid,外加一个活着的孤儿子进程)。
     //
-    // 结论是:下面这段等待逻辑不能再假设"stop() 一定已经看到了正确的
-    // child_pid_ 并且在替我处理信号升级"。它必须自己独立地能完成"发现
-    // running_ 变 false → 发 SIGTERM → 超时 → SIGKILL"这一整套动作,
-    // 不依赖 stop() 是否抢到了正确的时机——无论最终是 stop() 那边先发现,
-    // 还是这里自己先发现,子进程最终都会被杀死、被回收。
-    bool stop_seen = !running_.load();
+    // 这里只需要在这一个时间点做一次性检查,不需要之后每一轮 tick 都重复
+    // 检查:running_.store(false) 是 stop() 的第一条语句,严格发生在它
+    // 读取 child_pid_、调用 join() 之前;而这里的检查发生在
+    // child_pid_.store(pid) 之后。如果这时候读到 running_ 已经是 false,
+    // 说明 stop() 有可能已经(或即将)在错误的时机读到 child_pid_==-1,
+    // 这个线程必须自己独立完成"发 SIGTERM → 超时 → SIGKILL"这一整套
+    // 动作,不能指望 stop() 会来救。反过来,如果这时候 running_ 还是
+    // true,那么在此之后任何时间点调用的 stop() 都一定能读到这里已经
+    // 落盘的 child_pid_,会按正常路径处理——不需要这个线程再重复插一脚,
+    // 否则就是 review round 2 指出的"两边都发,子进程收到两倍信号"。
+    bool self_escalate = !running_.load();
+    bool sigterm_sent = false;
+    bool sigkill_sent = false;
     std::chrono::steady_clock::time_point escalate_deadline{};
-    if (stop_seen) {
+    if (self_escalate) {
       escalate_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     }
 
     // 等子进程退出:非阻塞 waitpid(WNOHANG) + poll(wake_fd_, tick) 轮询,
-    // 而不是一个不可打断的 waitpid(pid, &status, 0)。
-    //
-    // review round 1 的 Critical 里同时指出:原来那个阻塞 waitpid() 本身
-    // 就是一个没有轮询唤醒描述符的阻塞点,违反了这个包里"每个阻塞点都要
-    // poll 唤醒描述符"的既定规则——理由(“stop() 会主动促成子进程死亡,
-    // 所以 waitpid 总会在有限时间内返回”)在 stop() 因为上面那个竞态窗口
-    // 错过 pid 的时候恰好不成立。现在换成有限超时的轮询:不管是 stop()
-    // 通过唤醒管道通知,还是这里自己在轮询间隙里发现 running_ 已经变
-    // false,都能在至多一个轮询周期内注意到并开始/推进信号升级,不再有
-    // 任何一条路径依赖"对方一定会来救"。
-    //
-    // 排查过程中额外发现的一个坑:stop_seen 刚变 true 的那一刻,子进程
-    // 未必已经跑到 setsid()(fork() 之后子进程和父进程并发执行,调度顺序
-    // 不保证)。如果这时候只发一次 kill(-pid, SIGTERM),而子进程的进程组
-    // 还没变成 pid(依然是继承自父进程的旧组),内核会直接报 ESRCH——这个
-    // 值本身是"进程组不存在"的正常信号,但这里的语境下其实是"太早发了,
-    // 没打中",而不是"已经死了"。旧写法把这次信号当成"发过了"就不再重发,
-    // 会导致子进程一直活到 5 s 后的 SIGKILL 才死,拖慢了收尾(在专门复现
-    // 这条竞态的回归测试里,直接表现为超过了测试给的等待上限)。修法很
-    // 简单:和 stop() 自己的循环一样,只要 stop_seen 为真就每一轮 tick都
-    // 重发一次当前应该发的信号(SIGTERM 或者升级后的 SIGKILL),而不是
-    // "发现的时候发一次就不再管"——子进程真正完成 setsid() 通常只需要
-    // 微秒级时间,下一轮 tick(至多 20 ms 后)重发就会命中。
+    // 而不是一个不可打断的 waitpid(pid, &status, 0)——原来那个阻塞
+    // waitpid() 本身就是一个没有轮询唤醒描述符的阻塞点,违反了这个包里
+    // "每个阻塞点都要 poll 唤醒描述符"的既定规则。
     int status = 0;
     for (;;) {
       const pid_t w = ::waitpid(pid, &status, WNOHANG);
@@ -326,22 +372,30 @@ void ProcessSupervisor::run() {
         if (errno == EINTR) continue;
         break;  // 理论上不会走到(比如 ECHILD):当作已经结束处理,避免线程卡死
       }
-      // w == 0:子进程还活着。
-
-      if (!stop_seen && !running_.load()) {
-        stop_seen = true;
-        escalate_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+      // w == 0:子进程还活着。只有在上面那次一次性检查判定需要"自救"时才
+      // 会走到这里发信号;否则完全依赖 stop() 处理,这里只是被动等待,
+      // 不会重复发送——这正是这一轮 review 要修的"两边都发,子进程收到
+      // 两倍信号"。
+      if (self_escalate) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!sigterm_sent) {
+          sigterm_sent = true;
+          signal_child(pid, SIGTERM);
+        } else if (!sigkill_sent && now >= escalate_deadline) {
+          sigkill_sent = true;
+          signal_child(pid, SIGKILL);
+        }
       }
-      if (stop_seen) {
-        const int sig =
-            (std::chrono::steady_clock::now() >= escalate_deadline) ? SIGKILL : SIGTERM;
-        signal_group(pid, sig);
-      }
 
-      // 还没被要求停止时,轮询间隔可以放宽一些(200 ms),减少无谓的系统
-      // 调用;一旦进入停止流程,收紧到 20 ms,让重发信号、升级判断和最终
-      // 回收都能及时发生。
-      const int timeout_ms = stop_seen ? 20 : 200;
+      // 轮询间隔:不需要发信号,不代表也不需要“反应快”——stop() 那边一旦
+      // 把 running_ 置 false,这里应该尽快用更短的 tick 去发现子进程已经
+      // 死了并回收它,不然默认的 200 ms tick 会让每一次 stop() 都平白多
+      // 等上一小段时间(这里只是查一下 running_ 这个原子量,不发送任何
+      // 信号,和上面"是否要自己发信号"是两件独立的事——揉在一起正是这一
+      // 轮 review 要修的那个"重复发信号"问题的根源)。还没被要求停止时,
+      // 轮询间隔放宽到 200 ms,减少无谓的系统调用。
+      const bool winding_down = self_escalate || !running_.load();
+      const int timeout_ms = winding_down ? 20 : 200;
       pollfd pfd{wake_fd_, POLLIN, 0};
       const int pr = ::poll(&pfd, 1, timeout_ms);
       if (pr < 0) {
@@ -356,10 +410,6 @@ void ProcessSupervisor::run() {
       if (pr > 0 && (pfd.revents & POLLIN)) {
         uint8_t buf[64];
         while (::read(wake_fd_, buf, sizeof(buf)) > 0) {
-        }
-        if (!stop_seen && !running_.load()) {
-          stop_seen = true;
-          escalate_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         }
       }
     }

@@ -1,7 +1,12 @@
 #include <gtest/gtest.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <unistd.h>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <future>
 #include <memory>
 #include <string>
@@ -161,4 +166,94 @@ TEST(ProcessSupervisor, StartThenImmediateStopNeverHangs) {
         << "第 " << i << " 次迭代:stop() 没有在 3 s 内返回,"
         << "疑似 fork()/stop() 竞态回归导致的死锁";
   }
+}
+
+TEST(ProcessSupervisor, ChildDoesNotInheritParentDescriptors) {
+  // review round 2 的 Important:子进程关闭继承 fd 那段代码换成了
+  // close_range(3, ~0u, 0),失败时才退化到逐个 close()。这里要验证的是
+  // 结果本身(子进程手里到底还有没有不该有的 fd),而不是这台机器的
+  // RLIMIT_NOFILE 具体是多少——用一个具体、可辨认的 fd 做标记,检查它
+  // 有没有被子进程继承下去,不依赖任何和 ulimit 相关的假设。
+  //
+  // 用 mkstemp() 而不是 open("/dev/null", ...):readlink 出来的目标路径
+  // 里带一段进程独有的随机后缀,不会和子进程自己可能打开的任何东西
+  // (比如 bash 执行脚本时给脚本本身开的 fd)撞车,不会产生"数字凑巧一样
+  // 但根本是两个不相干的东西"这种假阳性/假阴性。mkstemp() 本身不带
+  // O_CLOEXEC,正是这里想要的"一个会被 fork() 继承、但不该被子进程留着"
+  // 的 fd。
+  char tmpl[] = "/tmp/procsup_fdcheck_XXXXXX";
+  const int marker_fd = ::mkstemp(tmpl);
+  ASSERT_GE(marker_fd, 0) << "mkstemp 失败,没法做这个检查";
+  const std::string marker_path = tmpl;
+  ::unlink(tmpl);  // fd 还开着就够用,不需要真的留一个文件在磁盘上
+
+  ProcessSupervisor s(cfg_for("live", 0.05));
+  s.start();
+  for (int i = 0; i < 100 && s.spawn_count() < 1; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  const int pid = s.last_child_pid();
+  ASSERT_GT(pid, 0) << "子进程应该已经 fork 出来了";
+  // 给 execv 一点时间真正跑起来,再去看它手里的 fd。
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  const std::string fd_path =
+      "/proc/" + std::to_string(pid) + "/fd/" + std::to_string(marker_fd);
+  char link_buf[4096] = {};
+  const ssize_t n = ::readlink(fd_path.c_str(), link_buf, sizeof(link_buf) - 1);
+  bool leaked = false;
+  if (n > 0) {
+    link_buf[n] = '\0';
+    // 文件已经 unlink 了,如果子进程真的继承了这个 fd,内核仍然认得这个
+    // inode,readlink 出来的字符串通常是"<原路径> (deleted)"——只要前缀
+    // 命中我们这个独一无二的临时文件名,就能确认是同一个 fd,而不是子
+    // 进程自己凑巧用了同一个数字。
+    leaked = std::string(link_buf).find(marker_path) != std::string::npos;
+  }
+  EXPECT_FALSE(leaked) << "子进程不应该继承父进程这边打开的 fd "
+                       << marker_fd << "(readlink 目标:" << link_buf << ")";
+
+  ::close(marker_fd);
+  s.stop();
+}
+
+TEST(ProcessSupervisor, StopSendsBoundedSignalCount) {
+  // review round 2:stop() 曾经(以及修这个竞态时新引入的 run() 自救逻辑)
+  // 会每 20ms 无条件重发同一个信号,对一个装了信号处理器、想在退出前
+  // flush 数据的目标程序(rtkrcv 正是如此)来说,处理函数会被连续不断的
+  // 新信号打断,可能永远做不完那次收尾。修复之后应该是"一个信号级别只发
+  // 一次"。fake_rtkrcv.sh 的 live-count 模式故意不在第一次 SIGTERM 就
+  // 退出(最多撑 2s,或者收满 10 次才主动退出),这样才有机会数出 stop()
+  // 期间到底送达了几次——用 live 模式的话一碰就倒,根本没法观察。
+  char tmpl[] = "/tmp/procsup_sigcount_XXXXXX";
+  const int fd = ::mkstemp(tmpl);
+  ASSERT_GE(fd, 0);
+  ::close(fd);
+  const std::string countfile = tmpl;
+
+  ProcessSupervisorConfig c = cfg_for("live-count", 0.05);
+  c.args = {"live-count", countfile};
+  ProcessSupervisor s(c);
+  s.start();
+  for (int i = 0; i < 100 && s.spawn_count() < 1; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  ASSERT_GT(s.last_child_pid(), 0) << "子进程应该已经 fork 出来了";
+  // 给它一点时间真正把 trap 安装好,不然过早发的信号会用默认处置处理掉
+  // (直接终止,trap 还没生效,根本数不到)。
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  s.stop();
+
+  long count = 0;
+  std::ifstream in(countfile);
+  if (in) {
+    in >> count;
+  }
+  ::unlink(countfile.c_str());
+
+  // 用来判断"没有被信号轰炸"的门槛:旧的每 20ms 重发一次、撑满 5s 的写法
+  // 会打出上百次(5000ms / 20ms ≈ 250);这里给一个数量级远小于那个、但
+  // 又给 stop() 自身的信号 + run() 万一触发自救逻辑的信号留了余量的上限。
+  EXPECT_GT(count, 0) << "至少应该收到一次 SIGTERM(fake 脚本才有理由继续多活一会儿被数到)";
+  EXPECT_LE(count, 5) << "SIGTERM 不应该被连续重发轰炸(实测到 " << count
+                       << " 次)——这正是 review round 2 要修的问题";
 }
