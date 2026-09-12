@@ -36,6 +36,10 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_tcp_stream test/test_tcp_stream.cpp)
   target_link_libraries(test_tcp_stream gnss_bringup_io)
+
+  # rtcm_bridge_node.cpp 自己的纯函数逻辑(端口合法性、streams 去重检测)
+  ament_add_gtest(test_rtcm_bridge_params test/test_rtcm_bridge_params.cpp)
+  target_include_directories(test_rtcm_bridge_params PRIVATE include)
 endif()
 
 ament_export_targets(gnss_bringup-targets HAS_LIBRARY_TARGET)
