@@ -18,6 +18,7 @@ find_package(gnss_core REQUIRED)
 add_library(gnss_bringup_io SHARED
   src/tcp_stream.cpp
   src/local_reserver.cpp
+  src/rtkrcv_conf.cpp
 )
 target_include_directories(gnss_bringup_io PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -47,6 +48,9 @@ if(BUILD_TESTING)
   # rtcm_bridge_node.cpp 自己的纯函数逻辑(端口合法性、streams 去重检测)
   ament_add_gtest(test_rtcm_bridge_params test/test_rtcm_bridge_params.cpp)
   target_include_directories(test_rtcm_bridge_params PRIVATE include)
+
+  ament_add_gtest(test_rtkrcv_conf test/test_rtkrcv_conf.cpp)
+  target_link_libraries(test_rtkrcv_conf gnss_bringup_io)
 endif()
 
 ament_export_targets(gnss_bringup-targets HAS_LIBRARY_TARGET)
