@@ -19,6 +19,7 @@ add_library(gnss_bringup_io SHARED
   src/tcp_stream.cpp
   src/local_reserver.cpp
   src/rtkrcv_conf.cpp
+  src/process_supervisor.cpp
 )
 target_include_directories(gnss_bringup_io PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -51,6 +52,11 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_rtkrcv_conf test/test_rtkrcv_conf.cpp)
   target_link_libraries(test_rtkrcv_conf gnss_bringup_io)
+
+  ament_add_gtest(test_process_supervisor test/test_process_supervisor.cpp)
+  target_link_libraries(test_process_supervisor gnss_bringup_io)
+  target_compile_definitions(test_process_supervisor PRIVATE
+    FAKE_RTKRCV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test/fake_rtkrcv.sh")
 endif()
 
 ament_export_targets(gnss_bringup-targets HAS_LIBRARY_TARGET)
