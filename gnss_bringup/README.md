@@ -73,12 +73,12 @@ TCP、不含 NTRIP(参考实现 rtk-monitor 全仓无 NTRIP);待确认的只是�
 和两个 `inpstr*-format` 的取值。**这四项都只需要改 `config/gnss_bringup.yaml`
 里的值,不需要改任何代码。**
 
-| # | 待确认 | 影响 | 现在的取值 | 确认后怎么改 |
-|---|---|---|---|---|
-| 1 | 平台差分的 IP:Port,以及连接方向 | `rtcm_bridge` 连不上就没有差分 | `127.0.0.1:15031`, `listen=false` | 只改 `config/gnss_bringup.yaml` 里 `rtcm_bridge.rtcm_corrections` 的 `host`/`port`/`listen` |
-| 2 | 板卡原始观测的端点 | `rtkrcv` 无观测无法解算 | `127.0.0.1:15032`, `listen=false` | 只改 `config/gnss_bringup.yaml` 里 `rtcm_bridge.raw_obs` 的 `host`/`port`/`listen` |
-| 3 | 板卡原始观测格式(`inpstr1-format`) | 格式错 `rtkrcv` 解不出 | `rtcm3`(沿用 rtk-monitor 假定) | 只改 `config/gnss_bringup.yaml` 里 `rtkrcv_node.obs_format` |
-| 4 | 平台差分格式(`inpstr2-format`) | 同上 | `rtcm3` | 只改 `config/gnss_bringup.yaml` 里 `rtkrcv_node.corr_format` |
+| # | 待确认                               | 影响                             | 现在的取值                            | 确认后怎么改                                                                                         |
+| - | ------------------------------------ | -------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 1 | 平台差分的 IP:Port,以及连接方向      | `rtcm_bridge` 连不上就没有差分 | `127.0.0.1:15031`, `listen=false` | 只改`config/gnss_bringup.yaml` 里 `rtcm_bridge.rtcm_corrections` 的 `host`/`port`/`listen` |
+| 2 | 板卡原始观测的端点                   | `rtkrcv` 无观测无法解算        | `127.0.0.1:15032`, `listen=false` | 只改`config/gnss_bringup.yaml` 里 `rtcm_bridge.raw_obs` 的 `host`/`port`/`listen`          |
+| 3 | 板卡原始观测格式(`inpstr1-format`) | 格式错`rtkrcv` 解不出          | `rtcm3`(沿用 rtk-monitor 假定)      | 只改`config/gnss_bringup.yaml` 里 `rtkrcv_node.obs_format`                                       |
+| 4 | 平台差分格式(`inpstr2-format`)     | 同上                             | `rtcm3`                             | 只改`config/gnss_bringup.yaml` 里 `rtkrcv_node.corr_format`                                      |
 
 ## 参数说明
 
