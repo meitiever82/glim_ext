@@ -1,11 +1,16 @@
 #include <gtest/gtest.h>
 #include <string>
+#include <cmath>
+#include <limits>
 #include "gnss_bringup/rtkrcv_conf.hpp"
 using namespace gnss_bringup;
 
 namespace {
 bool has_line(const std::string& conf, const std::string& line) {
-  return conf.find(line + "\n") != std::string::npos;
+  // Anchor match to start of string or immediately after a newline
+  if (conf.find(line + "\n") == 0) return true;
+  std::string search = "\n" + line + "\n";
+  return conf.find(search) != std::string::npos;
 }
 }  // namespace
 
@@ -66,4 +71,92 @@ TEST(RtkrcvConf, PositioningOptionsAreConfigurable) {
   EXPECT_TRUE(has_line(c, "pos1-elmask =15"));
   EXPECT_TRUE(has_line(c, "pos2-armode =fix-and-hold"));
   EXPECT_TRUE(has_line(c, "pos1-navsys =5"));
+}
+
+TEST(RtkrcvConf, RejectsObsFormatWithNewline) {
+  RtkrcvConfParams p;
+  p.obs_format = "rtcm3\ninpstr1-path =attacker:1234";
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+}
+
+TEST(RtkrcvConf, RejectsCorrFormatWithNewline) {
+  RtkrcvConfParams p;
+  p.corr_format = "rtcm3\ninpstr2-path =attacker:1234";
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+}
+
+TEST(RtkrcvConf, RejectsObsFormatWithEqualsSign) {
+  RtkrcvConfParams p;
+  p.obs_format = "rtcm3=evil";
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+}
+
+TEST(RtkrcvConf, RejectsCorrFormatWithEqualsSign) {
+  RtkrcvConfParams p;
+  p.corr_format = "rtcm3=evil";
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+}
+
+TEST(RtkrcvConf, RejectsPosModeWithCarriageReturn) {
+  RtkrcvConfParams p;
+  p.pos_mode = "kinematic\rkinematic";
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+}
+
+TEST(RtkrcvConf, RejectsArModeWithNewline) {
+  RtkrcvConfParams p;
+  p.ar_mode = "continuous\ninpstr1-type =evil";
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+}
+
+TEST(RtkrcvConf, ElmaskMinBoundaryIsValid) {
+  RtkrcvConfParams p;
+  p.elmask = 0.0;
+  const auto c = render_rtkrcv_conf(p);
+  EXPECT_TRUE(has_line(c, "pos1-elmask =0"));
+}
+
+TEST(RtkrcvConf, ElmaskMaxBoundaryIsValid) {
+  RtkrcvConfParams p;
+  p.elmask = 90.0;
+  const auto c = render_rtkrcv_conf(p);
+  EXPECT_TRUE(has_line(c, "pos1-elmask =90"));
+}
+
+TEST(RtkrcvConf, ElmaskBelowMinRejected) {
+  RtkrcvConfParams p;
+  p.elmask = -1.0;
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+}
+
+TEST(RtkrcvConf, ElmaskAboveMaxRejected) {
+  RtkrcvConfParams p;
+  p.elmask = 91.0;
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+}
+
+TEST(RtkrcvConf, ElmaskNaNRejected) {
+  RtkrcvConfParams p;
+  p.elmask = std::nan("");
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+}
+
+TEST(RtkrcvConf, ElmaskInfinityRejected) {
+  RtkrcvConfParams p;
+  p.elmask = std::numeric_limits<double>::infinity();
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+}
+
+TEST(RtkrcvConf, FractionalElmaskFormatsCorrectly) {
+  RtkrcvConfParams p;
+  p.elmask = 13.5;
+  const auto c = render_rtkrcv_conf(p);
+  EXPECT_TRUE(has_line(c, "pos1-elmask =13.5"));
+}
+
+TEST(RtkrcvConf, WholeNumberElmaskFormatsWithoutDecimal) {
+  RtkrcvConfParams p;
+  p.elmask = 15.0;
+  const auto c = render_rtkrcv_conf(p);
+  EXPECT_TRUE(has_line(c, "pos1-elmask =15"));
 }
