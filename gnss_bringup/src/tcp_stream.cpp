@@ -224,35 +224,49 @@ void TcpStream::run_client() {
     backoff = cfg_.initial_backoff_s;
     report(true, "connected to " + cfg_.host + ":" + std::to_string(cfg_.port));
 
-    const bool woken = pump(fd, report);
+    const PumpResult result = pump(fd, report);
     ::close(fd);
-    if (woken || !running_.load()) break;
+    if (result == PumpResult::kStopped || !running_.load()) break;
 
     if (wait_backoff(backoff)) break;
     backoff = std::min(backoff * 2.0, cfg_.max_backoff_s);
   }
 }
 
-bool TcpStream::pump(int fd, const OnState& report) {
+TcpStream::PumpResult TcpStream::pump(int fd, const OnState& report, int preempt_fd) {
   uint8_t buf[4096];
   while (running_.load()) {
-    pollfd fds[2] = {{fd, POLLIN, 0}, {wake_fd_.load(), POLLIN, 0}};
+    pollfd fds[3];
+    fds[0] = {fd, POLLIN, 0};
+    fds[1] = {wake_fd_.load(), POLLIN, 0};
+    nfds_t nfds = 2;
+    if (preempt_fd >= 0) {
+      fds[2] = {preempt_fd, POLLIN, 0};
+      nfds = 3;
+    }
     const int timeout_ms = cfg_.idle_timeout_s > 0
                                 ? static_cast<int>(cfg_.idle_timeout_s * 1000.0)
                                 : -1;
-    const int pr = ::poll(fds, 2, timeout_ms);
+    const int pr = ::poll(fds, nfds, timeout_ms);
     if (pr < 0) {
       if (errno == EINTR) continue;
       if (report) report(false, std::string("poll() failed: ") + std::strerror(errno));
-      return false;
+      return PumpResult::kDisconnected;
     }
     if (fds[1].revents & POLLIN) {
-      return true;  // stop() 唤醒
+      return PumpResult::kStopped;  // stop() 唤醒
+    }
+    if (nfds == 3 && (fds[2].revents & POLLIN)) {
+      // 监听 socket 上已经有新对端排队。哪怕当前连接还在正常收数据也不例外
+      // ——"新连接优先"是这里刻意选的语义(见 tcp_stream.hpp `listen`
+      // 字段旁的说明),不在这里 accept,交回给 run_server() 的 accept 循环
+      // 去做,避免这里重复一份 accept 的错误处理。
+      return PumpResult::kPreempted;
     }
     if (pr == 0) {
       // 静默超过 idle_timeout_s:链路差时对端常不发 RST 就消失,视为断开。
       if (report) report(false, "idle timeout");
-      return false;
+      return PumpResult::kDisconnected;
     }
     if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
       const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
@@ -260,16 +274,19 @@ bool TcpStream::pump(int fd, const OnState& report) {
         if (on_data_) on_data_(buf, static_cast<size_t>(n));
       } else if (n == 0) {
         if (report) report(false, "peer closed connection");
-        return false;
+        return PumpResult::kDisconnected;
       } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
         continue;  // 非阻塞 fd 上的虚假唤醒,重新 poll
       } else {
         if (report) report(false, std::string("recv() failed: ") + std::strerror(errno));
-        return false;
+        return PumpResult::kDisconnected;
       }
     }
   }
-  return true;  // running_ 被外部置 false(未走 stop() 的 wake 路径),同样应结束
+  // running_ 被外部置 false,但不是走 stop() 的 wake fd 路径(理论上不应该
+  // 发生,防御性兜底):同样应该结束整个 worker,不能当成"这次连接自己
+  // 断了"去重连/重新 accept。
+  return PumpResult::kStopped;
 }
 
 void TcpStream::run_server() {
@@ -316,7 +333,13 @@ void TcpStream::run_server() {
   bind_addr.sin_port = ::htons(static_cast<uint16_t>(cfg_.port));
   ::freeaddrinfo(resolved);
 
-  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  // 监听 socket 本身必须非阻塞。原因:poll() 报告监听 fd 可读之后、accept()
+  // 真正被调用之前,对端完全可能已经把连接撤回(SYN 之后马上一个 RST)——
+  // 这段时间差不受这里代码控制。socket 是阻塞的话,accept() 就会在一个
+  // 已经空了的队列上挂住,而 wake_fd 只在 poll() 里被监听,对陷在 accept()
+  // 里的线程完全无能为力,stop()/析构里的 join() 会永久挂起——和 eventfd
+  // 分配失败、client 侧 recv() 前不切回阻塞模式,是同一类"绝不能挂死"问题。
+  int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
   if (fd < 0) {
     report(false, std::string("socket() failed: ") + std::strerror(errno));
     running_.store(false);
@@ -343,27 +366,78 @@ void TcpStream::run_server() {
   ::getsockname(fd, reinterpret_cast<sockaddr*>(&actual), &len);
   bound_port_.store(::ntohs(actual.sin_port));
 
+  // accept() 失败后用 poll(wake_fd) 等一小段时间再重试,而不是立刻重新
+  // poll+accept:EMFILE/ENFILE/ENOBUFS/EPERM 这类错误不会自愈,那个连接会
+  // 一直留在内核的 accept 队列里,poll() 会立刻再次报告 POLLIN——如果这里
+  // 不停顿就重试,就是 100% CPU 的忙转圈(fd 耗尽时复现过)。用 wake_fd 上
+  // 的 poll 等,这样 stop() 依然能立刻打断这段等待。
+  auto wait_a_bit = [this](double seconds) -> bool {
+    pollfd pfd{wake_fd_.load(), POLLIN, 0};
+    const int timeout_ms = static_cast<int>(seconds * 1000.0);
+    const int pr = ::poll(&pfd, 1, timeout_ms);
+    if (pr > 0 && (pfd.revents & POLLIN)) return true;
+    return !running_.load();
+  };
+
   while (running_.load()) {
     pollfd fds[2] = {{fd, POLLIN, 0}, {wake_fd_.load(), POLLIN, 0}};
     const int pr = ::poll(fds, 2, -1);
     if (pr < 0) {
       if (errno == EINTR) continue;
+      report(false, std::string("poll() failed: ") + std::strerror(errno));
       break;
     }
     if (fds[1].revents & POLLIN) break;  // stop() 唤醒
-    if (fds[0].revents & POLLIN) {
-      const int c = ::accept(fd, nullptr, nullptr);
-      if (c < 0) continue;
-      // 和客户端 socket 一样保持非阻塞:pump() 的 poll+recv 组合依赖这一点
-      // 才能在虚假唤醒时安全地重新 poll,而不是阻塞在 recv() 上。
-      const int flags = ::fcntl(c, F_GETFL, 0);
-      ::fcntl(c, F_SETFL, flags | O_NONBLOCK);
-      report(true, "peer connected");
-      const bool woken = pump(c, report);
-      ::close(c);
-      if (woken) break;
-      // 对端断开(pump 返回 false):回到 accept 循环等下一个对端,不退出线程。
+    if (!(fds[0].revents & POLLIN)) {
+      if (fds[0].revents & (POLLERR | POLLNVAL)) {
+        // 监听 socket 本身坏掉了(不是"有连接进来"那种正常可读),不是
+        // 重试能恢复的瞬时状况——继续 poll 只会在这里原地打转,同样是
+        // finding 里点名的那种热循环。上报后直接结束这个 worker。
+        report(false, "listen socket error");
+        break;
+      }
+      continue;  // 其它虚假唤醒,重新 poll
     }
+
+    const int c = ::accept(fd, nullptr, nullptr);
+    if (c < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ECONNABORTED ||
+          errno == EINTR) {
+        // 瞬时状况:EAGAIN/EWOULDBLOCK 是监听 socket 非阻塞后,poll 报告
+        // 可读但对端在 accept() 之前已经用 RST 撤回了连接;ECONNABORTED 是
+        // 同一类"对端半路撤回";EINTR 是信号打断。三者都应该直接回 poll
+        // 重试,不需要上报也不需要停顿。
+        continue;
+      }
+      // EMFILE/ENFILE/ENOBUFS/EPERM 等不会自愈:上报,然后停顿一下再回到
+      // accept 循环,而不是原地忙转圈(见 wait_a_bit 上面的注释)。
+      report(false, std::string("accept() failed: ") + std::strerror(errno));
+      if (wait_a_bit(cfg_.initial_backoff_s)) break;
+      continue;
+    }
+
+    // 和客户端 socket 一样保持非阻塞:pump() 的 poll+recv 组合依赖这一点
+    // 才能在虚假唤醒时安全地重新 poll,而不是阻塞在 recv() 上。
+    const int flags = ::fcntl(c, F_GETFL, 0);
+    ::fcntl(c, F_SETFL, flags | O_NONBLOCK);
+    report(true, "peer connected");
+
+    // 把监听 fd 本身作为 preempt_fd 一并交给 pump():新连接优先——服务当前
+    // 对端期间如果监听 fd 又变得可读(有新对端排队),pump() 立刻返回
+    // kPreempted,不等 idle_timeout_s,也不等当前对端自己断开。
+    const PumpResult result = pump(c, report, fd);
+    ::close(c);
+    if (result == PumpResult::kStopped) break;
+    if (result == PumpResult::kPreempted) {
+      // kPreempted 时 pump() 自己没有调用过 report(false, ...)(它只负责
+      // 检测、不负责挂断),这里补上"断开"这一跳变。kDisconnected 分支
+      // 不需要补,pump() 内部已经在对应的 idle timeout / 对端关闭 / I/O
+      // 出错路径上报过了。
+      report(false, "displaced by newer peer");
+    }
+    // 无论 kDisconnected 还是 kPreempted 都回到 accept 循环等下一个对端,
+    // 不退出线程。kPreempted 时新连接已经排在监听 socket 的 accept 队列
+    // 里,下一轮 poll(fd, wake_fd) 会立刻返回 POLLIN。
   }
   ::close(fd);
   bound_port_.store(-1);

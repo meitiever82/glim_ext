@@ -74,6 +74,49 @@ private:
   int fd_ = -1, conn_ = -1;
 };
 
+// 一直 accept 并立刻关闭每个连接的测试服务端。用于 ClientBackoffGrowsButIsCappedByMax
+// ——早期版本连的是一个连不上的端口,状态回调只在跳变时上报一次
+// "disconnected" 之后就再也不跳变,断言退化成恒真的 EXPECT_GE(...,1),
+// EXPECT_LE 那一半永远不可能失败(参见 task-2-report.md 里 fix-round-1 的
+// 记录)。改成"接上又立刻断"的服务端,让每一次重试都产生一对真实的
+// connected->disconnected 跳变,EXPECT_LE 才是在真的约束重试频率。
+class ImmediateCloseServer {
+public:
+  int start() {
+    fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    int one = 1;
+    ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    ::bind(fd_, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+    ::listen(fd_, 16);
+    socklen_t len = sizeof(a);
+    ::getsockname(fd_, reinterpret_cast<sockaddr*>(&a), &len);
+    running_.store(true);
+    worker_ = std::thread([this] {
+      while (running_.load()) {
+        pollfd pfd{fd_, POLLIN, 0};
+        const int pr = ::poll(&pfd, 1, 10);
+        if (pr <= 0) continue;
+        const int c = ::accept(fd_, nullptr, nullptr);
+        if (c >= 0) ::close(c);  // 立刻关闭,制造"连上又断"的跳变
+      }
+    });
+    return ::ntohs(a.sin_port);
+  }
+  ~ImmediateCloseServer() {
+    running_.store(false);
+    if (worker_.joinable()) worker_.join();
+    if (fd_ >= 0) ::close(fd_);
+  }
+private:
+  int fd_ = -1;
+  std::atomic<bool> running_{false};
+  std::thread worker_;
+};
+
 }  // namespace
 
 TEST(TcpStream, ClientModeDeliversBytesFromServer) {
@@ -288,11 +331,16 @@ TEST(TcpStream, ListenModeAcceptsASecondPeerAfterFirstDisconnects) {
 }
 
 TEST(TcpStream, ClientBackoffGrowsButIsCappedByMax) {
-  // 连不上的端口 + 很小的 max_backoff:在固定时间窗内断开回调的次数应受上限约束,
-  // 既不会退化成忙等(次数爆炸),也不会一次就放弃(次数为 0)。
+  // 连一个"接上就立刻关"的服务端(见 ImmediateCloseServer 上的注释)+
+  // 很小的 max_backoff:每次重试都会产生一对 connected->disconnected 跳变,
+  // 固定时间窗内跳变次数应受上限约束——既不会退化成忙等(次数爆炸),
+  // 也不会一次就放弃(次数为 0)。
+  ImmediateCloseServer srv;
+  const int port = srv.start();
+
   std::atomic<int> disconnects{0};
   TcpStreamConfig cfg;
-  cfg.port = 1;
+  cfg.port = port;
   cfg.initial_backoff_s = 0.05;
   cfg.max_backoff_s = 0.1;
   TcpStream s(cfg, [](const uint8_t*, size_t) {},
@@ -302,4 +350,40 @@ TEST(TcpStream, ClientBackoffGrowsButIsCappedByMax) {
   s.stop();
   EXPECT_GE(disconnects.load(), 1) << "必须持续重试";
   EXPECT_LE(disconnects.load(), 20) << "必须退避,不能忙等";
+}
+
+TEST(TcpStream, ListenModeReportsBindFailureAndLeavesBoundPortNegative) {
+  // 绑定失败必须经 on_state_ 报出来,而不是像 Task 1 遗留的最小实现那样
+  // 悄悄地把 bound_port() 停在 -1、不给任何理由。用 TEST-NET-1
+  // (RFC 5737,192.0.2.0/24)里的一个地址触发 bind() 的 EADDRNOTAVAIL——
+  // 这个网段保留给文档示例,本机不会真的配置到网卡上。
+  // 这同时也验证了 cfg_.host 确实传到了 bind() 里而不是被忽略:如果实现
+  // 退回硬编码 INADDR_LOOPBACK,这次 bind 反而会成功,下面两条断言都会
+  // 失败,而不是被这条测试放过。
+  std::mutex m;
+  std::condition_variable cv;
+  bool got_failure = false;
+  std::string detail;
+  TcpStreamConfig cfg;
+  cfg.listen = true;
+  cfg.host = "192.0.2.1";
+  cfg.port = 0;
+  TcpStream s(cfg, [](const uint8_t*, size_t) {},
+              [&](bool connected, const std::string& d) {
+                if (!connected) {
+                  std::lock_guard<std::mutex> lk(m);
+                  got_failure = true;
+                  detail = d;
+                  cv.notify_all();
+                }
+              });
+  s.start();
+  {
+    std::unique_lock<std::mutex> lk(m);
+    ASSERT_TRUE(cv.wait_for(lk, std::chrono::seconds(3), [&] { return got_failure; }))
+        << "绑定失败必须经 on_state_ 报出来";
+  }
+  EXPECT_NE(detail.find("bind"), std::string::npos) << "detail=" << detail;
+  s.stop();
+  EXPECT_EQ(s.bound_port(), -1) << "绑定失败后 bound_port() 不应该变正";
 }

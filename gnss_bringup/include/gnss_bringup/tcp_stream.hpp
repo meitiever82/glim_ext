@@ -14,7 +14,13 @@ using OnState = std::function<void(bool connected, const std::string& detail)>;
 struct TcpStreamConfig {
   std::string host = "127.0.0.1";
   int port = 0;                     // listen 模式下 0 = 让内核选端口(测试用)
-  bool listen = false;              // true: 本机监听等对端连进来;false: 主动连对端
+  // true: 本机监听等对端连进来;false: 主动连对端。
+  // 监听模式同一时刻只服务一个对端,且是"新连接优先"语义:如果有活跃对端时
+  // 又有新连接进来,会立刻断开旧的、转去服务新的(旧对端因此可能连一个字节
+  // 都没收完就被挂断)。这是为"平台主动推流到车上"这个场景选的:链路
+  // 抖动/NAT 超时导致旧连接变成没有 RST 的假活连接时,不能让它占着位置等
+  // idle_timeout_s 超时,必须让重新连上来的新连接立刻顶替。
+  bool listen = false;
   double initial_backoff_s = 1.0;
   double max_backoff_s = 30.0;
   double idle_timeout_s = 30.0;     // 静默视为断开:链路差时对端常不发 RST 就消失
@@ -36,14 +42,25 @@ public:
 private:
   void run_client();
   void run_server();
+
+  // pump() 的结束原因:
+  //   kStopped     —— 被 stop() 打断(wake_fd 可读),调用方应结束整个 worker。
+  //   kDisconnected —— 这次连接自身结束了(对端关闭 / 静默超时 / I/O 出错),
+  //                    调用方按自己的策略处理——客户端退避重连,服务端回到
+  //                    accept 等下一个对端。
+  //   kPreempted   —— 仅服务端、且传了 preempt_fd 时才会出现:监听 socket
+  //                    上已经有新连接排队,调用方必须立刻挂断当前对端、
+  //                    上报断开、回到 accept 收下新对端(见 tcp_stream.hpp
+  //                    里 `listen` 字段旁"新连接优先"的说明)。
+  enum class PumpResult { kStopped, kDisconnected, kPreempted };
+
   // 客户端(已连接的 fd)与服务端(已 accept 的 fd)共用的收数循环:
-  // poll(fd, wake_fd) 等可读,idle_timeout_s 静默视为断开,recv 到的数据经
-  // on_data_ 回调,状态变化(idle timeout / 对端关闭 / poll 或 recv 出错)
-  // 经 report 回调上报。返回 true 表示 stop() 打断了本次 pump(调用方应结束
-  // 整个 worker,不再重连/重新 accept);返回 false 表示这次连接自身结束了
-  // (对端关闭、静默超时或 I/O 错误),调用方按各自策略处理——客户端退避重连,
-  // 服务端直接回到 accept 等下一个对端。
-  bool pump(int fd, const OnState& report);
+  // poll(fd, wake_fd[, preempt_fd]) 等可读,idle_timeout_s 静默视为断开,
+  // recv 到的数据经 on_data_ 回调,状态变化(idle timeout / 对端关闭 / poll
+  // 或 recv 出错)经 report 回调上报。preempt_fd 传 >=0 时(仅服务端使用)
+  // 一并监听该 fd——通常是监听 socket 本身——它可读即返回 kPreempted,
+  // 不在这里做 accept,把"关旧连新"的动作留给调用方统一处理。
+  PumpResult pump(int fd, const OnState& report, int preempt_fd = -1);
 
   TcpStreamConfig cfg_;
   OnData on_data_;
