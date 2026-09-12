@@ -71,5 +71,7 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_rtk_fix_mapping gnss_msgs)
 endif()
 
+install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+
 ament_export_targets(gnss_bringup-targets HAS_LIBRARY_TARGET)
 ament_package()
