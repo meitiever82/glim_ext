@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <chrono>
@@ -54,6 +55,15 @@ public:
     return ::ntohs(a.sin_port);
   }
   void accept_and_send(const std::string& payload) {
+    // 阻塞 accept() 在客户端从不连接的回归场景下会把整个 gtest 二进制挂起
+    // (退化为 CI 里的 "timed out",而不是一条具名失败)。先 poll 一段有限
+    // 时间,超时就报一条明确失败并返回。
+    pollfd pfd{fd_, POLLIN, 0};
+    const int pr = ::poll(&pfd, 1, 3000);
+    if (pr <= 0) {
+      ADD_FAILURE() << "no incoming connection within 3s (poll returned " << pr << ")";
+      return;
+    }
     conn_ = ::accept(fd_, nullptr, nullptr);
     ::send(conn_, payload.data(), payload.size(), 0);
   }
@@ -112,13 +122,32 @@ TEST(TcpStream, ReportsConnectedThenDisconnected) {
 }
 
 TEST(TcpStream, StopReturnsPromptlyWhenNeverConnected) {
-  // 连一个没人监听的端口:start 后线程在退避循环里,stop 必须能及时打断
+  // 连一个没人监听的端口:start 后线程应当先尝试连接、失败、再进入退避循环。
+  // 先等到 worker 真正报告过一次"未连通"(即已经在退避里睡眠),再开始计时
+  // 调用 stop() —— 这样测试才能证明 stop() 是靠打断退避睡眠及时返回的,
+  // 而不是碰巧在 worker 触达 wait_backoff() 之前就已经 running_==false 退出了
+  // (对着空桩这条用例会 0ms 通过,无法区分真实中断和什么都没做)。
   Sink sink;
+  std::mutex m;
+  std::condition_variable cv;
+  bool entered_backoff = false;
   TcpStreamConfig cfg;
   cfg.port = 1;                      // 特权端口,必然连不上
   cfg.initial_backoff_s = 10.0;      // 故意设很长,验证 stop 不是靠等退避结束
-  TcpStream s(cfg, [&](const uint8_t* d, size_t n) { sink.push(d, n); });
+  TcpStream s(cfg, [&](const uint8_t* d, size_t n) { sink.push(d, n); },
+              [&](bool connected, const std::string&) {
+                if (!connected) {
+                  std::lock_guard<std::mutex> lk(m);
+                  entered_backoff = true;
+                  cv.notify_all();
+                }
+              });
   s.start();
+  {
+    std::unique_lock<std::mutex> lk(m);
+    ASSERT_TRUE(cv.wait_for(lk, std::chrono::seconds(3), [&] { return entered_backoff; }))
+        << "worker 从未报告过连接失败,说明它还没进入(或根本没有实现)退避等待";
+  }
   const auto t0 = std::chrono::steady_clock::now();
   s.stop();
   const auto dt = std::chrono::steady_clock::now() - t0;
