@@ -102,14 +102,36 @@ namespace gnss_bringup {
 class RtkrcvSupervisorNode {
 public:
   explicit RtkrcvSupervisorNode(rclcpp::Node* node) : node_(node) {
-    read_params();
-    start_local_reservers();
-    write_conf();
-    start_supervisor();
-    start_pid_logger();
-    connect_solution_stream();
-    subscribe_uplink_streams();
-    start_stat_tailer();
+    // review round 2 的 Important:构造函数体内任何一步抛异常,这个对象都
+    // 不会被认为构造完成——~RtkrcvSupervisorNode() 不会被调用,C++ 只会
+    // 自动析构“已经构造完成的成员子对象”。LocalReserver/TcpStream/
+    // ProcessSupervisor 都在自己的析构函数里正确 stop()/join() 了各自内部
+    // 的线程,天然安全;但 pid_log_thread_/stat_thread_ 是裸 std::thread
+    // 成员——一个仍然 joinable 的 std::thread 被析构会直接
+    // std::terminate() 干掉整个进程,绕开 main() 里那个专门为了把配置
+    // 错误报成一行 RCLCPP_ERROR 而写的 catch(复现:
+    // -p corrections_topic:="bad topic!" 在这个修复之前会 SIGABRT、
+    // core dump,并留下一个孤儿 rtkrcv 子进程)。
+    //
+    // 这里统一兜底:不变量是“构造函数还可能抛异常的任何一个时间点上,不
+    // 存在一个 joinable 的线程成员活到这个对象的生命周期结束之外”——用
+    // try/catch(...) 兜住,先把可能已经起来的两个线程停掉、join 干净,
+    // 再原样把异常继续往外抛给 main() 的 catch,而不是依赖“把起线程的语句
+    // 挪到最后一行”这种容易被后续改动悄悄破坏的顺序假设。
+    try {
+      read_params();
+      start_local_reservers();
+      write_conf();
+      start_supervisor();
+      start_pid_logger();
+      connect_solution_stream();
+      subscribe_uplink_streams();
+      start_stat_tailer();
+    } catch (...) {
+      stop_pid_logger();
+      stop_stat_tailer();
+      throw;
+    }
   }
 
   // 显式按上面文件头注释规定的顺序停止,而不是依赖成员声明顺序在析构时
@@ -151,6 +173,19 @@ private:
 
     sol_initial_backoff_s_ = declare_positive_seconds("sol_initial_backoff_s", 1.0);
     sol_max_backoff_s_ = declare_positive_seconds("sol_max_backoff_s", 30.0);
+    // review round 2 的"一个需要明说的决定":TcpStream 把 idle_timeout_s<=0
+    // 当成一个(未在头文件里明文承诺、但 tcp_stream.cpp:247 确实实现了的)
+    // 哨兵值——"彻底关闭空闲超时",poll() 会永久阻塞直到真正有数据或者被
+    // stop() 打断。is_positive_finite_seconds 因此会拒绝
+    // sol_idle_timeout_s=0。这是刻意的选择,不是校验逻辑复用时漏掉的
+    // 意外:这个节点存在的意义就是"rtkrcv 连接卡死了要能被发现并自动
+    // 恢复",允许运维通过 0 关掉这道空闲检测,等于允许在现场悄悄关掉这个
+    // 节点最核心的自愈能力,而且这条哨兵语义没有在 TcpStreamConfig 的头
+    // 文件注释里正式承诺过,不适合在这里对外暴露成"合法用法"。现在没有任何
+    // 地方设置这个参数为 0,所以不存在需要放行的既有用例;以后如果确实需要
+    // "禁用空闲超时"这个能力,应该作为一个独立的、显式命名的参数
+    // (例如 disable_sol_idle_timeout)引入,而不是让 0 通过校验缺口悄悄
+    // 变成一个隐藏用法。
     sol_idle_timeout_s_ = declare_positive_seconds("sol_idle_timeout_s", 30.0);
 
     corr_topic_ = node_->declare_parameter<std::string>("corrections_topic", "/gnss/rtcm_corrections");
@@ -279,22 +314,32 @@ private:
   }
 
   void pid_log_loop() {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    for (;;) {
-      const int pid = supervisor_->last_child_pid();
-      if (pid > 0) {
-        RCLCPP_INFO(node_->get_logger(), "rtkrcv spawned pid %d", pid);
-        return;
+    // review round 2 的"也要修"项:与 stat_tail_loop 同样的道理——这是一个
+    // 独立线程,任何逃逸的异常都会 std::terminate() 干掉整个进程,而不是
+    // 简单地放弃这一次打日志。stat_tail_loop 这一轮已经补了 try/catch,
+    // 这里补齐,让两个辅助线程在“绝不能让异常逃出去”这件事上保持对称。
+    try {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+      for (;;) {
+        const int pid = supervisor_->last_child_pid();
+        if (pid > 0) {
+          RCLCPP_INFO(node_->get_logger(), "rtkrcv spawned pid %d", pid);
+          return;
+        }
+        std::unique_lock<std::mutex> lk(pid_log_mutex_);
+        if (!pid_log_running_.load()) return;
+        if (std::chrono::steady_clock::now() >= deadline) break;
+        pid_log_cv_.wait_for(lk, std::chrono::milliseconds(20),
+                              [this] { return !pid_log_running_.load(); });
+        if (!pid_log_running_.load()) return;
       }
-      std::unique_lock<std::mutex> lk(pid_log_mutex_);
-      if (!pid_log_running_.load()) return;
-      if (std::chrono::steady_clock::now() >= deadline) break;
-      pid_log_cv_.wait_for(lk, std::chrono::milliseconds(20),
-                            [this] { return !pid_log_running_.load(); });
-      if (!pid_log_running_.load()) return;
+      RCLCPP_WARN(node_->get_logger(),
+                  "3s 内未观测到 rtkrcv 子进程 pid,继续接线(supervisor 会持续重试)");
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(node_->get_logger(), "pid 日志线程出错(已放弃打印 pid): %s", e.what());
+    } catch (...) {
+      // 非 std::exception 派生的异常同样不能让它逃出这个线程。
     }
-    RCLCPP_WARN(node_->get_logger(),
-                "3s 内未观测到 rtkrcv 子进程 pid,继续接线(supervisor 会持续重试)");
   }
 
   // ---------- Step 5: 连解算输出,发布 RtkFix ----------

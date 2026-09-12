@@ -84,6 +84,12 @@ public:
   size_t buffered() const { return buf_.size(); }
   // 因为单行超过 max_line_bytes 而被丢弃的次数(供节点侧限流打日志用)
   size_t overflow_count() const { return overflow_count_; }
+  // 是否处于"丢弃直到下一个 \n"模式(供测试验证 reset() 真的把这个状态也
+  // 清掉了——round 2 review 指出的测试缺口:只测 buffered()==0 的话,一个
+  // 清空了缓冲区、却忘记把 discarding_ 也复位成 false 的 reset() 实现照样
+  // 能通过测试,但会把重连后第一条真正的新行也当成"还在丢弃中的残留"吞掉,
+  // 是与 finding 4 同一类的静默丢数据)。
+  bool discarding() const { return discarding_; }
   void reset() {
     buf_.clear();
     discarding_ = false;

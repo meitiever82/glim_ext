@@ -191,11 +191,38 @@ TEST(LineSplitter, ResetDiscardsBufferedPartialLine) {
 
   sp.reset();
   EXPECT_EQ(sp.buffered(), 0u);
+  // review round 2 的测试缺口:只断言 buffered()==0 的话,一个清空了缓冲区
+  // 却忘记把 discarding_ 复位的 reset() 实现照样能通过这条测试——加上这
+  // 一句才是真正的回归防护(见下面 ResetClearsDiscardModeToo 里更直接的
+  // 复现)。
+  EXPECT_FALSE(sp.discarding());
 
   const auto lines = feed_str(sp, "fresh-line-after-reconnect\n");
   ASSERT_EQ(lines.size(), 1u);
   EXPECT_EQ(lines[0], "fresh-line-after-reconnect")
       << "reset() 之后的新行不能跟断连前的残留半行拼在一起";
+}
+
+// review round 2:上面那条测试即使加了 discarding() 断言,也只在"reset()
+// 前从未真正进入过丢弃模式"这种情况下跑;要真正复现"reset() 清了缓冲区、
+// 却忘记把 discarding_ 也复位"这一类 bug,必须先用超限触发 discarding_,
+// 再验证 reset() 之后它确实被清掉了——否则一个只清 buf_ 的 reset() 会让
+// 复位之后的第一条完整新行被当成"还在丢弃中的残留"吞掉,不发出去,是与
+// finding 4(半行跨连接粘连)同一类的静默丢数据,只是触发条件从"断连"变成
+// "断连恰好发生在超限丢弃状态里"。
+TEST(LineSplitter, ResetClearsDiscardModeToo) {
+  LineSplitter sp(8);
+  ASSERT_TRUE(feed_str(sp, "0123456789ABCDEFGHIJ").empty());  // 触发超限,进入丢弃模式
+  ASSERT_EQ(sp.overflow_count(), 1u);
+  ASSERT_TRUE(sp.discarding());
+
+  sp.reset();
+  EXPECT_FALSE(sp.discarding()) << "reset() 必须同时清掉丢弃模式,不能只清缓冲区";
+
+  const auto lines = feed_str(sp, "real-line-after-reset\n");
+  ASSERT_EQ(lines.size(), 1u)
+      << "reset() 没有清掉丢弃模式的话,这一整行会被当成残留吞掉,发不出去";
+  EXPECT_EQ(lines[0], "real-line-after-reset");
 }
 
 // ---------- is_positive_finite_seconds ----------
