@@ -17,6 +17,7 @@ find_package(gnss_core REQUIRED)
 # 不依赖 ROS 的 I/O 与进程管理,便于单测
 add_library(gnss_bringup_io SHARED
   src/tcp_stream.cpp
+  src/local_reserver.cpp
 )
 target_include_directories(gnss_bringup_io PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -36,6 +37,9 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_tcp_stream test/test_tcp_stream.cpp)
   target_link_libraries(test_tcp_stream gnss_bringup_io)
+
+  ament_add_gtest(test_local_reserver test/test_local_reserver.cpp)
+  target_link_libraries(test_local_reserver gnss_bringup_io)
 
   # rtcm_bridge_node.cpp 自己的纯函数逻辑(端口合法性、streams 去重检测)
   ament_add_gtest(test_rtcm_bridge_params test/test_rtcm_bridge_params.cpp)
