@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include "gnss_bringup/local_reserver.hpp"
 #include "gnss_bringup/process_supervisor.hpp"
 using namespace gnss_bringup;
 
@@ -320,4 +321,60 @@ TEST(ProcessSupervisor, StopIsFastEvenWithInheritedParentSignalHandler) {
       << " 次被拖到了 2s 以上(修复前的典型表现是卡在 ~5s 的 SIGKILL 超时)"
       << "——说明子进程在完成 setsid()/重置信号处置之前,把父进程继承来的"
       << "处理器当成了自己的,把本该终止它的 SIGTERM 吞掉了";
+}
+
+// final-fix-wave 第 5 项:这条不变量横跨 LocalReserver 和 ProcessSupervisor
+// 两个组件,此前完全没有任何测试覆盖它,但它是整个 rtkrcv_node 设计能成立
+// 的前提——rtkrcv 及其子孙进程一旦继承了 LocalReserver 监听 socket 的一份
+// fd 拷贝,LocalReserver::stop() 关闭它自己那一份并不会真正释放端口(内核
+// 只在所有拷贝都被关闭之后才会真正释放),下一次重启 rtkrcv_node 会在
+// start_local_reservers() 里绑定同一个端口时失败。
+//
+// ProcessSupervisor::run() 已经在 fork() 之后、execv() 之前对继承下来的 fd
+// 做了 close_range(3, ~0u, 0)(见 process_supervisor.cpp 里 review round 2
+// 的说明,`ChildDoesNotInheritParentDescriptors` 测试已经覆盖了这一半),
+// 这条测试要证的是这个通用机制确实也把 LocalReserver 的监听 fd 算在内、
+// 结果上端口真的会被释放——而不是重复测同一段代码。
+TEST(ProcessSupervisor, SpawnedChildDoesNotInheritLocalReserverListeningSocket) {
+  LocalReserver reserver;
+  ASSERT_TRUE(reserver.start(0)) << "LocalReserver 没能起来,没法做这个检查";
+  const int port = reserver.bound_port();
+  ASSERT_GT(port, 0);
+
+  auto supervisor = std::make_shared<ProcessSupervisor>(cfg_for("live", 0.05));
+  supervisor->start();
+  for (int i = 0; i < 100 && supervisor->spawn_count() < 1; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  const int child_pid = supervisor->last_child_pid();
+  ASSERT_GT(child_pid, 0) << "子进程应该已经 fork 出来了";
+  // 给 execv 一点时间真正跑起来,让 close_range()/exec 都已经生效。
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  reserver.stop();
+
+  // 关键:在子进程仍然活着(fake_rtkrcv.sh 的 live 模式,故意还没有
+  // stop() supervisor)的情况下检查端口是否已经释放。如果先把 supervisor
+  // 也 stop() 掉,子进程被杀死这件事本身就会关闭它持有的所有 fd(不管
+  // close_range() 有没有生效),会把"子进程到底有没有继承那份监听 socket
+  // 拷贝"这个问题直接掩盖掉——量出来的就不是这条不变量,而是"进程死亡最终
+  // 总会回收 fd"这件事,后者任何情况下都成立,验证不出问题。真正要测的是
+  // review 描述的场景:长活的子进程还在跑,reserver.stop() 之后端口必须
+  // 立刻可以被重新绑定。
+  errno = 0;
+  ASSERT_EQ(::kill(child_pid, 0), 0) << "子进程在检查端口之前已经不在了,"
+                                        "这条测试没有测到它原本要测的东西";
+
+  // 可观测的后果:端口必须能被一个全新的 LocalReserver 立刻重新绑定。如果
+  // 长活的子进程手里还攥着监听 socket 的一份拷贝,reserver.stop() 关闭它
+  // 自己那一份并不会真正释放端口,这里就会绑不上——这正是 review 描述的
+  // "下一次重启 rtkrcv_node 绑不上 sol_port"那类故障的根源。
+  LocalReserver again;
+  EXPECT_TRUE(again.start(port))
+      << "端口没有被真正释放——被监管的子进程很可能继承了 LocalReserver 的"
+         "监听 socket";
+  again.stop();
+
+  std::future<void> done = stop_async(supervisor);
+  ASSERT_EQ(done.wait_for(std::chrono::seconds(6)), std::future_status::ready)
+      << "stop() 在 6 s 内没有返回";
 }

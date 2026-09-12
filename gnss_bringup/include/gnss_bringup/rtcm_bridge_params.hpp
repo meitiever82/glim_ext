@@ -18,6 +18,21 @@ inline bool is_valid_port(int64_t port) {
   return port >= 0 && port <= 65535;
 }
 
+// final-fix-wave 第 1 项:端口校验按连接方向再收紧一次。0 只在监听方(内核
+// 选端口,LocalReserver/TcpStream 的服务端场景)才有意义;在连接方
+// (TcpStream 客户端去连一个对端——rtcm_bridge 的 listen=false 流,以及
+// rtkrcv_node 拿 sol_port 去连 rtkrcv 的 outstr1)connect(...:0) 没有任何
+// 操作系统语义,不会报任何错误,只会 connect() 到"端口 0",内核会立刻
+// 拒绝,worker 因此永远退避重试——这正是"dials nothing, silently, forever"
+// 这个最坏的静默故障模式,而且和 is_valid_port 本身的越界检查一样,不能靠
+// TcpStream 内部去分辨"我是被哪种场景创建的",必须在读参数这一层、知道
+// "这个端口到底是拿去 listen 还是拿去 connect"的地方挡住。
+inline bool is_valid_port_for_direction(int64_t port, bool listen) {
+  if (!is_valid_port(port)) return false;
+  if (port == 0 && !listen) return false;
+  return true;
+}
+
 // 校验一个"必须是正数的秒数"参数(重连退避、空闲超时……)。
 // <=0 或非有限值(NaN/inf)如果放过去,会在 TcpStream 内部造成钉死行为——
 // idle_timeout_s<=0 会让 pump() 里的 timeout_ms 变成 -1,poll() 因此永久阻塞

@@ -4,9 +4,19 @@ rtcm_bridge:
     rtcm_corrections:
       # TODO(现场确认, spec §13 P0):平台差分的 IP/端口,以及是我们连它(listen=false)
       # 还是它推给我们(listen=true)。协议已确认为裸 TCP 无解析(rtk-monitor 无 NTRIP)。
+      #
+      # 部署注意(final-fix-wave 第 7 项):host 的含义随 listen 的取值整个
+      # 反过来——listen=false 时 host 是"对端"的地址(我们主动去连它);
+      # listen=true 时 host 是"本机"的绑定地址(对端反过来连我们,通常写
+      # "0.0.0.0" 或某张网卡的地址,而不是对端的 IP)。如果只改了 listen、
+      # 忘了把 host 也换成另一种含义下该填的值(最容易踩的是:改成
+      # listen=true 却把 host 留成原来那个平台/板卡的 IP),这条流会
+      # 永久死掉——bind() 会失败(比如 EADDRNOTAVAIL:本机压根没有那个
+      # 地址),日志里只有一行 ERROR,此后这个节点会一直"看起来在跑",却
+      # 再也不会有任何数据。改 listen 的时候,必须同时检查/改 host。
       host: "127.0.0.1"
       port: 15031
-      listen: false
+      listen: false  # false=我们主动连 host:port(host=对端地址);true=本机监听 host:port 等对端连入(host=本机绑定地址,通常是 0.0.0.0)——见上面 host 旁的注意事项
       topic: "/gnss/rtcm_corrections"
       # 默认等于流名("rtcm_corrections");按需覆盖。
       frame_id: "rtcm_corrections"
@@ -17,9 +27,12 @@ rtcm_bridge:
       idle_timeout_s: 30.0
     raw_obs:
       # TODO(现场确认, spec §13 P0):板卡原始观测输出的 IP/端口或串口转发端点
+      # host/listen 的含义与上面 rtcm_corrections 完全一样(见那边的详细
+      # 注意事项):listen=false 时 host 是对端地址,listen=true 时 host 是
+      # 本机绑定地址——两者不能只改一半。
       host: "127.0.0.1"
       port: 15032
-      listen: false
+      listen: false  # false=我们主动连 host:port(host=对端地址);true=本机监听 host:port 等对端连入(host=本机绑定地址,通常是 0.0.0.0)
       topic: "/gnss/raw_obs"
       frame_id: "raw_obs"
       initial_backoff_s: 1.0

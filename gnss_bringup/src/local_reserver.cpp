@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstring>
 
 namespace gnss_bringup {
 
@@ -27,10 +28,21 @@ int take_and_close(std::atomic<int>& fd) {
 
 LocalReserver::~LocalReserver() { stop(); }
 
-bool LocalReserver::start(int port, const std::string& host) {
+bool LocalReserver::start(int port, const std::string& host, OnFatalError on_fatal_error) {
   if (running_.exchange(true)) {
     return false;  // 已在运行,重复 start() 视为失败,不动现有状态
   }
+
+  // final-fix-wave 第 6 项(Minor 1):bound_port_ 原来只在成功路径末尾被
+  // 赋值,失败路径一个都不碰它——如果上一次 start() 成功过(bound_port_
+  // 还留着那次的端口号),这一次 start() 又失败了(比如端口被别的进程抢先
+  // 绑走),bound_port() 会继续报出那个早已经不再有任何东西在监听的旧端口
+  // 号,是这个包里已经在别处closed掉的"说谎的 accessor"这一类问题在这里的
+  // 一个漏网之鱼。这里先无条件复位成 -1,只有真正走到下面成功的分支才会
+  // 重新赋成实际绑定到的端口——这样任何一条失败路径(包括以后新增的)都
+  // 自动继承"失败就是 -1"这个不变量,不需要在每个 return false 之前都手动
+  // 补一行。
+  bound_port_.store(-1);
 
   // 上一次 start() 可能是自行退出(线程内部检测到不可恢复的错误后只置
   // running_=false 就返回,没有人调用过 stop() 来做清理——见头文件的 fd
@@ -114,6 +126,8 @@ bool LocalReserver::start(int port, const std::string& host) {
   bound_port_.store(::ntohs(actual.sin_port));
 
   listen_fd_.store(fd);
+  // 线程启动之前赋值,accept_loop() 线程只读它,不存在竞态。
+  on_fatal_error_ = std::move(on_fatal_error);
   thread_ = std::thread([this] { accept_loop(); });
   return true;
 }
@@ -294,6 +308,16 @@ void LocalReserver::accept_loop() {
       // poll() 本身出错不是能自愈的瞬时状况,继续在这里 poll 只会原地
       // 打转。退出线程,不碰 listen_fd_/wake_fd_/wake_wr_——清理交给
       // 迟早会被调用的 stop()(见头文件的 fd 归属注释)。
+      //
+      // final-fix-wave 第 2 项:这个类原来完全没有任何形式的日志/回调——
+      // running_.store(false) 已经在这里做对了,但调用方(rtkrcv_node 的
+      // corr_reserver_/obs_reserver_)没有任何办法知道这个 accept 线程已经
+      // 永久退出,现场表现为"节点看起来在跑,corrections/raw_obs 却再也
+      // 传不到 rtkrcv"。回调一次,交给调用方决定怎么记(rtkrcv_node.cpp
+      // 记 RCLCPP_ERROR)。
+      if (on_fatal_error_) {
+        on_fatal_error_(std::string("poll() failed: ") + std::strerror(errno));
+      }
       running_.store(false);
       break;
     }
@@ -314,6 +338,12 @@ void LocalReserver::accept_loop() {
       // 监听 socket 本身坏掉了(不是"有连接进来"那种正常可读),继续 poll
       // 只会在这里原地打转——同样是"绝不能热循环"的情形。退出线程,不碰
       // 那三个共享 fd,清理交给 stop()。
+      //
+      // final-fix-wave 第 2 项:同上一处 poll() 出错——running_.store(false)
+      // 本身已经对,缺的是让调用方知道这件事发生过的手段。
+      if (on_fatal_error_) {
+        on_fatal_error_("listen socket error (POLLERR/POLLNVAL)");
+      }
       running_.store(false);
       break;
     }

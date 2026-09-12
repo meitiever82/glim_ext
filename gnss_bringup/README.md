@@ -22,6 +22,50 @@ ros2 launch gnss_bringup gnss_bringup.launch.py
 `enable_rtkrcv:=false` 只起 `rtcm_bridge`(RTKLIB 未安装、或只想验证桥接这一段时用,
 见下面"不装 RTKLIB 也能跑起来"一节)。
 
+## 部署要求(必读):`rtkrcv_node` 必须跑在 systemd + cgroup `KillMode` 下
+
+**这是本分支目前最大的残留风险,不是"锦上添花"的建议。**
+
+`ProcessSupervisor` 用 `setsid()` 把 `rtkrcv` 放进独立进程组,这是为了让
+`stop()` 能对整组发信号收尾派生出来的孙进程——这个决定本身是对的。但它的
+代价是:`rtkrcv` 子进程只在父进程走**正常的 `stop()`/析构路径**时才会被
+一起收尾;父进程如果是被 `kill -9`(或者任何不给它机会跑完析构函数的方式,
+比如 OOM killer)杀掉的,`rtkrcv` 子进程会被 init 收养、继续独立运行,
+变成一个孤儿进程,而 `rtkrcv_node` 完全不知道这件事。
+
+已实测复现的后果——而且是那种**看起来一切正常、实则数据完全错误**的最坏
+情况:
+
+1. `kill -9 <rtkrcv_node 的 pid>`。
+2. 孤儿 `rtkrcv` 继续拿着 `sol_port`(以及 `corr_port`/`obs_port`)当
+   TCP 服务端挂着。
+3. 重新拉起 `rtkrcv_node`:它自己的 `ProcessSupervisor` 会尝试再起一个
+   **新的** `rtkrcv`,而这个新进程会因为端口被孤儿占着而绑定失败、不断
+   崩溃重启——但这不是唯一的坏结果。
+4. 更隐蔽的是:`rtkrcv_node` 里负责去**连**解算输出端口(`sol_port`)的
+   `TcpStream` 是客户端角色,它会连上"当前监听在这个端口上的任何东西"——
+   也就是那个孤儿 `rtkrcv`,而不是新起的那个。孤儿继续吐着它自己那份
+   (可能早已过时、来自另一次运行的)解算结果,`rtkrcv_node` 原样转发,
+   只是套上一个全新的 `header.stamp`——下游拿到的是一条**时间戳新鲜、
+   内容却是旧的/错的定位解**,没有任何报错或状态异常可以据此发现问题。
+
+**现在的规避方式(必须遵守,直到有代码层面的修复)**:
+
+- `rtkrcv_node` 必须由 systemd 管理,并且 unit 文件里配置基于 cgroup 的
+  `KillMode=control-group`(而不是默认的 `KillMode=process`)——这样
+  systemd 停止/重启这个服务时,会对整个 cgroup(包含孤儿 `rtkrcv`)发信号,
+  而不只是对 `rtkrcv_node` 自己的 pid。
+- 如果确实发生了 `kill -9`(或者进程以任何方式被信号杀死而不是走
+  `ros2 lifecycle`/`Ctrl-C` 之类的正常关闭路径),**在重启 `rtkrcv_node`
+  之前必须先手动确认没有孤儿 `rtkrcv` 残留**(例如 `pgrep -a rtkrcv`),
+  有的话先手动杀掉,再重启节点。跳过这一步、直接重启,现场表现可能是
+  "看起来正常运行,却在发布过时/错误的解"这种最难排查的故障。
+
+代码层面的正确修复需要一个设计决策(`prctl(PR_SET_PDEATHSIG)`——注意它是
+线程级语义,`ProcessSupervisor` 的 fork() 发生在一个专用线程上,细节需要
+仔细核对;或者在 `run_dir` 下维护一个 pidfile,由下一次启动时先检查再决定
+要不要清理),刻意不在这一轮修复范围内,留给后续任务处理。
+
 ## 现场待确认(spec §13 P0)
 
 以下四项在现场设备到位前只能先用占位值。协议本身已经确认——`rtcm_bridge` 是裸
@@ -77,7 +121,7 @@ TCP、不含 NTRIP(参考实现 rtk-monitor 全仓无 NTRIP);待确认的只是�
   假设对齐的,真实 RTKLIB 在各种解质量(float/DGPS/单点)、丢星、AR 状态切换
   下实际吐出的行是否总能被正确解析,未验证。
 - **真实 `$SAT`/`.stat` 文件格式与命名**——`-r 2` 参数下 rtkrcv 实际生成的
-  文件名模式、是否会在长时间运行后滚动出多个文件、`find_latest_stat_file()`
+  文件名模式、是否会在长时间运行后滚动出多个文件、`plan_stat_tail()`
   按 mtime 取最新是否总能对上真实场景,未用真实二进制验证。
 - **rtkrcv 对 SIGTERM 的真实响应**——`ProcessSupervisor` 的信号/超时升级逻辑
   本身已用假二进制验证过,但真实 rtkrcv 收到 SIGTERM 后是否会先 flush 完

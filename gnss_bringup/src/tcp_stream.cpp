@@ -66,7 +66,8 @@ void TcpStream::start() {
     // "机器人绝不能挂死"要避免的情况。启动失败,报告给调用方,不留后台线程。
     running_.store(false);
     if (on_state_) {
-      on_state_(false, std::string("eventfd() failed: ") + std::strerror(errno));
+      // 没有线程会被启动,这条流从今往后彻底不会再做任何事——terminal=true。
+      on_state_(false, std::string("eventfd() failed: ") + std::strerror(errno), true);
     }
     return;
   }
@@ -101,10 +102,14 @@ void TcpStream::stop() {
 void TcpStream::run_client() {
   bool have_last_state = false;
   bool last_state = false;
-  auto report = [&](bool connected, const std::string& detail) {
+  // run_client() 目前没有"worker 永久退出"这一类终态路径——退避循环只要
+  // running_ 还是 true 就会一直重试连接,唯一的结束方式是 stop() 打断。
+  // terminal 参数留着(默认 false)只是为了让这里的 report() 与 run_server()
+  // 保持同一个签名/调用习惯,不是说这里存在被遗漏的终态场景。
+  auto report = [&](bool connected, const std::string& detail, bool terminal = false) {
     if (!on_state_) return;
-    if (have_last_state && last_state == connected) return;  // 仅在跳变时上报
-    on_state_(connected, detail);
+    if (!terminal && have_last_state && last_state == connected) return;  // 仅在跳变时上报
+    on_state_(connected, detail, terminal);
     have_last_state = true;
     last_state = connected;
   };
@@ -250,7 +255,12 @@ TcpStream::PumpResult TcpStream::pump(int fd, const OnState& report, int preempt
     const int pr = ::poll(fds, nfds, timeout_ms);
     if (pr < 0) {
       if (errno == EINTR) continue;
-      if (report) report(false, std::string("poll() failed: ") + std::strerror(errno));
+      // pump() 里的 poll() 出错只结束"这一次连接"(kDisconnected),调用方
+      // (客户端退避重连 / 服务端回 accept 循环)还会继续尝试——不是 worker
+      // 本身的终态,所以 terminal=false。真正的"worker 再也不会做任何事了"
+      // 只发生在 run_server() 的 accept 循环自己的 poll() 上(cfg_.listen 为
+      // false 时压根没有等价的终态路径,见 run_client() 里的说明)。
+      if (report) report(false, std::string("poll() failed: ") + std::strerror(errno), false);
       return PumpResult::kDisconnected;
     }
     if (fds[1].revents & POLLIN) {
@@ -265,7 +275,7 @@ TcpStream::PumpResult TcpStream::pump(int fd, const OnState& report, int preempt
     }
     if (pr == 0) {
       // 静默超过 idle_timeout_s:链路差时对端常不发 RST 就消失,视为断开。
-      if (report) report(false, "idle timeout");
+      if (report) report(false, "idle timeout", false);
       return PumpResult::kDisconnected;
     }
     if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
@@ -273,12 +283,12 @@ TcpStream::PumpResult TcpStream::pump(int fd, const OnState& report, int preempt
       if (n > 0) {
         if (on_data_) on_data_(buf, static_cast<size_t>(n));
       } else if (n == 0) {
-        if (report) report(false, "peer closed connection");
+        if (report) report(false, "peer closed connection", false);
         return PumpResult::kDisconnected;
       } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
         continue;  // 非阻塞 fd 上的虚假唤醒,重新 poll
       } else {
-        if (report) report(false, std::string("recv() failed: ") + std::strerror(errno));
+        if (report) report(false, std::string("recv() failed: ") + std::strerror(errno), false);
         return PumpResult::kDisconnected;
       }
     }
@@ -292,10 +302,14 @@ TcpStream::PumpResult TcpStream::pump(int fd, const OnState& report, int preempt
 void TcpStream::run_server() {
   bool have_last_state = false;
   bool last_state = false;
-  auto report = [&](bool connected, const std::string& detail) {
+  // final-fix-wave 第 2 项:terminal=true 的调用绕开"仅在跳变时上报"这条
+  // 去抖逻辑,总是无条件传给 on_state_——这是 worker 退出前最后一次、也是
+  // 唯一一次说明原因的机会,不能因为上一次恰好也报过 disconnected(比如
+  // 上一个对端刚断开)就被去抖逻辑吞掉。
+  auto report = [&](bool connected, const std::string& detail, bool terminal = false) {
     if (!on_state_) return;
-    if (have_last_state && last_state == connected) return;  // 仅在跳变时上报
-    on_state_(connected, detail);
+    if (!terminal && have_last_state && last_state == connected) return;  // 仅在跳变时上报
+    on_state_(connected, detail, terminal);
     have_last_state = true;
     last_state = connected;
   };
@@ -322,8 +336,10 @@ void TcpStream::run_server() {
   }
   if (gai_rc != 0 || resolved == nullptr) {
     // 绑定地址解析失败必须上报,否则调用方只会看到 bound_port() 恒为 -1,
-    // 却查不到原因(这正是 Task 1 遗留的最小实现里缺失的一环)。
-    report(false, "resolve listen address " + cfg_.host + " failed: " + ::gai_strerror(gai_rc));
+    // 却查不到原因(这正是 Task 1 遗留的最小实现里缺失的一环)。这是启动
+    // 失败,worker 线程接下来就返回、不会有任何重试——terminal=true。
+    report(false, "resolve listen address " + cfg_.host + " failed: " + ::gai_strerror(gai_rc),
+           true);
     if (resolved) ::freeaddrinfo(resolved);
     running_.store(false);
     return;
@@ -341,7 +357,8 @@ void TcpStream::run_server() {
   // 分配失败、client 侧 recv() 前不切回阻塞模式,是同一类"绝不能挂死"问题。
   int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
   if (fd < 0) {
-    report(false, std::string("socket() failed: ") + std::strerror(errno));
+    // 同上:worker 线程不会启动,不会有后续重试——terminal=true。
+    report(false, std::string("socket() failed: ") + std::strerror(errno), true);
     running_.store(false);
     return;
   }
@@ -349,13 +366,17 @@ void TcpStream::run_server() {
   ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
   if (::bind(fd, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) != 0) {
-    report(false, std::string("bind() failed: ") + std::strerror(errno));
+    // final-fix-wave 第 2 项实测复现的场景:listen=true 时把 host 误配成
+    // 平台/板卡的对端 IP(而不是本机地址)会一路走到这里的 EADDRNOTAVAIL——
+    // 之前只在 INFO 级别报一次,此后这条流永远不会再做任何事,现场看起来
+    // "节点在跑、就是没数据"。terminal=true,调用方必须用 ERROR 记录。
+    report(false, std::string("bind() failed: ") + std::strerror(errno), true);
     ::close(fd);
     running_.store(false);
     return;
   }
   if (::listen(fd, 4) != 0) {
-    report(false, std::string("listen() failed: ") + std::strerror(errno));
+    report(false, std::string("listen() failed: ") + std::strerror(errno), true);
     ::close(fd);
     running_.store(false);
     return;
@@ -384,7 +405,15 @@ void TcpStream::run_server() {
     const int pr = ::poll(fds, 2, -1);
     if (pr < 0) {
       if (errno == EINTR) continue;
-      report(false, std::string("poll() failed: ") + std::strerror(errno));
+      // final-fix-wave 第 2 项:这条 poll() 出错之后整个 accept 循环直接
+      // break 出去,这个 worker 从此再也不会 accept 任何新连接——是一次
+      // 终态,不是"这次连接自己断了"那种还会重试的普通跳变。旧版本这里只
+      // report() 却没有同步 running_.store(false):对象因此会一直汇报
+      // "自己在跑"(running_ 仍是 true),而实际上工作线程已经退出、不会再
+      // 做任何事——调用方(rtkrcv_node/rtcm_bridge)没有任何办法通过查询
+      // TcpStream 本身发现这一点,只能重新 start() 才会重新尝试。
+      report(false, std::string("poll() failed: ") + std::strerror(errno), true);
+      running_.store(false);
       break;
     }
     if (fds[1].revents & POLLIN) break;  // stop() 唤醒
@@ -393,7 +422,11 @@ void TcpStream::run_server() {
         // 监听 socket 本身坏掉了(不是"有连接进来"那种正常可读),不是
         // 重试能恢复的瞬时状况——继续 poll 只会在这里原地打转,同样是
         // finding 里点名的那种热循环。上报后直接结束这个 worker。
-        report(false, "listen socket error");
+        //
+        // final-fix-wave 第 2 项:同上,这也是一次终态——同步补上
+        // running_.store(false),不能让对象继续汇报"自己在跑"。
+        report(false, "listen socket error", true);
+        running_.store(false);
         break;
       }
       continue;  // 其它虚假唤醒,重新 poll

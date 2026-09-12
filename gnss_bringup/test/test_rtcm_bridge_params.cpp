@@ -9,6 +9,7 @@
 using gnss_bringup::find_duplicate_stream_name;
 using gnss_bringup::is_positive_finite_backoff_seconds;
 using gnss_bringup::is_valid_port;
+using gnss_bringup::is_valid_port_for_direction;
 
 // is_valid_port: 合法范围 [0, 65535]。0 在监听模式下表示"由内核选择"(测试用)。
 TEST(IsValidPort, RejectsNegative) {
@@ -29,6 +30,36 @@ TEST(IsValidPort, RejectsJustAboveMax) {
 TEST(IsValidPort, RejectsFarAboveMax) {
   // 复现 reviewer 报告的 99999:htons(static_cast<uint16_t>(99999)) 会静默截断为 34463。
   EXPECT_FALSE(is_valid_port(99999));
+}
+
+// is_valid_port_for_direction: final-fix-wave 第 1 项——0 只在 listen 方向
+// 合法,connect 方向(listen=false)必须拒绝 0,否则会一路传到
+// connect(...:0),既不报错也永远连不上,worker 只会无限退避重试
+// ("dials nothing, silently, forever")。覆盖 rtcm_bridge_node.cpp 里
+// listen=false 流的端口校验,以及 rtkrcv_node.cpp 里 sol_port(客户端,
+// 连 rtkrcv 的 outstr1)的校验——两者都复用这同一个谓词。
+TEST(IsValidPortForDirection, AcceptsZeroWhenListening) {
+  EXPECT_TRUE(is_valid_port_for_direction(0, /*listen=*/true));
+}
+TEST(IsValidPortForDirection, RejectsZeroWhenConnecting) {
+  // 复现 reviewer 报告的两个场景:rtcm_bridge 的 `-p b.port:=0
+  // -p b.listen:=false`,以及 rtkrcv_node 的 `-p sol_port:=0`——两者都是
+  // "connect 方向的端口是 0",必须在这里被拒绝。
+  EXPECT_FALSE(is_valid_port_for_direction(0, /*listen=*/false));
+}
+TEST(IsValidPortForDirection, AcceptsOrdinaryPortRegardlessOfDirection) {
+  EXPECT_TRUE(is_valid_port_for_direction(15031, /*listen=*/true));
+  EXPECT_TRUE(is_valid_port_for_direction(15031, /*listen=*/false));
+}
+TEST(IsValidPortForDirection, StillRejectsOutOfRangeRegardlessOfDirection) {
+  EXPECT_FALSE(is_valid_port_for_direction(-1, /*listen=*/true));
+  EXPECT_FALSE(is_valid_port_for_direction(-1, /*listen=*/false));
+  EXPECT_FALSE(is_valid_port_for_direction(99999, /*listen=*/true));
+  EXPECT_FALSE(is_valid_port_for_direction(99999, /*listen=*/false));
+}
+TEST(IsValidPortForDirection, AcceptsMaxValidPortRegardlessOfDirection) {
+  EXPECT_TRUE(is_valid_port_for_direction(65535, /*listen=*/true));
+  EXPECT_TRUE(is_valid_port_for_direction(65535, /*listen=*/false));
 }
 
 // find_duplicate_stream_name: streams 列表去重检测,用于在 declare_parameter 抛

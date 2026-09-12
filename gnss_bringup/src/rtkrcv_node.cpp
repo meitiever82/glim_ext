@@ -45,7 +45,7 @@
 
 #include "gnss_bringup/local_reserver.hpp"
 #include "gnss_bringup/process_supervisor.hpp"
-#include "gnss_bringup/rtcm_bridge_params.hpp"   // is_valid_port:与 rtcm_bridge_node 共用的端口校验
+#include "gnss_bringup/rtcm_bridge_params.hpp"   // is_valid_port_for_direction:与 rtcm_bridge_node 共用的端口校验
 #include "gnss_bringup/rtk_fix_mapping.hpp"       // to_rtk_fix + LineSplitter + plan_stat_tail
 #include "gnss_bringup/rtkrcv_conf.hpp"
 #include "gnss_bringup/tcp_stream.hpp"
@@ -152,9 +152,21 @@ public:
 private:
   // ---------- Step 1: 参数 ----------
   void read_params() {
-    conf_.obs_port = static_cast<int>(declare_port("obs_port", conf_.obs_port));
-    conf_.corr_port = static_cast<int>(declare_port("corr_port", conf_.corr_port));
-    conf_.sol_port = static_cast<int>(declare_port("sol_port", conf_.sol_port));
+    // obs_port/corr_port 是 LocalReserver 要 listen() 的本机端口——0 合法,
+    // 表示让内核选(start_local_reservers() 之后立刻用 bound_port() 回填
+    // conf_,见下面的说明)。
+    conf_.obs_port = static_cast<int>(declare_port("obs_port", conf_.obs_port, /*allow_zero=*/true));
+    conf_.corr_port =
+        static_cast<int>(declare_port("corr_port", conf_.corr_port, /*allow_zero=*/true));
+    // final-fix-wave 第 1 项:sol_port 不是 listen 端口——这个节点是客户端,
+    // 拿它去 connect_solution_stream() 里 connect() rtkrcv 的 outstr1
+    // (tcpsvr)。0 在这个方向上没有任何操作系统语义,会一路传到
+    // TcpStream::run_client() 里的 connect(127.0.0.1:0),既不报错也永远
+    // 连不上——worker 只会一次次退避重连,日志里只有一行不痛不痒的
+    // "connect() failed",现场表现为"配置检查全部通过、节点看起来在跑,
+    // 但 ~/rtk_fix 永远没有输出"。已实测复现:-p sol_port:=0。
+    conf_.sol_port =
+        static_cast<int>(declare_port("sol_port", conf_.sol_port, /*allow_zero=*/false));
     conf_.obs_format = node_->declare_parameter<std::string>("obs_format", conf_.obs_format);
     conf_.corr_format = node_->declare_parameter<std::string>("corr_format", conf_.corr_format);
     conf_.pos_mode = node_->declare_parameter<std::string>("pos_mode", conf_.pos_mode);
@@ -205,13 +217,17 @@ private:
     }
   }
 
-  int64_t declare_port(const std::string& name, int default_value) {
+  int64_t declare_port(const std::string& name, int default_value, bool allow_zero) {
     // declare_parameter<int> 实际返回 int64_t(与 rtcm_bridge_node.cpp 同样的
     // 注意事项),这里统一按 int64_t 接住再校验范围。
     const int64_t v = node_->declare_parameter<int>(name, default_value);
-    if (!gnss_bringup::is_valid_port(v)) {
-      throw std::invalid_argument(name + ": 非法端口号 " + std::to_string(v) +
-                                   "(合法范围 0-65535)");
+    // is_valid_port_for_direction 的第二个参数字面意思是"listen 模式下 0
+    // 合法",allow_zero 就是那个语义在这里的名字——sol_port 传 false 是因为
+    // 它是 connect 方向,不是因为它本身会 listen。
+    if (!gnss_bringup::is_valid_port_for_direction(v, allow_zero)) {
+      throw std::invalid_argument(
+          name + ": 非法端口号 " + std::to_string(v) + "(合法范围 0-65535" +
+          (allow_zero ? "" : ";这个端口是连接方向,不接受 0") + ")");
     }
     return v;
   }
@@ -229,10 +245,25 @@ private:
 
   // ---------- Step 2: 先起本机服务,rtkrcv 才有地方连 ----------
   void start_local_reservers() {
-    if (!corr_reserver_.start(conf_.corr_port)) {
+    // final-fix-wave 第 2 项:LocalReserver 自己不做任何日志/回调
+    // (它刻意不碰 ROS,便于单测),accept_loop 因不可恢复错误永久退出时
+    // 原来完全没有任何对外信号——现场表现为"节点看起来在跑,
+    // corrections/raw_obs 却再也传不到 rtkrcv"。这里补上 ERROR 级别的
+    // 回调,这是现场唯一能看到的信号,不能比 TcpStream 那边的终态日志更弱。
+    if (!corr_reserver_.start(conf_.corr_port, "127.0.0.1", [this](const std::string& detail) {
+          RCLCPP_ERROR(node_->get_logger(),
+                       "corr LocalReserver 的 accept 线程已永久退出,不会再接受任何新连接,"
+                       "corrections 上行数据从此丢失(需要人工介入/重启节点): %s",
+                       detail.c_str());
+        })) {
       throw std::runtime_error("无法监听 corr_port=" + std::to_string(conf_.corr_port));
     }
-    if (!obs_reserver_.start(conf_.obs_port)) {
+    if (!obs_reserver_.start(conf_.obs_port, "127.0.0.1", [this](const std::string& detail) {
+          RCLCPP_ERROR(node_->get_logger(),
+                       "obs LocalReserver 的 accept 线程已永久退出,不会再接受任何新连接,"
+                       "raw_obs 上行数据从此丢失(需要人工介入/重启节点): %s",
+                       detail.c_str());
+        })) {
       throw std::runtime_error("无法监听 obs_port=" + std::to_string(conf_.obs_port));
     }
 
@@ -358,9 +389,21 @@ private:
     sol_stream_ = std::make_unique<TcpStream>(
         cfg,
         [this](const uint8_t* d, size_t n) { on_solution_bytes(d, n); },
-        [this](bool connected, const std::string& detail) {
-          RCLCPP_INFO(node_->get_logger(), "sol stream: %s %s",
-                      connected ? "connected" : "disconnected", detail.c_str());
+        [this](bool connected, const std::string& detail, bool terminal) {
+          // final-fix-wave 第 2 项:terminal=true 说明这条 TcpStream 的
+          // worker 线程已经永久退出(sol_port 这条是客户端流,目前唯一会
+          // 触发的终态路径是 eventfd() 分配失败),不会再有任何重连尝试。
+          // 这个节点不会自动重启它,也没有健康检查话题,现场只能靠这行
+          // 日志发现——必须是 ERROR。
+          if (terminal) {
+            RCLCPP_ERROR(node_->get_logger(),
+                         "sol stream: %s %s(worker 线程已永久退出,不会再有任何"
+                         "重连尝试,需要人工介入/重启节点)",
+                         connected ? "connected" : "disconnected", detail.c_str());
+          } else {
+            RCLCPP_INFO(node_->get_logger(), "sol stream: %s %s",
+                        connected ? "connected" : "disconnected", detail.c_str());
+          }
           if (!connected) {
             // review round 1 的 Important 4:rtkrcv 被杀/连接断开时,
             // sol_splitter_ 里可能还留着一段没等到 '\n' 的半行。如果不清掉,

@@ -30,11 +30,22 @@ public:
     // htons(static_cast<uint16_t>(port)) 处被静默截断成另一个端口——节点照常
     // 打印"listen ok",实际绑定的却是完全不同的端口,现场表现为"启动正常但
     // 差分永远收不到",且日志里没有任何异常。必须在这里挡住并明确报错。
-    if (!gnss_bringup::is_valid_port(port)) {
+    //
+    // final-fix-wave 第 1 项:port==0 只在 listen=true(监听模式,内核选端口)
+    // 时才合法。listen=false 时 0 会一路传到 connect(...:0),没有任何操作
+    // 系统语义,不报错、也不会真正连上任何东西——worker 只会一次次退避重连,
+    // 日志里只有一行不痛不痒的 "connect() failed",现场表现为"配置检查全部
+    // 通过、节点看起来在跑,但这路流永远没有数据"。已实测复现:
+    // -p b.port:=0 -p b.listen:=false。
+    if (!gnss_bringup::is_valid_port_for_direction(port, listen)) {
       RCLCPP_ERROR(node->get_logger(),
-                   "%s: 非法端口号 %ld(合法范围 0-65535,0 表示监听模式下由内核选择)",
+                   "%s: 非法端口号 %ld(合法范围 0-65535;0 只有在 listen=true 时才合法,"
+                   "表示由内核选择——listen=false 时 0 会静默 connect 到一个不存在的目标,"
+                   "永远重试)",
                    name.c_str(), static_cast<long>(port));
-      throw std::invalid_argument(name + ": port out of range: " + std::to_string(port));
+      throw std::invalid_argument(name + ": port out of range for listen=" +
+                                   std::string(listen ? "true" : "false") + ": " +
+                                   std::to_string(port));
     }
 
     frame_ = frame;
@@ -59,9 +70,21 @@ public:
     stream_ = std::make_unique<gnss_bringup::TcpStream>(
         cfg,
         [this](const uint8_t* d, size_t n) { publish(d, n); },
-        [this](bool connected, const std::string& detail) {
-          RCLCPP_INFO(node_->get_logger(), "%s: %s %s", name_.c_str(),
-                      connected ? "connected" : "disconnected", detail.c_str());
+        [this](bool connected, const std::string& detail, bool terminal) {
+          // final-fix-wave 第 2 项:terminal=true 表示这条流的 worker 线程
+          // 已经永久退出(bind/listen/socket/poll 出错),这个节点不会自动
+          // 重启它,也没有任何健康检查话题——现场唯一能看到的信号就是这行
+          // 日志,必须是 ERROR 而不是和普通重连噪声一样的 INFO。
+          if (terminal) {
+            RCLCPP_ERROR(node_->get_logger(),
+                         "%s: %s %s(worker 线程已永久退出,不会再有任何连接尝试,"
+                         "需要人工介入)",
+                         name_.c_str(), connected ? "connected" : "disconnected",
+                         detail.c_str());
+          } else {
+            RCLCPP_INFO(node_->get_logger(), "%s: %s %s", name_.c_str(),
+                        connected ? "connected" : "disconnected", detail.c_str());
+          }
         });
     stream_->start();
   }
@@ -90,14 +113,12 @@ private:
     msg.header.frame_id = frame_;
     msg.data.assign(d, d + n);
     pub_->publish(msg);
-    bytes_ += n;
   }
 
   rclcpp::Node* node_;
   std::string name_, frame_;
   rclcpp::Publisher<gnss_msgs::msg::RawStream>::SharedPtr pub_;
   std::unique_ptr<gnss_bringup::TcpStream> stream_;
-  size_t bytes_ = 0;
 };
 
 }  // namespace
@@ -130,8 +151,11 @@ int main(int argc, char** argv) {
     for (const auto& n : names) streams.push_back(std::make_unique<BridgedStream>(node.get(), n));
   } catch (const std::exception& e) {
     // 覆盖:非法流名(含 '/'、以数字开头、空字符串等)触发的
-    // InvalidParameterNameException / InvalidTopicNameError,以及上面主动抛出的
-    // 端口越界 invalid_argument,都是 std::exception 的子类,统一在这里收口。
+    // rclcpp::exceptions::InvalidParametersException(declare_parameter 对空
+    // 名字的报错)/ rclcpp::exceptions::InvalidTopicNameError
+    // (create_publisher 对非法话题名的报错;rclcpp 里没有
+    // InvalidParameterNameException 这个类型),以及上面主动抛出的端口越界
+    // invalid_argument,都是 std::exception 的子类,统一在这里收口。
     RCLCPP_ERROR(node->get_logger(), "启动失败,配置有误: %s", e.what());
     streams.clear();
     rclcpp::shutdown();

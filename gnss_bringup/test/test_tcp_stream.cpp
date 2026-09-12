@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <arpa/inet.h>
+#include <dlfcn.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -13,6 +14,67 @@
 #include <vector>
 #include "gnss_bringup/tcp_stream.hpp"
 using namespace gnss_bringup;
+
+// final-fix-wave 第 2 项回归测试用的探针。
+//
+// 最初的设计是:等 run_server() 的监听 socket 建好之后,从测试线程直接把
+// 那个 fd close() 掉,指望 accept 循环下一次 poll() 看到 POLLNVAL。用一个
+// 独立的最小复现程序验证过这个假设是错的:在 Linux 上,一个线程已经阻塞在
+// poll(fd, ..., -1) 里之后,另一个线程 close() 掉同一个 fd **不会**唤醒
+// 那次 poll() 调用(POSIX 本身也没有承诺这个行为)——会一直阻塞到超时,
+// 测试因此变成了一次不稳定的、依赖谁先被调度的竞态(实测在部分环境下
+// 3 秒内根本等不到回调)。
+//
+// 改成拦截 poll() 本身来注入故障,并且把"武装"这个动作放进 socket() 的
+// 拦截器里、在返回给调用方(run_server() 自己所在的那个线程)之前就同步
+// 完成——这样"武装"和"这个线程自己接下来第一次调用 poll()"之间是同一个
+// 线程上的顺序关系(happens-before),不再是两个线程之间的竞态。run_server()
+// 建监听 socket 时唯一会带 SOCK_NONBLOCK 标志调用 socket() 的地方(run_client()
+// 的客户端 socket 是先不带这个标志、再用 fcntl() 补非阻塞的,现场就能分辨)。
+namespace tcp_stream_test_probe {
+std::atomic<int> g_last_nonblock_socket_fd{-1};
+// 测试在调用 s.start() 之前把这个设成 true,表示"下一个带 SOCK_NONBLOCK
+// 标志的 socket() 调用,就是要注入故障的目标"——由 socket() 的拦截器自己
+// 同步完成"记录 fd + 武装 poll 故障"这两步,不依赖任何跨线程的时序假设。
+std::atomic<bool> g_arm_poll_fault_on_next_nonblock_socket{false};
+std::atomic<int> g_poll_fault_target_fd{-1};
+std::atomic<bool> g_poll_fault_armed{false};
+}  // namespace tcp_stream_test_probe
+
+extern "C" int socket(int domain, int type, int protocol) {
+  using SocketFn = int (*)(int, int, int);
+  static SocketFn real = reinterpret_cast<SocketFn>(::dlsym(RTLD_NEXT, "socket"));
+  const int fd = real(domain, type, protocol);
+  if (fd >= 0 && (type & SOCK_NONBLOCK)) {
+    tcp_stream_test_probe::g_last_nonblock_socket_fd.store(fd);
+    if (tcp_stream_test_probe::g_arm_poll_fault_on_next_nonblock_socket.exchange(false)) {
+      tcp_stream_test_probe::g_poll_fault_target_fd.store(fd);
+      tcp_stream_test_probe::g_poll_fault_armed.store(true);
+    }
+  }
+  return fd;
+}
+
+// 拦截 poll():当武装标志开着、且这次调用的某个 fd 正是目标 fd 时,不真的
+// 调用内核的 poll(),直接伪造出"这个 fd 上 POLLNVAL"的结果并立刻返回——
+// 只触发一次(先解除武装,再伪造结果),之后的调用一律照常转发给真正的
+// poll(),不影响同一个测试进程里其它 TcpStream 实例的正常行为。
+extern "C" int poll(pollfd* fds, nfds_t nfds, int timeout) {
+  using PollFn = int (*)(pollfd*, nfds_t, int);
+  static PollFn real = reinterpret_cast<PollFn>(::dlsym(RTLD_NEXT, "poll"));
+  if (tcp_stream_test_probe::g_poll_fault_armed.load()) {
+    const int target = tcp_stream_test_probe::g_poll_fault_target_fd.load();
+    for (nfds_t i = 0; i < nfds; ++i) {
+      if (fds[i].fd == target) {
+        tcp_stream_test_probe::g_poll_fault_armed.store(false);
+        for (nfds_t j = 0; j < nfds; ++j) fds[j].revents = 0;
+        fds[i].revents = POLLNVAL;
+        return 1;
+      }
+    }
+  }
+  return real(fds, nfds, timeout);
+}
 
 namespace {
 
@@ -143,13 +205,15 @@ TEST(TcpStream, ReportsConnectedThenDisconnected) {
   std::mutex m;
   std::condition_variable cv;
   std::vector<bool> states;
+  std::vector<bool> terminals;
   TcpStreamConfig cfg;
   cfg.port = port;
   cfg.initial_backoff_s = 0.05;
   TcpStream s(cfg, [](const uint8_t*, size_t) {},
-              [&](bool connected, const std::string&) {
+              [&](bool connected, const std::string&, bool terminal) {
                 std::lock_guard<std::mutex> lk(m);
                 states.push_back(connected);
+                terminals.push_back(terminal);
                 cv.notify_all();
               });
   s.start();
@@ -161,6 +225,11 @@ TEST(TcpStream, ReportsConnectedThenDisconnected) {
                           [&] { return states.size() >= 2; }));
   EXPECT_TRUE(states[0]) << "先报 connected";
   EXPECT_FALSE(states[1]) << "对端关闭后报 disconnected";
+  // final-fix-wave 第 2 项:普通的断线重连(对端主动关闭连接)不是 worker
+  // 永久退出——client 侧还会继续退避重连——两次回调都不应该是 terminal,
+  // 调用方据此仍然按 INFO 记录,不能被这次改动误升级成 ERROR。
+  EXPECT_FALSE(terminals[0]);
+  EXPECT_FALSE(terminals[1]) << "对端关闭连接是可恢复的重连场景,不是终态";
   lk.unlock();
   s.stop();
 }
@@ -179,7 +248,7 @@ TEST(TcpStream, StopReturnsPromptlyWhenNeverConnected) {
   cfg.port = 1;                      // 特权端口,必然连不上
   cfg.initial_backoff_s = 10.0;      // 故意设很长,验证 stop 不是靠等退避结束
   TcpStream s(cfg, [&](const uint8_t* d, size_t n) { sink.push(d, n); },
-              [&](bool connected, const std::string&) {
+              [&](bool connected, const std::string&, bool) {
                 if (!connected) {
                   std::lock_guard<std::mutex> lk(m);
                   entered_backoff = true;
@@ -218,7 +287,7 @@ TEST(TcpStream, NumericHostSkipsDnsAndStopStaysPrompt) {
   cfg.port = 1;                       // 特权端口,必然连不上
   cfg.initial_backoff_s = 10.0;       // 故意设很长,验证 stop 不是靠等退避结束
   TcpStream s(cfg, [&](const uint8_t* d, size_t n) { sink.push(d, n); },
-              [&](bool connected, const std::string&) {
+              [&](bool connected, const std::string&, bool) {
                 if (!connected) {
                   std::lock_guard<std::mutex> lk(m);
                   entered_backoff = true;
@@ -344,7 +413,7 @@ TEST(TcpStream, ClientBackoffGrowsButIsCappedByMax) {
   cfg.initial_backoff_s = 0.05;
   cfg.max_backoff_s = 0.1;
   TcpStream s(cfg, [](const uint8_t*, size_t) {},
-              [&](bool connected, const std::string&) { if (!connected) ++disconnects; });
+              [&](bool connected, const std::string&, bool) { if (!connected) ++disconnects; });
   s.start();
   std::this_thread::sleep_for(std::chrono::milliseconds(600));
   s.stop();
@@ -363,16 +432,18 @@ TEST(TcpStream, ListenModeReportsBindFailureAndLeavesBoundPortNegative) {
   std::mutex m;
   std::condition_variable cv;
   bool got_failure = false;
+  bool terminal_flag = false;
   std::string detail;
   TcpStreamConfig cfg;
   cfg.listen = true;
   cfg.host = "192.0.2.1";
   cfg.port = 0;
   TcpStream s(cfg, [](const uint8_t*, size_t) {},
-              [&](bool connected, const std::string& d) {
+              [&](bool connected, const std::string& d, bool terminal) {
                 if (!connected) {
                   std::lock_guard<std::mutex> lk(m);
                   got_failure = true;
+                  terminal_flag = terminal;
                   detail = d;
                   cv.notify_all();
                 }
@@ -384,6 +455,70 @@ TEST(TcpStream, ListenModeReportsBindFailureAndLeavesBoundPortNegative) {
         << "绑定失败必须经 on_state_ 报出来";
   }
   EXPECT_NE(detail.find("bind"), std::string::npos) << "detail=" << detail;
+  // final-fix-wave 第 2 项:bind() 失败之后 worker 线程直接返回,不会有任何
+  // 重试——这是终态,调用方必须能区分出来并记成 ERROR,而不是和普通的
+  // 断线重连一样淹没在 INFO 里。
+  EXPECT_TRUE(terminal_flag) << "bind() 失败是 worker 的终态,必须标记 terminal=true";
   s.stop();
   EXPECT_EQ(s.bound_port(), -1) << "绑定失败后 bound_port() 不应该变正";
+}
+
+TEST(TcpStream, ListenSocketErrorIsTerminalAndAllowsRestart) {
+  // final-fix-wave 第 2 项回归测试:accept 循环里 poll() 报出监听 socket
+  // 本身坏掉(POLLERR/POLLNVAL)之前,run_server() 只 report() 却忘了
+  // running_.store(false)——对象因此会一直汇报"自己在跑",而工作线程早已
+  // 退出;唯一的补救手段(重新调用 start())也会被 start() 顶部的
+  // running_.exchange(true) 直接短路掉(误判"已经在跑,忽略"),永远拿不到
+  // 一个新线程/新端口。这是本项修复的核心断言:running_ 必须被正确置回
+  // false,重新 start() 之后必须真的又绑上了一个新端口。
+  //
+  // 用文件顶部的探针注入故障:武装之后,run_server() 建监听 socket 的那次
+  // socket() 调用(唯一带 SOCK_NONBLOCK 标志的地方)会同步记下这个 fd 并
+  // 武装 poll() 拦截器——这个动作和 run_server() 自己接下来第一次调用
+  // poll() 发生在同一个线程上,不是跨线程竞态。
+  tcp_stream_test_probe::g_arm_poll_fault_on_next_nonblock_socket.store(true);
+
+  TcpStreamConfig cfg;
+  cfg.listen = true;
+  cfg.port = 0;
+
+  std::mutex m;
+  std::condition_variable cv;
+  bool got_terminal = false;
+  TcpStream s(cfg, [](const uint8_t*, size_t) {},
+              [&](bool connected, const std::string&, bool terminal) {
+                if (!connected && terminal) {
+                  std::lock_guard<std::mutex> lk(m);
+                  got_terminal = true;
+                  cv.notify_all();
+                }
+              });
+  s.start();
+
+  {
+    std::unique_lock<std::mutex> lk(m);
+    ASSERT_TRUE(cv.wait_for(lk, std::chrono::seconds(3), [&] { return got_terminal; }))
+        << "监听 socket 坏掉之后必须以 terminal=true 上报";
+  }
+
+  // 给 worker 线程一点时间真正跑到函数返回(report() 之后还有
+  // bound_port_.store(-1) 这一步)。
+  for (int i = 0; i < 100 && s.bound_port() != -1; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(s.bound_port(), -1);
+
+  // 核心回归断言:running_ 必须已经被正确置回 false——不然这次 start()
+  // 会被 running_.exchange(true) 直接短路,永远拿不到新线程、新端口也会
+  // 一直停在 -1。
+  s.start();
+  int new_port = -1;
+  for (int i = 0; i < 100 && new_port <= 0; ++i) {
+    new_port = s.bound_port();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_GT(new_port, 0) << "poll()/监听 socket 出错后 running_ 没有被正确置回 false,"
+                            "导致重新 start() 失败——对象卡在一个已经没有工作线程、"
+                            "却仍然自称在跑的状态";
+  s.stop();
 }

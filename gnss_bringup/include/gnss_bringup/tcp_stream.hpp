@@ -8,8 +8,19 @@
 namespace gnss_bringup {
 
 using OnData = std::function<void(const uint8_t* data, size_t len)>;
-// connected=true 进入连通态,false 断开;detail 供日志
-using OnState = std::function<void(bool connected, const std::string& detail)>;
+// connected=true 进入连通态,false 断开;detail 供日志。
+//
+// final-fix-wave 第 2 项新增的 terminal:true 表示这次回调对应的是 worker
+// 线程本身正在永久退出(eventfd()/监听地址解析/socket()/bind()/listen() 失败,
+// 或者 accept 循环里 poll() 本身出错/监听 socket 坏掉)——此后不会再有任何
+// 连接尝试,这条流已经彻底死掉,只是对象仍然"看起来在跑"(bound_port()/
+// running 状态不会主动告诉调用方)。false 表示这是重连/断线过程中的一次
+// 普通跳变(对端关闭、空闲超时、单次 connect()/recv() 失败等),worker 还会
+// 继续退避重试。调用方必须区分对待:terminal=true 应该记成 ERROR(现场唯一
+// 的信号来源——两个节点都不会自动重启一个自行退出的 worker,也没有健康检查
+// 话题),terminal=false 仍然按 INFO 记录,不能因为这次改动把正常的重连噪声
+// 也升级成 ERROR。
+using OnState = std::function<void(bool connected, const std::string& detail, bool terminal)>;
 
 struct TcpStreamConfig {
   std::string host = "127.0.0.1";

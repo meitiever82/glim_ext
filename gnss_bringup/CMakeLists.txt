@@ -43,7 +43,11 @@ install(TARGETS rtkrcv_node DESTINATION lib/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_tcp_stream test/test_tcp_stream.cpp)
-  target_link_libraries(test_tcp_stream gnss_bringup_io)
+  # final-fix-wave 第 2 项:test_tcp_stream.cpp 用 dlsym(RTLD_NEXT, "socket")
+  # 拦截 socket() 调用来抓 run_server() 的监听 fd(见测试文件里的注释),
+  # 和 test_local_reserver 拦截 close()/accept4()/socket()/pipe2() 是同一个
+  # 手法,同样需要显式链接 dl。
+  target_link_libraries(test_tcp_stream gnss_bringup_io dl)
 
   ament_add_gtest(test_local_reserver test/test_local_reserver.cpp)
   # test_local_reserver 用 dlsym(RTLD_NEXT, ...) 重新定义
