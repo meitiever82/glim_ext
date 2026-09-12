@@ -128,11 +128,19 @@ void LocalReserver::stop() {
   // 幂等,重复调用 stop() 依然安全。
   running_.store(false);
 
-  const int wr = wake_wr_.load();
-  if (wr >= 0) {
-    const uint8_t one = 1;
-    const ssize_t written = ::write(wr, &one, sizeof(one));
-    (void)written;  // 唤醒信号,写失败也无妨(线程可能已经在退出路上)
+  // fix round 2:唤醒字节的 write() 挪到和 broadcast() 相同的锁下面做
+  // ——broadcast() 现在也在持有 m_ 的情况下才 write() wake_wr_(见
+  // broadcast() 里的注释),两边用同一把锁互斥,就不会有 stop() 正在
+  // close() wake_wr_、broadcast() 又同时往(已经或即将被关闭/复用的)
+  // 那个 fd 编号里写字节的情况。
+  {
+    std::lock_guard<std::mutex> lock(m_);
+    const int wr = wake_wr_.load();
+    if (wr >= 0) {
+      const uint8_t one = 1;
+      const ssize_t written = ::write(wr, &one, sizeof(one));
+      (void)written;  // 唤醒信号,写失败也无妨(线程可能已经在退出路上)
+    }
   }
   if (thread_.joinable()) {
     thread_.join();
@@ -142,10 +150,16 @@ void LocalReserver::stop() {
   // accept——StopReleasesThePortAndIsIdempotent 要求 stop() 之后一个全新的
   // 实例能立刻绑定同一个端口,SO_REUSEADDR 不能替代真正 close() 掉旧的
   // 监听 fd。这三个 fd 从始至终只由 stop() 关闭,accept_loop 自己退出时
-  // 不会碰它们,所以这里不会和 accept 线程竞争同一次 close()。
+  // 不会碰它们,所以这里不会和 accept 线程竞争同一次 close()。listen_fd_/
+  // wake_fd_(读端)broadcast() 从不触碰,不需要额外持锁;wake_wr_
+  // (写端)broadcast() 会写,所以它的 close() 也放进同一把锁里,和上面
+  // 那次持锁的 write() 对称。
   take_and_close(listen_fd_);
   take_and_close(wake_fd_);
-  take_and_close(wake_wr_);
+  {
+    std::lock_guard<std::mutex> lock(m_);
+    take_and_close(wake_wr_);
+  }
   bound_port_.store(-1);
 
   // accept_loop 已经 join() 完毕,不会再有人往 clients_/to_drop_ 里
@@ -198,6 +212,16 @@ void LocalReserver::broadcast(const uint8_t* data, size_t len) {
   // 真正的 close() 仍然只由 accept_loop 做(见头文件的 fd 归属注释):
   // 这里只把失败的 fd 从 clients_ 挪到 to_drop_,再唤醒 accept 线程去
   // close()——保证每个客户端 fd 只有一个线程会调用 close()。
+  // fix round 2 追加修复(Important,新引入的问题):唤醒字节的 write()
+  // 原来在锁外面做,而 stop() 会在 join() 之后(不持锁)close() 掉
+  // wake_wr_——这一读一关没有任何同步,broadcast()(运行在 ROS 订阅
+  // 回调线程上,节点关闭时随时可能被调用)可能正好在 stop() close()
+  // 掉 wake_wr_ 的同一时刻往它里面写,把一个字节写进一个刚被内核复用给
+  // 别的连接的 fd 编号——性质和 Important 3 一样,只是配对从
+  // "stop() vs worker" 换成了实际部署里真会发生的"broadcast() vs
+  // stop()"(ROS 回调线程在节点关闭过程中送来一批差分数据)。
+  // 修法:把这次 write() 挪进和上面摘除逻辑同一把锁里,并让 stop() 也在
+  // 持有同一把锁的情况下才去 close() wake_wr_——两边永远不会交叠。
   bool should_wake = false;
   {
     std::lock_guard<std::mutex> lock(m_);
@@ -222,13 +246,13 @@ void LocalReserver::broadcast(const uint8_t* data, size_t len) {
         ++it;
       }
     }
-  }
-  if (should_wake) {
-    const int wr = wake_wr_.load();
-    if (wr >= 0) {
-      const uint8_t one = 1;
-      const ssize_t written = ::write(wr, &one, sizeof(one));
-      (void)written;  // 唤醒信号,写失败也无妨(accept 线程可能已经在退出)
+    if (should_wake) {
+      const int wr = wake_wr_.load();
+      if (wr >= 0) {
+        const uint8_t one = 1;
+        const ssize_t written = ::write(wr, &one, sizeof(one));
+        (void)written;  // 唤醒信号,写失败也无妨(accept 线程可能已经在退出)
+      }
     }
   }
 }
@@ -317,7 +341,11 @@ void LocalReserver::accept_loop() {
     // 处理 broadcast() 摘下来、等着被真正 close() 的死连接——全程只有
     // accept 线程会 close() 客户端 fd(见头文件的 fd 归属注释),
     // broadcast() 只挪列表、不 close(),避免两个线程各自 close() 同一个
-    // fd 的竞态。
+    // fd 的竞态。同时顺手拍一张 to_drop_ 剩余内容(如果这次 swap 之后、
+    // 下面的 recv() 扫描之前,broadcast() 又并发塞了新条目进来)的快照,
+    // 给下面的扫描当"这个 fd 已经被别人认领,别再动它"的参考——这只是
+    // 优化/减少无谓的 recv() 调用,真正防止 double close() 的是扫描末尾
+    // "先确认还在 clients_ 里,再 close()"这一步(见下面注释)。
     std::vector<int> to_close;
     {
       std::lock_guard<std::mutex> lock(m_);
@@ -326,18 +354,37 @@ void LocalReserver::accept_loop() {
     for (const int d : to_close) {
       ::close(d);
     }
+    std::vector<int> pending_drop;
+    {
+      std::lock_guard<std::mutex> lock(m_);
+      pending_drop = to_drop_;  // 非破坏性地看一眼此刻还在排队等 close() 的
+    }
 
-    // 客户端不会主动发数据,但仍然要把到来的字节 recv() 丢掉,否则对端
-    // 一旦真的写了点什么就会卡在内核发送缓冲里出不来。同时用 recv()==0
-    // 或错误来检测"对端已断开",从 clients_ 里摘掉——这条检测路径本来
-    // 就只在本线程里做,直接 close()+摘除是安全的。跳过刚被 to_close
-    // 关掉的 fd:上面 to_drop_ 处理和这里用的是同一轮 poll() 结果,一个
-    // fd 理论上不会同时出现在两边,但即便出现也不能对一个已经被本线程
-    // 自己 close() 过的 fd 编号再 recv()。
+    // fix round 2 修的 Critical:客户端不会主动发数据,但仍然要把到来的
+    // 字节 recv() 丢掉,否则对端一旦真的写了点什么就会卡在内核发送缓冲里
+    // 出不来。同时用 recv()==0 或错误来检测"对端已断开"。
+    //
+    // 这里曾经有个 double close() 的洞:recv() 扫描用的 `fds` 数组是本轮
+    // 循环开始时拍的快照,如果 broadcast()(另一个线程)在这之后、这次
+    // 扫描之前,凭它自己的 EAGAIN 检测已经把同一个 fd 摘进了 to_drop_
+    // (但还没被上面的 to_close 处理关掉——因为它是在 to_close.swap() 之
+    // 后才被塞进去的),而这里的 recv() 扫描又凭 POLLHUP/recv()==0 独立
+    // 判定同一个 fd 已死,原来的代码会在这里无条件 close() 一次;那个 fd
+    // 仍然留在 to_drop_ 里,之后会被下一轮/被 stop() 再 close() 一次,
+    // 期间那个 fd 编号很可能已经被 accept4() 分给了全新的客户端——这就是
+    // review 抓到的"stale to_drop_ 条目关掉一个刚复用的活连接"。
+    //
+    // 修法:close() 之前先在 clients_ 里确认这个 fd 确实还在(under lock)、
+    // 并且是"这一次调用"把它从 clients_ 里摘下来的——摘成功了才 close()。
+    // 摘不到,说明 broadcast() 已经先一步摘掉它、放进了 to_drop_(不管
+    // 关没关),交给那条路径去关,这里绝不重复 close()。这样一来,不变式
+    // 成立:每个客户端 fd 只会被"第一个成功把它从 clients_ 里 erase 掉的
+    // 那次操作"close() 恰好一次,别的路径发现 erase 不到就什么都不做。
     std::vector<int> dead;
     for (size_t i = 2; i < fds.size(); ++i) {
       const int c = fds[i].fd;
       if (std::find(to_close.begin(), to_close.end(), c) != to_close.end()) continue;
+      if (std::find(pending_drop.begin(), pending_drop.end(), c) != pending_drop.end()) continue;
       if (!(fds[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
       const ssize_t n = ::recv(c, discard, sizeof(discard), 0);
       if (n == 0) {
@@ -349,13 +396,23 @@ void LocalReserver::accept_loop() {
     if (!dead.empty()) {
       std::lock_guard<std::mutex> lock(m_);
       for (const int d : dead) {
-        ::close(d);
+        bool found = false;
         for (auto it = clients_.begin(); it != clients_.end(); ++it) {
           if (*it == d) {
             clients_.erase(it);
+            found = true;
             break;
           }
         }
+        if (found) {
+          ::close(d);
+        }
+        // 没找到:d 已经不在 clients_ 里了——上面的 pending_drop 快照有
+        // 时间窗口(它是在 recv() 扫描"之前"拍的,broadcast() 仍可能在
+        // 扫描进行期间才把 d 塞进 to_drop_),所以这个兜底检查不能少。
+        // 找不到就意味着 broadcast() 已经先一步摘除并接管了它,这里绝不
+        // 重复 close(),避免对一个可能已经关闭、fd 编号可能已经复用给
+        // 别的连接的值再次 close()。
       }
     }
   }

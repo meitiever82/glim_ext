@@ -39,7 +39,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_tcp_stream gnss_bringup_io)
 
   ament_add_gtest(test_local_reserver test/test_local_reserver.cpp)
-  target_link_libraries(test_local_reserver gnss_bringup_io)
+  # test_local_reserver 用 dlsym(RTLD_NEXT, ...) 重新定义
+  # close()/accept4()/socket()/pipe2() 来追踪 fd 生命周期(见测试文件里
+  # close_tracker 的注释),需要显式链接 dl。
+  target_link_libraries(test_local_reserver gnss_bringup_io dl)
 
   # rtcm_bridge_node.cpp 自己的纯函数逻辑(端口合法性、streams 去重检测)
   ament_add_gtest(test_rtcm_bridge_params test/test_rtcm_bridge_params.cpp)
