@@ -1,0 +1,99 @@
+rtcm_bridge:
+  ros__parameters:
+    streams: ["rtcm_corrections", "raw_obs"]
+    rtcm_corrections:
+      # TODO(现场确认, spec §13 P0):平台差分的 IP/端口,以及是我们连它(listen=false)
+      # 还是它推给我们(listen=true)。协议已确认为裸 TCP 无解析(rtk-monitor 无 NTRIP)。
+      #
+      # 部署注意(final-fix-wave 第 7 项):host 的含义随 listen 的取值整个
+      # 反过来——listen=false 时 host 是"对端"的地址(我们主动去连它);
+      # listen=true 时 host 是"本机"的绑定地址(对端反过来连我们,通常写
+      # "0.0.0.0" 或某张网卡的地址,而不是对端的 IP)。如果只改了 listen、
+      # 忘了把 host 也换成另一种含义下该填的值(最容易踩的是:改成
+      # listen=true 却把 host 留成原来那个平台/板卡的 IP),这条流会
+      # 永久死掉——bind() 会失败(比如 EADDRNOTAVAIL:本机压根没有那个
+      # 地址),日志里只有一行 ERROR,此后这个节点会一直"看起来在跑",却
+      # 再也不会有任何数据。改 listen 的时候,必须同时检查/改 host。
+      host: "127.0.0.1"
+      port: 15031
+      listen: false  # false=我们主动连 host:port(host=对端地址);true=本机监听 host:port 等对端连入(host=本机绑定地址,通常是 0.0.0.0)——见上面 host 旁的注意事项
+      topic: "/gnss/rtcm_corrections"
+      # 默认等于流名("rtcm_corrections");按需覆盖。
+      frame_id: "rtcm_corrections"
+      # 断线重连的初始/上限退避秒数,以及判定"卡住无数据"的空闲秒数——
+      # 现场是隧道内的弱链路,这三个是运维最可能需要收紧或放宽的旋钮。
+      initial_backoff_s: 1.0
+      max_backoff_s: 30.0
+      idle_timeout_s: 30.0
+    raw_obs:
+      # TODO(现场确认, spec §13 P0):板卡原始观测输出的 IP/端口或串口转发端点
+      # host/listen 的含义与上面 rtcm_corrections 完全一样(见那边的详细
+      # 注意事项):listen=false 时 host 是对端地址,listen=true 时 host 是
+      # 本机绑定地址——两者不能只改一半。
+      host: "127.0.0.1"
+      port: 15032
+      listen: false  # false=我们主动连 host:port(host=对端地址);true=本机监听 host:port 等对端连入(host=本机绑定地址,通常是 0.0.0.0)
+      topic: "/gnss/raw_obs"
+      frame_id: "raw_obs"
+      initial_backoff_s: 1.0
+      max_backoff_s: 30.0
+      idle_timeout_s: 30.0
+
+rtkrcv_node:
+  ros__parameters:
+    binary: "rtkrcv"            # RTKLIB demo5;开发机未安装,见 README 缺口登记
+    run_dir: "/tmp/rtkrcv_run"
+    # 故意不用 RtkrcvConfParams 的内置默认值(rtkrcv_conf.hpp 里 corr_port=15031、
+    # obs_port=15032)——那两个端口号与上面 rtcm_bridge.rtcm_corrections.port
+    # (15031)、rtcm_bridge.raw_obs.port(15032)撞了。当前两者互不冲突是因为
+    # rtcm_bridge 两路流都是 listen=false(主动去连平台/板卡,不在本机绑定这两个
+    # 端口);但这四项都在"现场待确认"名单里(见 README),一旦某路改成
+    # listen=true(平台改成推流),就会在本机绑定同一个端口号,与 rtkrcv_node
+    # 这里的 LocalReserver 抢占同一个端口。这里用 15041/15042 这组不重叠的端口号
+    # 从根上避免这个坑——**不要**把它们"顺手"改回 15031/15032 的库内置默认值。
+    corr_port: 15041
+    obs_port: 15042
+    sol_port: 15020
+    # TODO(现场确认, spec §13 P0):板卡原始观测格式。rtk-monitor 假定 rtcm3。
+    obs_format: "rtcm3"
+    corr_format: "rtcm3"
+    pos_mode: "kinematic"
+    navsys: 63
+    elmask: 10.0
+    ar_mode: "continuous"
+
+    # rtcm_bridge 发布上行数据用的话题名,必须与上面 rtcm_bridge 的
+    # topic 取值一致——这里重复写一遍是因为两个节点各自独立声明参数,
+    # ROS 不会自动对齐。
+    corrections_topic: "/gnss/rtcm_corrections"
+    raw_obs_topic: "/gnss/raw_obs"
+    frame_id: "gnss"
+    # GPST-UTC 闰秒偏移。截至本文件编写时为 18;IERS 宣布新的闰秒后需要
+    # 手动更新此值(下一次可能的闰秒插入前会有公告)。
+    leap_seconds: 18
+    # 传给 rtkrcv 二进制的额外命令行参数,原样透传。默认是空列表,代码侧
+    # 已经这样默认,这里特意不写 `args: []`——ROS2 的 YAML 参数加载器
+    # 无法从一个空列表推断元素类型,`args: []` 会在节点启动时抛
+    # InvalidParameterValueException 直接崩溃(已实测复现)。需要传参数时
+    # 取消注释并至少填一项,例如:
+    # args: ["-s"]
+
+    # rtkrcv 子进程崩溃/退出后的重启退避:首次等 restart_delay_s 秒重启;
+    # 如果进程存活不足 crash_loop_life_s 秒就又退出,视为崩溃循环,退避
+    # 翻倍直至 max_restart_delay_s。
+    restart_delay_s: 5.0
+    crash_loop_life_s: 30.0
+    max_restart_delay_s: 60.0
+
+    # 连接 rtkrcv 解算输出端口(sol_port)的重连退避,以及判定"连上了但
+    # 长时间没有新的一行解"的空闲秒数——隧道内 GNSS 信号本就时断时续,
+    # 这三个是现场最可能需要按实际链路质量调整的参数。
+    # 注意:sol_idle_timeout_s 不接受 0(节点会拒绝启动),因为 0 会被
+    # 底层 TcpStream 当成"彻底关闭空闲检测"的隐藏哨兵值——这条自愈能力
+    # 是本节点存在的意义之一,不允许通过配置悄悄关掉。
+    sol_initial_backoff_s: 1.0
+    sol_max_backoff_s: 30.0
+    sol_idle_timeout_s: 30.0
+
+    # 轮询 run_dir 下最新 .stat 文件、发现新增字节并转发的间隔。
+    stat_poll_interval_s: 0.2
