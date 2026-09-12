@@ -167,13 +167,35 @@ void TcpStream::run_client() {
     // 0.0.0.0——Linux 上 connect(0.0.0.0:port) 等价于 connect(127.0.0.1:port)。
     // 如果本机恰好有别的东西监听那个端口(哪怕是自己 Task 2 的监听 socket),
     // 就会悄悄连到自己、报 connected、转发垃圾数据,没有任何报错或状态跳变。
+    //
+    // 但普通 getaddrinfo() 是不可打断的阻塞调用:一旦 cfg_.host 是真主机名且
+    // DNS 慢/不可达,worker 会卡在里面,wake_fd_ 完全不会被 poll 到——
+    // stop()/析构里的 join() 会跟着卡 glibc 解析器重试完所有 nameserver 的
+    // 那几十秒,重新引入 finding 2/7 刚关掉的"绝不能挂死"问题,只是提前到了
+    // 连接前的解析阶段。先用 AI_NUMERICHOST 走一次零 DNS 流量的快路径:
+    // cfg_.host 是 IPv4 字面量时(本包当前两条部署配置都是 IP:port,不是
+    // 主机名)该调用不发任何网络请求,立即返回。只有当它不是数字地址时才退回
+    // 完整解析——这一步仍然可能阻塞,是本包目前唯一已知的残留阻塞点:真配置
+    // 成主机名且 DNS 慢/不可达时,stop() 就不再是"及时"的。收窄而非消除,
+    // 因为不引入超时/可取消的自研解析器(或改全局 resolver 配置,后者明确
+    // 被要求不做)就换不来更好的方案,留给以后真的需要主机名时再处理。
     addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_NUMERICSERV;
+    hints.ai_flags = AI_NUMERICSERV | AI_NUMERICHOST;
     addrinfo* resolved = nullptr;
-    const int gai_rc =
+    int gai_rc =
         ::getaddrinfo(cfg_.host.c_str(), std::to_string(cfg_.port).c_str(), &hints, &resolved);
+    if (gai_rc != 0) {
+      // 不是数字 IP 字面量:退回真正的(可能触发 DNS、可能阻塞)解析。
+      if (resolved) {
+        ::freeaddrinfo(resolved);
+        resolved = nullptr;
+      }
+      hints.ai_flags = AI_NUMERICSERV;
+      gai_rc =
+          ::getaddrinfo(cfg_.host.c_str(), std::to_string(cfg_.port).c_str(), &hints, &resolved);
+    }
     if (gai_rc != 0 || resolved == nullptr) {
       report(false, "resolve " + cfg_.host + " failed: " + ::gai_strerror(gai_rc));
       if (resolved) ::freeaddrinfo(resolved);

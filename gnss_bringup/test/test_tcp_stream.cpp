@@ -154,6 +154,46 @@ TEST(TcpStream, StopReturnsPromptlyWhenNeverConnected) {
   EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(dt).count(), 1000);
 }
 
+TEST(TcpStream, NumericHostSkipsDnsAndStopStaysPrompt) {
+  // 回归防护,专门盯着 run_client() 里 getaddrinfo() 的 AI_NUMERICHOST 快路径:
+  // cfg.host 在这里被显式设成 IPv4 字面量(不依赖其它用例"默认值恰好也是
+  // 数字地址"这件事),端口连不上、退避设得很长。如果这条快路径被改掉、
+  // 数字地址也退回普通(可按主机名走 DNS 的)getaddrinfo() 调用,这条用例本身
+  // 不会变慢——本机解析 "127.0.0.1" 不会真的发 DNS 请求——但它把"数字地址
+  // 必须免于解析阻塞"这一点钉在测试里,而不是隐含在别处。
+  // 说明一个已知的覆盖缺口:真正验证"主机名+resolver 卡住时 stop() 也不挂死"
+  // 需要一个可控的慢/假 resolver(mock 掉 getaddrinfo 或用 LD_PRELOAD 之类
+  // 的手段),依赖这台机器自己的 DNS 行为写不出诚实的测试,因此没有写—— 那条
+  // 残留阻塞路径目前只能靠代码走查确认。
+  Sink sink;
+  std::mutex m;
+  std::condition_variable cv;
+  bool entered_backoff = false;
+  TcpStreamConfig cfg;
+  cfg.host = "127.0.0.1";             // 显式数字地址,不依赖默认值
+  cfg.port = 1;                       // 特权端口,必然连不上
+  cfg.initial_backoff_s = 10.0;       // 故意设很长,验证 stop 不是靠等退避结束
+  TcpStream s(cfg, [&](const uint8_t* d, size_t n) { sink.push(d, n); },
+              [&](bool connected, const std::string&) {
+                if (!connected) {
+                  std::lock_guard<std::mutex> lk(m);
+                  entered_backoff = true;
+                  cv.notify_all();
+                }
+              });
+  s.start();
+  {
+    std::unique_lock<std::mutex> lk(m);
+    ASSERT_TRUE(cv.wait_for(lk, std::chrono::seconds(3), [&] { return entered_backoff; }))
+        << "worker 从未报告过连接失败,说明它还没进入(或根本没有实现)退避等待";
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  s.stop();
+  const auto dt = std::chrono::steady_clock::now() - t0;
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(dt).count(), 1000)
+      << "数字地址不应该走到任何可能阻塞的解析路径";
+}
+
 TEST(TcpStream, DestructorReleasesTheListeningSocket) {
   // 析构必须真的把线程 join 掉、把 socket 关掉,而不只是"没崩"。
   // 可观测的后果:析构后那个端口不再接受连接。
