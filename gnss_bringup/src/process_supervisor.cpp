@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -242,7 +243,51 @@ void ProcessSupervisor::run() {
   const long max_fd = ::sysconf(_SC_OPEN_MAX);
 
   while (running_.load()) {
+    // review round 3 的 Important:子进程在把信号处置重置成 SIG_DFL 之前
+    // (下面的 setsid() 到 sigaction 循环这段窗口),携带的仍然是从父进程
+    // 这个线程继承来的信号处置——Task 7 的父进程是 rclcpp 节点,rclcpp
+    // 自己会装一个 SIGTERM 处理器,这是常态而不是边缘情况。如果父进程在
+    // 这段窗口里对刚 fork 出来的 pid 直接 kill(pid, SIGTERM)(stop() 的
+    // signal_child() 正是这么做的,而且理由充分——见 signal_child() 上面
+    // 的注释),子进程会用继承来的、和目标程序完全不相关的处理器把这个
+    // SIGTERM "处理"掉(处理器返回,进程继续往下跑),既没有终止子进程,
+    // 也没有把这个关闭请求转交给稍后才会 execv() 进来的目标程序——真实
+    // strace 复现:kill(pid,SIGTERM) 成功送达、被继承的处理器吞掉,随后
+    // kill(-pid,SIGTERM) 因为 setsid() 还没跑完而 ESRCH,子进程继续跑到
+    // sigaction(SIG_DFL) 才把处置重置对,但为时已晚,execv() 进去的目标
+    // 程序从头到尾没见过这次 SIGTERM,只能傻等 5s 后的 SIGKILL——这正是
+    // "先发 SIGTERM 给目标程序一个 flush 数据的机会"这个设计想避免的
+    // 结果。
+    //
+    // 光把上面的 sigaction 循环挪到 setsid() 前面并不能解决问题:
+    // kill(pid, ...) 完全可能在子进程被调度、执行任何一行代码之前就已经
+    // 送达并被继承的处理器处理掉了——这是"谁先被调度"的竞态,不是"子进程
+    // 代码里哪一步先做"的顺序问题。
+    //
+    // 真正的修法是在 fork() 之前,把这个线程自己的信号掩码整体设成"全部
+    // 阻塞":子进程会原样继承这个"全部阻塞"的掩码,这段窗口期间任何发给
+    // 它的信号都只会变成 pending,不会被继承来的处理器提前跑掉。子进程在
+    // 完成 setsid()、把所有处置都重置成 SIG_DFL 之后,再解除阻塞(见下面
+    // sigprocmask(SIG_SETMASK, empty) 那一步)——如果这期间确实有信号
+    // 变成了 pending,这时候会在 SIG_DFL 下正确生效(SIGTERM 的默认动作
+    // 是终止),子进程会干净地退出而不会带着"一个从没被正确处理过的关闭
+    // 请求"糊里糊涂地继续跑到 execv()。父进程这边的阻塞只是这个线程自己
+    // 的临时状态(pthread_sigmask 只影响调用线程),fork() 一返回就立刻
+    // 恢复,不会泄漏到 run() 线程后续的正常工作里,也不影响进程里的其它
+    // 线程。
+    sigset_t block_all, saved_mask;
+    ::sigfillset(&block_all);
+    const bool masked =
+        (::pthread_sigmask(SIG_SETMASK, &block_all, &saved_mask) == 0);
+
     const pid_t pid = ::fork();
+
+    if (pid != 0 && masked) {
+      // 父进程分支(fork 成功或失败都算):马上恢复这个线程自己原来的
+      // 信号掩码,不能让"全部阻塞"这个临时状态泄漏出去。
+      ::pthread_sigmask(SIG_SETMASK, &saved_mask, nullptr);
+    }
+
     if (pid < 0) {
       // fork() 失败(常见于 EAGAIN/ENOMEM,进程数或内存吃紧):根本没有
       // 子进程活下来,不计入 spawn_count_。稍等一下再试,同时仍然响应
@@ -253,23 +298,28 @@ void ProcessSupervisor::run() {
 
     if (pid == 0) {
       // ---- 子进程:自此只允许调用异步信号安全的函数(见上面 argv/
-      // max_fd 为什么要挪到 fork() 之前算好的注释)----
+      // max_fd 为什么要挪到 fork() 之前算好的注释)。所有信号此刻仍然
+      // 处于阻塞状态(继承自上面对父进程线程做的 pthread_sigmask),直到
+      // 下面 sigprocmask(SIG_SETMASK, empty) 那一步才会解除——见本段
+      // 开头的说明。----
 
       // 独立进程组:目标程序(Task 7 里是 rtkrcv)可能派生孙进程,stop()
       // 需要能对整组发信号才不会留下孤儿。setsid() 失败(比如已经是
       // session leader)不影响后续流程,忽略返回值。
       ::setsid();
 
-      // review round 1 的 Important:execv() 会原样保留调用者的信号屏蔽字
-      // 和信号处置(SIG_IGN 会被继承,只有 SIG_DFL 才会被 exec 重置)。如果
-      // start() 恰好是在一个屏蔽了/忽略了 SIGTERM 的线程上调用的(rclcpp
-      // 的执行器线程、某些第三方库在初始化时确实会这么干),目标程序就会
-      // 对 stop() 发的 SIGTERM 完全免疫,每次都要撑满 5 s 再挨 SIGKILL,
-      // 且来不及做任何优雅收尾(flush 日志、关闭底层串口连接等)。这里
-      // 显式把所有信号的处置重置成 SIG_DFL、屏蔽字清空——sigaction()/
-      // sigemptyset()/sigprocmask() 都是异步信号安全的,不涉及任何内存
-      // 分配——保证子进程对信号的反应完全由它自己的默认行为决定,不受
-      // 父进程当时那个线程的信号状态影响。
+      // review round 1 的 Important:execv() 会原样保留调用者的信号处置
+      // (SIG_IGN 会被继承,只有 SIG_DFL 才会被 exec 重置)。这里显式把
+      // 所有信号的处置重置成 SIG_DFL——sigaction()/sigemptyset()/
+      // sigprocmask() 都是异步信号安全的,不涉及任何内存分配——保证子
+      // 进程对信号的反应完全由它自己的默认行为决定,不受父进程当时那个
+      // 线程的信号状态影响。
+      //
+      // review round 3:最后这一步 sigprocmask(SIG_SETMASK, empty) 现在
+      // 身兼两职——解除阻塞,同时也是"补交"上面那段窗口期间可能已经变成
+      // pending 的信号(比如提前送达的 SIGTERM)的地方。到这一行之前,
+      // 所有处置都已经改成 SIG_DFL 了,所以这次解除阻塞不会再重蹈"用继承
+      // 来的处理器把信号吞掉"的覆辙。
       {
         struct sigaction sa {};
         sa.sa_handler = SIG_DFL;

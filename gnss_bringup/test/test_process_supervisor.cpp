@@ -187,11 +187,11 @@ TEST(ProcessSupervisor, ChildDoesNotInheritParentDescriptors) {
   const std::string marker_path = tmpl;
   ::unlink(tmpl);  // fd 还开着就够用,不需要真的留一个文件在磁盘上
 
-  ProcessSupervisor s(cfg_for("live", 0.05));
-  s.start();
-  for (int i = 0; i < 100 && s.spawn_count() < 1; ++i)
+  auto s = std::make_shared<ProcessSupervisor>(cfg_for("live", 0.05));
+  s->start();
+  for (int i = 0; i < 100 && s->spawn_count() < 1; ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  const int pid = s.last_child_pid();
+  const int pid = s->last_child_pid();
   ASSERT_GT(pid, 0) << "子进程应该已经 fork 出来了";
   // 给 execv 一点时间真正跑起来,再去看它手里的 fd。
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -213,7 +213,13 @@ TEST(ProcessSupervisor, ChildDoesNotInheritParentDescriptors) {
                        << marker_fd << "(readlink 目标:" << link_buf << ")";
 
   ::close(marker_fd);
-  s.stop();
+
+  // review round 2 的补充意见:这里应该像其它测试一样走 stop_async() +
+  // wait_for() 上限,而不是裸调用 s->stop()——不然 stop() 真的卡死时,
+  // 拖垮的是整个测试二进制而不是这一个测试用例的失败信息。
+  std::future<void> done = stop_async(s);
+  ASSERT_EQ(done.wait_for(std::chrono::seconds(6)), std::future_status::ready)
+      << "stop() 在 6 s 内没有返回";
 }
 
 TEST(ProcessSupervisor, StopSendsBoundedSignalCount) {
@@ -232,16 +238,20 @@ TEST(ProcessSupervisor, StopSendsBoundedSignalCount) {
 
   ProcessSupervisorConfig c = cfg_for("live-count", 0.05);
   c.args = {"live-count", countfile};
-  ProcessSupervisor s(c);
-  s.start();
-  for (int i = 0; i < 100 && s.spawn_count() < 1; ++i)
+  auto s = std::make_shared<ProcessSupervisor>(c);
+  s->start();
+  for (int i = 0; i < 100 && s->spawn_count() < 1; ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  ASSERT_GT(s.last_child_pid(), 0) << "子进程应该已经 fork 出来了";
+  ASSERT_GT(s->last_child_pid(), 0) << "子进程应该已经 fork 出来了";
   // 给它一点时间真正把 trap 安装好,不然过早发的信号会用默认处置处理掉
   // (直接终止,trap 还没生效,根本数不到)。
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-  s.stop();
+  // review round 2 的补充意见:走 stop_async() + wait_for() 上限,而不是
+  // 裸调用 s->stop()——理由同上一个测试。
+  std::future<void> done = stop_async(s);
+  ASSERT_EQ(done.wait_for(std::chrono::seconds(6)), std::future_status::ready)
+      << "stop() 在 6 s 内没有返回";
 
   long count = 0;
   std::ifstream in(countfile);
@@ -256,4 +266,58 @@ TEST(ProcessSupervisor, StopSendsBoundedSignalCount) {
   EXPECT_GT(count, 0) << "至少应该收到一次 SIGTERM(fake 脚本才有理由继续多活一会儿被数到)";
   EXPECT_LE(count, 5) << "SIGTERM 不应该被连续重发轰炸(实测到 " << count
                        << " 次)——这正是 review round 2 要修的问题";
+}
+
+TEST(ProcessSupervisor, StopIsFastEvenWithInheritedParentSignalHandler) {
+  // review round 3 的 Important 回归测试:round 2 把"每 20ms 重发同一个
+  // 信号"改成了"kill(pid, ...) 直接送达一次",解决了信号轰炸,但重新
+  // 打开了 setsid() 竞态的另一半——子进程在完成 setsid()、把信号处置
+  // 重置成 SIG_DFL 之前,携带的仍然是从父进程这个线程继承来的处置。
+  // round 1/2 的整套测试里没有任何一个进程本身装了 SIGTERM 处理器,这条
+  // 回归才一直显示是绿的:真实场景里父进程是 rclcpp 节点,rclcpp 自己会
+  // 装一个 SIGTERM 处理器,这才是常态而不是边缘情况。
+  //
+  // 这里在测试进程(也就是 fork() 的父进程)里故意装一个"什么都不做,
+  // 直接返回"的 SIGTERM 处理器,复现这层继承关系。关键是"什么时候调
+  // stop()":先等 spawn_count()>=1 再 stop() 不够——哪怕只等一轮 10ms 的
+  // 轮询,子进程早就跑完 setsid()/sigaction 重置/execv() 了(这些全是
+  // 微秒级的操作),signal_child() 送达的是已经 exec 过、干干净净的目标
+  // 程序,根本碰不到这条竞态。真实复现的姿势和
+  // StartThenImmediateStopNeverHangs 一样:start() 后完全不等待就立刻从
+  // 另一个线程 stop()。这条竞态也不是每次都中——round 3 review 的原始
+  // 测量是 20 次里 14 次落进 5s 超时——所以这里循环多次,只要绝大多数
+  // 迭代都很快就说明修复生效了,而不是要求一次巧合的时序刚好没踩中。
+  struct sigaction old_action {};
+  struct sigaction noop_action {};
+  noop_action.sa_handler = [](int) {};  // 什么都不做,只是"接住"这个信号
+  ::sigemptyset(&noop_action.sa_mask);
+  ASSERT_EQ(::sigaction(SIGTERM, &noop_action, &old_action), 0)
+      << "装不上测试用的 SIGTERM 处理器,没法复现这个场景";
+
+  int slow_iterations = 0;
+  constexpr int kIterations = 20;
+  for (int i = 0; i < kIterations; ++i) {
+    auto s = std::make_shared<ProcessSupervisor>(cfg_for("live", 0.01));
+    const auto t0 = std::chrono::steady_clock::now();
+    s->start();
+    std::future<void> done = stop_async(s);
+    const auto status = done.wait_for(std::chrono::seconds(6));
+    const auto dt = std::chrono::steady_clock::now() - t0;
+    ASSERT_EQ(status, std::future_status::ready)
+        << "第 " << i << " 次迭代:stop() 在 6 s 内没有返回";
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(dt).count() >= 2000) {
+      ++slow_iterations;
+    }
+  }
+
+  // 不管上面跑得怎么样,都要先把测试进程自己的信号处置换回去——不能让
+  // 这个专门装来复现问题的处理器泄漏到同一个二进制里排在后面的其它测试
+  // 用例。
+  ::sigaction(SIGTERM, &old_action, nullptr);
+
+  EXPECT_EQ(slow_iterations, 0)
+      << kIterations << " 次 start()→stop() 里有 " << slow_iterations
+      << " 次被拖到了 2s 以上(修复前的典型表现是卡在 ~5s 的 SIGKILL 超时)"
+      << "——说明子进程在完成 setsid()/重置信号处置之前,把父进程继承来的"
+      << "处理器当成了自己的,把本该终止它的 SIGTERM 吞掉了";
 }
