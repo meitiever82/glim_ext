@@ -39,4 +39,21 @@ void write_pos(const std::string& path, const std::vector<PosRecord>& records,
 // RTKLIB Q → 归一化质量:1→FIXED 2→FLOAT 4→DGPS 5→SINGLE 其它→NONE
 Quality q_to_quality(int q);
 
+// 1 Hz 抽稀(spec §5.3:rosbag2 存全量原始流,.pos 只存 1 Hz 摘要)。
+// 按 floor(stamp / period) 分桶,每个桶只放行第一条 —— 桶边界对齐整秒,
+// 因此输出的时间戳分布与 RTKLIB 1 Hz .pos 一致,且对抖动与时钟回跳都不会卡死
+// (回跳落进更早的桶,算作新桶直接放行,而不是等到"上次 + 1 s"才恢复)。
+class PosDecimator {
+public:
+  explicit PosDecimator(double period_s = 1.0) : period_(period_s) {}
+  // 该条应当写出则返回 true
+  bool accept(const PosRecord& r);
+  void reset() { has_bin_ = false; }
+
+private:
+  double period_;
+  long long bin_ = 0;
+  bool has_bin_ = false;
+};
+
 }  // namespace gnss_core

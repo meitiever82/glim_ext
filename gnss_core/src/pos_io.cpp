@@ -1,4 +1,5 @@
 #include "gnss_core/pos_io.hpp"
+#include "gnss_core/rtkstat.hpp"   // parse_llh_solution 在此实现:与 .pos 数据行是同一套列解析
 
 #include <cmath>
 #include <cstdio>
@@ -33,6 +34,14 @@ bool parse_date_time(const std::string& date, const std::string& time, double& o
 
 }  // namespace
 
+bool PosDecimator::accept(const PosRecord& r) {
+  const long long bin = static_cast<long long>(std::floor(r.stamp / period_));
+  if (has_bin_ && bin == bin_) return false;
+  bin_ = bin;
+  has_bin_ = true;
+  return true;
+}
+
 Quality q_to_quality(int q) {
   switch (q) {
     case 1: return Quality::FIXED;
@@ -66,21 +75,12 @@ std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& o
       }
       continue;
     }
-    std::istringstream ss(line);
-    std::string date, time;
+    // 数据行与 rtkrcv 的 llh 解流同格式,复用同一个解析器(spec §2.1 算法只写一遍)。
+    // 时间系统用从头部扫出来的 ts,而不是 opt 里的默认值。
+    PosReadOptions line_opt = opt;
+    line_opt.default_time_system = ts;
     PosRecord r;
-    double sdne_ = 0, sdeu_ = 0, sdun_ = 0;
-    if (!(ss >> date >> time >> r.lat >> r.lon >> r.height >> r.q >> r.ns
-             >> r.sdne(0) >> r.sdne(1) >> r.sdne(2))) {
-      continue;   // 列数不足或非数据行,跳过
-    }
-    // 可选列:sdne sdeu sdun age ratio
-    ss >> sdne_ >> sdeu_ >> sdun_ >> r.age >> r.ratio;
-    double stamp = 0.0;
-    if (!parse_date_time(date, time, stamp)) continue;
-    if (ts == PosTimeSystem::GPST) stamp -= static_cast<double>(opt.leap_seconds);
-    r.stamp = stamp;
-    out.push_back(r);
+    if (parse_llh_solution(line, r, line_opt)) out.push_back(r);
   }
   return out;
 }
@@ -114,6 +114,31 @@ void write_pos(const std::string& path, const std::vector<PosRecord>& records,
                   r.lat, r.lon, r.height, r.q, r.ns, r.sdne(0), r.sdne(1), r.sdne(2), 0.0, 0.0, 0.0, r.age, r.ratio);
     out << buf;
   }
+}
+
+bool parse_llh_solution(const std::string& line, PosRecord& out, const PosReadOptions& opt) {
+  // 空行 / 全空白 / 注释行不是数据
+  const size_t first = line.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) return false;
+  if (line[first] == '%') return false;
+
+  std::istringstream ss(line);
+  std::string date, time;
+  PosRecord r;
+  double sdne_ = 0, sdeu_ = 0, sdun_ = 0;
+  if (!(ss >> date >> time >> r.lat >> r.lon >> r.height >> r.q >> r.ns
+           >> r.sdne(0) >> r.sdne(1) >> r.sdne(2))) {
+    return false;   // 列数不足
+  }
+  // 可选列:sdne sdeu sdun age ratio(缺省保持 0)
+  ss >> sdne_ >> sdeu_ >> sdun_ >> r.age >> r.ratio;
+
+  double stamp = 0.0;
+  if (!parse_date_time(date, time, stamp)) return false;
+  if (opt.default_time_system == PosTimeSystem::GPST) stamp -= static_cast<double>(opt.leap_seconds);
+  r.stamp = stamp;
+  out = r;
+  return true;
 }
 
 }  // namespace gnss_core

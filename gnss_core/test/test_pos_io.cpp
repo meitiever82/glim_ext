@@ -146,3 +146,65 @@ TEST(PosIo, ColumnHeaderLineIdentifiesTimeSystem) {
   EXPECT_NEAR(gpst[0].stamp, 1788431025.0 - 18.0, 1e-6);   // GPST 头:减闰秒
   std::remove(p_utc.c_str()); std::remove(p_gpst.c_str());
 }
+
+// ---------- PosDecimator(1 Hz 抽稀, spec §5.3) ----------
+
+namespace {
+PosRecord at(double stamp, int q = 1) {
+  PosRecord r;
+  r.stamp = stamp;
+  r.q = q;
+  return r;
+}
+}  // namespace
+
+TEST(PosDecimator, EmitsFirstRecord) {
+  PosDecimator d;
+  EXPECT_TRUE(d.accept(at(1000.0)));
+}
+
+TEST(PosDecimator, DropsFurtherRecordsWithinTheSameSecond) {
+  PosDecimator d;
+  ASSERT_TRUE(d.accept(at(1000.00)));
+  EXPECT_FALSE(d.accept(at(1000.10)));
+  EXPECT_FALSE(d.accept(at(1000.50)));
+  EXPECT_FALSE(d.accept(at(1000.99)));
+}
+
+TEST(PosDecimator, EmitsFirstRecordOfEachNewSecond) {
+  PosDecimator d;
+  ASSERT_TRUE(d.accept(at(1000.00)));
+  ASSERT_FALSE(d.accept(at(1000.90)));
+  EXPECT_TRUE(d.accept(at(1001.00)));
+  EXPECT_FALSE(d.accept(at(1001.40)));
+  EXPECT_TRUE(d.accept(at(1002.20)));
+}
+
+TEST(PosDecimator, BucketsAlignToWholeSecondsNotToFirstSample) {
+  // 起点在半秒:1000.6 与 1001.0 相隔仅 0.4 s,但分属不同整秒桶,两条都应写出。
+  // 若按"上次 + 1 s"实现,1001.0 会被丢掉,输出时间戳也会偏离整秒。
+  PosDecimator d;
+  ASSERT_TRUE(d.accept(at(1000.60)));
+  EXPECT_TRUE(d.accept(at(1001.00)));
+}
+
+TEST(PosDecimator, ClockJumpBackwardsDoesNotStallOutput) {
+  PosDecimator d;
+  ASSERT_TRUE(d.accept(at(2000.00)));
+  EXPECT_TRUE(d.accept(at(1000.00))) << "时钟回跳后必须继续写出,而不是静默丢弃到追上为止";
+}
+
+TEST(PosDecimator, RespectsConfiguredPeriod) {
+  PosDecimator d(0.5);
+  ASSERT_TRUE(d.accept(at(1000.00)));
+  EXPECT_FALSE(d.accept(at(1000.20)));
+  EXPECT_TRUE(d.accept(at(1000.50)));
+}
+
+TEST(PosDecimator, ResetAllowsNextRecordThrough) {
+  PosDecimator d;
+  ASSERT_TRUE(d.accept(at(1000.00)));
+  ASSERT_FALSE(d.accept(at(1000.30)));
+  d.reset();
+  EXPECT_TRUE(d.accept(at(1000.30)));
+}
