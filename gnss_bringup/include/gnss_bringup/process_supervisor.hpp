@@ -27,6 +27,11 @@ public:
   void stop();
   int spawn_count() const { return spawn_count_.load(); }
   double current_delay_s() const { return current_delay_.load(); }
+  // 最近一次成功 fork() 出来的 pid,回收之后也不会被清空(不同于内部的
+  // child_pid_,后者在子进程被 waitpid() 收走之后会复位成 -1)。仅供测试
+  // 在 stop() 返回之后核实子进程确实已经不存在(kill(pid, 0) == ESRCH),
+  // 不是给业务逻辑用的。
+  int last_child_pid() const { return last_spawned_pid_.load(); }
 
 private:
   void run();
@@ -37,6 +42,7 @@ private:
   std::atomic<int> spawn_count_{0};
   std::atomic<double> current_delay_{0.0};
   std::atomic<int> child_pid_{-1};
+  std::atomic<int> last_spawned_pid_{-1};
   int wake_fd_ = -1, wake_wr_ = -1;
 };
 
