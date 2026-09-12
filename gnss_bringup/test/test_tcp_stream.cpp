@@ -4,6 +4,7 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -220,4 +221,85 @@ TEST(TcpStream, DestructorReleasesTheListeningSocket) {
   const int rc = ::connect(c, reinterpret_cast<sockaddr*>(&a), sizeof(a));
   ::close(c);
   EXPECT_NE(rc, 0) << "析构后端口仍在监听,说明 socket 没被关掉";
+}
+
+TEST(TcpStream, ListenModeAcceptsPeerAndDeliversBytes) {
+  Sink sink;
+  TcpStreamConfig cfg;
+  cfg.listen = true;
+  cfg.port = 0;                       // 内核选端口
+  TcpStream s(cfg, [&](const uint8_t* d, size_t n) { sink.push(d, n); });
+  s.start();
+
+  // 等绑定完成
+  int port = -1;
+  for (int i = 0; i < 100 && port <= 0; ++i) {
+    port = s.bound_port();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_GT(port, 0) << "监听模式必须报出实际绑定端口";
+
+  int c = ::socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+  a.sin_port = ::htons(static_cast<uint16_t>(port));
+  ASSERT_EQ(::connect(c, reinterpret_cast<sockaddr*>(&a), sizeof(a)), 0);
+  const std::string payload = "PUSHED-RTCM";
+  ::send(c, payload.data(), payload.size(), 0);
+
+  EXPECT_TRUE(sink.wait_for_bytes(payload.size(), std::chrono::seconds(3)));
+  EXPECT_EQ(sink.str(), payload);
+  ::close(c);
+  s.stop();
+}
+
+TEST(TcpStream, ListenModeAcceptsASecondPeerAfterFirstDisconnects) {
+  Sink sink;
+  TcpStreamConfig cfg;
+  cfg.listen = true;
+  cfg.port = 0;
+  TcpStream s(cfg, [&](const uint8_t* d, size_t n) { sink.push(d, n); });
+  s.start();
+  int port = -1;
+  for (int i = 0; i < 100 && port <= 0; ++i) {
+    port = s.bound_port();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_GT(port, 0);
+
+  auto connect_send_close = [&](const std::string& payload) {
+    int c = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+    a.sin_port = ::htons(static_cast<uint16_t>(port));
+    ASSERT_EQ(::connect(c, reinterpret_cast<sockaddr*>(&a), sizeof(a)), 0);
+    ::send(c, payload.data(), payload.size(), 0);
+    ::close(c);
+  };
+  connect_send_close("AAA");
+  EXPECT_TRUE(sink.wait_for_bytes(3, std::chrono::seconds(3)));
+  connect_send_close("BBB");
+  EXPECT_TRUE(sink.wait_for_bytes(6, std::chrono::seconds(3)))
+      << "第一个对端断开后必须继续接受新连接,而不是退出";
+  EXPECT_EQ(sink.str(), "AAABBB");
+  s.stop();
+}
+
+TEST(TcpStream, ClientBackoffGrowsButIsCappedByMax) {
+  // 连不上的端口 + 很小的 max_backoff:在固定时间窗内断开回调的次数应受上限约束,
+  // 既不会退化成忙等(次数爆炸),也不会一次就放弃(次数为 0)。
+  std::atomic<int> disconnects{0};
+  TcpStreamConfig cfg;
+  cfg.port = 1;
+  cfg.initial_backoff_s = 0.05;
+  cfg.max_backoff_s = 0.1;
+  TcpStream s(cfg, [](const uint8_t*, size_t) {},
+              [&](bool connected, const std::string&) { if (!connected) ++disconnects; });
+  s.start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(600));
+  s.stop();
+  EXPECT_GE(disconnects.load(), 1) << "必须持续重试";
+  EXPECT_LE(disconnects.load(), 20) << "必须退避,不能忙等";
 }

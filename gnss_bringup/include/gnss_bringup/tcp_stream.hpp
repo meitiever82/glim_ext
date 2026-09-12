@@ -35,6 +35,15 @@ public:
 
 private:
   void run_client();
+  void run_server();
+  // 客户端(已连接的 fd)与服务端(已 accept 的 fd)共用的收数循环:
+  // poll(fd, wake_fd) 等可读,idle_timeout_s 静默视为断开,recv 到的数据经
+  // on_data_ 回调,状态变化(idle timeout / 对端关闭 / poll 或 recv 出错)
+  // 经 report 回调上报。返回 true 表示 stop() 打断了本次 pump(调用方应结束
+  // 整个 worker,不再重连/重新 accept);返回 false 表示这次连接自身结束了
+  // (对端关闭、静默超时或 I/O 错误),调用方按各自策略处理——客户端退避重连,
+  // 服务端直接回到 accept 等下一个对端。
+  bool pump(int fd, const OnState& report);
 
   TcpStreamConfig cfg_;
   OnData on_data_;

@@ -74,46 +74,7 @@ void TcpStream::start() {
 
   thread_ = std::thread([this] {
     if (cfg_.listen) {
-      // Task 1 只实现客户端模式;监听模式在此仅做最小实现——
-      // 绑定端口、暴露 bound_port()、能被 stop()/析构 干净地关掉,
-      // 完整的“接受连接后转发数据”的行为留给 Task 2。
-      int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-      if (fd < 0) {
-        running_.store(false);
-        return;
-      }
-      int one = 1;
-      ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-      sockaddr_in addr{};
-      addr.sin_family = AF_INET;
-      addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
-      addr.sin_port = ::htons(static_cast<uint16_t>(cfg_.port));
-      if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
-          ::listen(fd, 4) != 0) {
-        ::close(fd);
-        running_.store(false);
-        return;
-      }
-      socklen_t len = sizeof(addr);
-      ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
-      bound_port_.store(::ntohs(addr.sin_port));
-
-      while (running_.load()) {
-        pollfd fds[2] = {{fd, POLLIN, 0}, {wake_fd_.load(), POLLIN, 0}};
-        const int pr = ::poll(fds, 2, -1);
-        if (pr < 0) {
-          if (errno == EINTR) continue;
-          break;
-        }
-        if (fds[1].revents & POLLIN) break;  // stop() 唤醒
-        if (fds[0].revents & POLLIN) {
-          const int c = ::accept(fd, nullptr, nullptr);
-          if (c >= 0) ::close(c);  // Task 1 不处理数据,直接关闭
-        }
-      }
-      ::close(fd);
-      bound_port_.store(-1);
+      run_server();
     } else {
       run_client();
     }
@@ -263,49 +224,149 @@ void TcpStream::run_client() {
     backoff = cfg_.initial_backoff_s;
     report(true, "connected to " + cfg_.host + ":" + std::to_string(cfg_.port));
 
-    uint8_t buf[4096];
-    bool woken = false;
-    while (running_.load()) {
-      pollfd fds[2] = {{fd, POLLIN, 0}, {wake_fd_.load(), POLLIN, 0}};
-      const int timeout_ms = cfg_.idle_timeout_s > 0
-                                  ? static_cast<int>(cfg_.idle_timeout_s * 1000.0)
-                                  : -1;
-      const int pr = ::poll(fds, 2, timeout_ms);
-      if (pr < 0) {
-        if (errno == EINTR) continue;
-        report(false, std::string("poll() failed: ") + std::strerror(errno));
-        break;
-      }
-      if (fds[1].revents & POLLIN) {
-        woken = true;
-        break;
-      }
-      if (pr == 0) {
-        // 静默超过 idle_timeout_s:链路差时对端常不发 RST 就消失,视为断开重连。
-        report(false, "idle timeout");
-        break;
-      }
-      if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
-        const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
-        if (n > 0) {
-          if (on_data_) on_data_(buf, static_cast<size_t>(n));
-        } else if (n == 0) {
-          report(false, "peer closed connection");
-          break;
-        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          continue;  // 非阻塞 fd 上的虚假唤醒,重新 poll
-        } else {
-          report(false, std::string("recv() failed: ") + std::strerror(errno));
-          break;
-        }
-      }
-    }
+    const bool woken = pump(fd, report);
     ::close(fd);
     if (woken || !running_.load()) break;
 
     if (wait_backoff(backoff)) break;
     backoff = std::min(backoff * 2.0, cfg_.max_backoff_s);
   }
+}
+
+bool TcpStream::pump(int fd, const OnState& report) {
+  uint8_t buf[4096];
+  while (running_.load()) {
+    pollfd fds[2] = {{fd, POLLIN, 0}, {wake_fd_.load(), POLLIN, 0}};
+    const int timeout_ms = cfg_.idle_timeout_s > 0
+                                ? static_cast<int>(cfg_.idle_timeout_s * 1000.0)
+                                : -1;
+    const int pr = ::poll(fds, 2, timeout_ms);
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      if (report) report(false, std::string("poll() failed: ") + std::strerror(errno));
+      return false;
+    }
+    if (fds[1].revents & POLLIN) {
+      return true;  // stop() 唤醒
+    }
+    if (pr == 0) {
+      // 静默超过 idle_timeout_s:链路差时对端常不发 RST 就消失,视为断开。
+      if (report) report(false, "idle timeout");
+      return false;
+    }
+    if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+      const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+      if (n > 0) {
+        if (on_data_) on_data_(buf, static_cast<size_t>(n));
+      } else if (n == 0) {
+        if (report) report(false, "peer closed connection");
+        return false;
+      } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        continue;  // 非阻塞 fd 上的虚假唤醒,重新 poll
+      } else {
+        if (report) report(false, std::string("recv() failed: ") + std::strerror(errno));
+        return false;
+      }
+    }
+  }
+  return true;  // running_ 被外部置 false(未走 stop() 的 wake 路径),同样应结束
+}
+
+void TcpStream::run_server() {
+  bool have_last_state = false;
+  bool last_state = false;
+  auto report = [&](bool connected, const std::string& detail) {
+    if (!on_state_) return;
+    if (have_last_state && last_state == connected) return;  // 仅在跳变时上报
+    on_state_(connected, detail);
+    have_last_state = true;
+    last_state = connected;
+  };
+
+  // 解析监听地址:用 cfg_.host 而不是硬编码 INADDR_LOOPBACK——之前的最小实现
+  // 忽略了 cfg_.host,配置成别的本机地址(例如要对外网卡监听)也不起作用。
+  // 和 run_client() 一样先走 AI_NUMERICHOST 零 DNS 快路径,cfg_.host 是
+  // IP 字面量(当前两条部署配置都是)时立即返回,不引入解析阻塞。
+  addrinfo hints{};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_NUMERICSERV | AI_NUMERICHOST | AI_PASSIVE;
+  addrinfo* resolved = nullptr;
+  int gai_rc =
+      ::getaddrinfo(cfg_.host.c_str(), std::to_string(cfg_.port).c_str(), &hints, &resolved);
+  if (gai_rc != 0) {
+    if (resolved) {
+      ::freeaddrinfo(resolved);
+      resolved = nullptr;
+    }
+    hints.ai_flags = AI_NUMERICSERV | AI_PASSIVE;
+    gai_rc =
+        ::getaddrinfo(cfg_.host.c_str(), std::to_string(cfg_.port).c_str(), &hints, &resolved);
+  }
+  if (gai_rc != 0 || resolved == nullptr) {
+    // 绑定地址解析失败必须上报,否则调用方只会看到 bound_port() 恒为 -1,
+    // 却查不到原因(这正是 Task 1 遗留的最小实现里缺失的一环)。
+    report(false, "resolve listen address " + cfg_.host + " failed: " + ::gai_strerror(gai_rc));
+    if (resolved) ::freeaddrinfo(resolved);
+    running_.store(false);
+    return;
+  }
+  sockaddr_in bind_addr{};
+  std::memcpy(&bind_addr, resolved->ai_addr, sizeof(bind_addr));
+  bind_addr.sin_port = ::htons(static_cast<uint16_t>(cfg_.port));
+  ::freeaddrinfo(resolved);
+
+  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    report(false, std::string("socket() failed: ") + std::strerror(errno));
+    running_.store(false);
+    return;
+  }
+  int one = 1;
+  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+  if (::bind(fd, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) != 0) {
+    report(false, std::string("bind() failed: ") + std::strerror(errno));
+    ::close(fd);
+    running_.store(false);
+    return;
+  }
+  if (::listen(fd, 4) != 0) {
+    report(false, std::string("listen() failed: ") + std::strerror(errno));
+    ::close(fd);
+    running_.store(false);
+    return;
+  }
+
+  sockaddr_in actual{};
+  socklen_t len = sizeof(actual);
+  ::getsockname(fd, reinterpret_cast<sockaddr*>(&actual), &len);
+  bound_port_.store(::ntohs(actual.sin_port));
+
+  while (running_.load()) {
+    pollfd fds[2] = {{fd, POLLIN, 0}, {wake_fd_.load(), POLLIN, 0}};
+    const int pr = ::poll(fds, 2, -1);
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (fds[1].revents & POLLIN) break;  // stop() 唤醒
+    if (fds[0].revents & POLLIN) {
+      const int c = ::accept(fd, nullptr, nullptr);
+      if (c < 0) continue;
+      // 和客户端 socket 一样保持非阻塞:pump() 的 poll+recv 组合依赖这一点
+      // 才能在虚假唤醒时安全地重新 poll,而不是阻塞在 recv() 上。
+      const int flags = ::fcntl(c, F_GETFL, 0);
+      ::fcntl(c, F_SETFL, flags | O_NONBLOCK);
+      report(true, "peer connected");
+      const bool woken = pump(c, report);
+      ::close(c);
+      if (woken) break;
+      // 对端断开(pump 返回 false):回到 accept 循环等下一个对端,不退出线程。
+    }
+  }
+  ::close(fd);
+  bound_port_.store(-1);
 }
 
 }  // namespace gnss_bringup
