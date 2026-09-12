@@ -6,21 +6,27 @@
 // 会白白吃掉一次退避周期什么都不干):
 //   1. 读参数
 //   2. LocalReserver 起两个本机服务端口(corr/obs),供 rtkrcv 当 tcpcli 连入
-//   3. render_rtkrcv_conf() 写 conf 文件
-//   4. ProcessSupervisor 起 rtkrcv
+//   3. render_rtkrcv_conf() 写 conf 文件(用 LocalReserver 实际绑定到的端口,
+//      不是请求的端口——见 write_conf() 前的 IMPORTANT 说明)
+//   4. ProcessSupervisor 起 rtkrcv;后台起一个不阻塞构造函数的线程打印
+//      "spawned pid" 日志
 //   5. TcpStream 连 rtkrcv 的解算输出端口,按行切分喂 parse_llh_solution
 //   6. 订阅 corrections/raw_obs,broadcast 进两个 LocalReserver
 //   7. 轮询 run_dir 下最新的 rtkrcv_*.stat,tail 新增字节,原样发布
 //
-// 析构顺序是这个顺序的镜像,而且是硬约束:先停 ProcessSupervisor(杀
-// rtkrcv,它不会再往 sol TcpStream 写数据),再停 TcpStream(它的线程不会
-// 再回调 on_data),最后停两个 LocalReserver——全部发生在 node 和它的
-// publisher 被销毁之前。这四个组件都在各自的线程上回调,回调打到一个已经
+// 析构顺序:先停我们自己起的两个辅助线程(pid 日志、stat tail——它们只是
+// 观察者,不参与 Task 1-6 组件之间的数据流,谁先停都不影响正确性),然后
+// 严格按 brief 规定的镜像顺序停止 Task 1-6 的组件:先停 ProcessSupervisor
+// (杀 rtkrcv,它不会再往 sol TcpStream 写数据),再停 TcpStream(它的线程
+// 不会再回调 on_data),最后停两个 LocalReserver——全部发生在 node 和它的
+// publisher 被销毁之前。这些组件都在各自的线程上回调,回调打到一个已经
 // 析构的 publisher 上就是一次崩溃(与 rtcm_bridge_node.cpp 在
 // rclcpp::shutdown() 之前 streams.clear() 是同一个道理)。
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -40,7 +46,7 @@
 #include "gnss_bringup/local_reserver.hpp"
 #include "gnss_bringup/process_supervisor.hpp"
 #include "gnss_bringup/rtcm_bridge_params.hpp"   // is_valid_port:与 rtcm_bridge_node 共用的端口校验
-#include "gnss_bringup/rtk_fix_mapping.hpp"       // to_rtk_fix + LineSplitter
+#include "gnss_bringup/rtk_fix_mapping.hpp"       // to_rtk_fix + LineSplitter + plan_stat_tail
 #include "gnss_bringup/rtkrcv_conf.hpp"
 #include "gnss_bringup/tcp_stream.hpp"
 #include "gnss_core/rtkstat.hpp"                  // parse_llh_solution
@@ -49,22 +55,43 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// run_dir 下最新的 rtkrcv_*.stat:按文件名排序取最大即可——RTKLIB 用
-// "<前缀>_yyyymmddhhmmss.stat" 命名,时间戳在文件名里,字典序等价于时间序。
-fs::path find_latest_stat_file(const fs::path& run_dir) {
-  fs::path latest;
+// review round 1 的 Minor(promoted):目录扫描全部走带 error_code 的重载,
+// 不让 directory_iterator::operator++()(range-for 用的正是这个会抛异常的
+// 版本)在 run_dir 运行期间被删除/掉线(比如挂载点掉了)时把异常捅到
+// stat_tail_loop 这个独立线程上——那样会直接 std::terminate() 干掉整个
+// 进程,而不是简单地"这一轮没扫到东西"。
+std::vector<gnss_bringup::StatFileInfo> list_stat_candidates(const fs::path& run_dir) {
+  std::vector<gnss_bringup::StatFileInfo> out;
   std::error_code ec;
-  if (!fs::exists(run_dir, ec)) return latest;
-  for (const auto& entry : fs::directory_iterator(run_dir, ec)) {
-    if (ec) break;
-    if (!entry.is_regular_file()) continue;
-    const auto& p = entry.path();
-    if (p.extension() != ".stat") continue;
-    if (latest.empty() || p.filename().string() > latest.filename().string()) {
-      latest = p;
+  if (!fs::exists(run_dir, ec) || ec) return out;
+
+  fs::directory_iterator it(run_dir, ec);
+  if (ec) return out;
+  const fs::directory_iterator end;
+
+  while (it != end) {
+    std::error_code fec;
+    const fs::directory_entry entry = *it;
+    const bool is_reg = entry.is_regular_file(fec);
+    if (!fec && is_reg) {
+      const auto& p = entry.path();
+      if (p.extension() == ".stat") {
+        std::error_code mec, sec;
+        const auto mtime = entry.last_write_time(mec);
+        const auto size = entry.file_size(sec);
+        if (!mec && !sec) {
+          gnss_bringup::StatFileInfo info;
+          info.path = p.string();
+          info.size = static_cast<uint64_t>(size);
+          info.mtime = mtime.time_since_epoch().count();
+          out.push_back(std::move(info));
+        }
+      }
     }
+    it.increment(ec);
+    if (ec) break;
   }
-  return latest;
+  return out;
 }
 
 }  // namespace
@@ -79,16 +106,17 @@ public:
     start_local_reservers();
     write_conf();
     start_supervisor();
-    log_initial_pid();
+    start_pid_logger();
     connect_solution_stream();
     subscribe_uplink_streams();
     start_stat_tailer();
   }
 
-  // 显式按 brief 规定的镜像顺序停止,而不是依赖成员声明顺序在析构时自动
-  // 倒序析构——那样一来这里的顺序意图会散落在类定义的字段排列里,后来者
-  // 改一下字段顺序就能悄悄改变停止顺序而不自知。
+  // 显式按上面文件头注释规定的顺序停止,而不是依赖成员声明顺序在析构时
+  // 自动倒序析构——那样一来这里的顺序意图会散落在类定义的字段排列里,
+  // 后来者改一下字段顺序就能悄悄改变停止顺序而不自知。
   ~RtkrcvSupervisorNode() {
+    stop_pid_logger();
     stop_stat_tailer();
     if (supervisor_) supervisor_->stop();
     if (sol_stream_) sol_stream_->stop();
@@ -117,13 +145,13 @@ private:
     extra_args_ = node_->declare_parameter<std::vector<std::string>>(
         "args", std::vector<std::string>{});
 
-    restart_delay_s_ = node_->declare_parameter<double>("restart_delay_s", 5.0);
-    crash_loop_life_s_ = node_->declare_parameter<double>("crash_loop_life_s", 30.0);
-    max_restart_delay_s_ = node_->declare_parameter<double>("max_restart_delay_s", 60.0);
+    restart_delay_s_ = declare_positive_seconds("restart_delay_s", 5.0);
+    crash_loop_life_s_ = declare_positive_seconds("crash_loop_life_s", 30.0);
+    max_restart_delay_s_ = declare_positive_seconds("max_restart_delay_s", 60.0);
 
-    sol_initial_backoff_s_ = node_->declare_parameter<double>("sol_initial_backoff_s", 1.0);
-    sol_max_backoff_s_ = node_->declare_parameter<double>("sol_max_backoff_s", 30.0);
-    sol_idle_timeout_s_ = node_->declare_parameter<double>("sol_idle_timeout_s", 30.0);
+    sol_initial_backoff_s_ = declare_positive_seconds("sol_initial_backoff_s", 1.0);
+    sol_max_backoff_s_ = declare_positive_seconds("sol_max_backoff_s", 30.0);
+    sol_idle_timeout_s_ = declare_positive_seconds("sol_idle_timeout_s", 30.0);
 
     corr_topic_ = node_->declare_parameter<std::string>("corrections_topic", "/gnss/rtcm_corrections");
     obs_topic_ = node_->declare_parameter<std::string>("raw_obs_topic", "/gnss/raw_obs");
@@ -135,7 +163,7 @@ private:
     // 两边失配。
     pos_opts_.default_time_system = gnss_core::PosTimeSystem::GPST;
 
-    stat_poll_interval_s_ = node_->declare_parameter<double>("stat_poll_interval_s", 0.2);
+    stat_poll_interval_s_ = declare_positive_seconds("stat_poll_interval_s", 0.2);
 
     if (run_dir_.empty()) {
       throw std::invalid_argument("run_dir 不能为空");
@@ -153,6 +181,17 @@ private:
     return v;
   }
 
+  // review round 1 的 Minor(promoted):轮询间隔/退避秒数如果是 0、负数或
+  // 非有限值,会让对应的 wait_for/退避逻辑退化成热循环或钉死行为——与
+  // is_valid_port 同一个道理,提前挡住、报得清楚。
+  double declare_positive_seconds(const std::string& name, double default_value) {
+    const double v = node_->declare_parameter<double>(name, default_value);
+    if (!is_positive_finite_seconds(v)) {
+      throw std::invalid_argument(name + ": 必须是正数秒(收到 " + std::to_string(v) + ")");
+    }
+    return v;
+  }
+
   // ---------- Step 2: 先起本机服务,rtkrcv 才有地方连 ----------
   void start_local_reservers() {
     if (!corr_reserver_.start(conf_.corr_port)) {
@@ -161,6 +200,15 @@ private:
     if (!obs_reserver_.start(conf_.obs_port)) {
       throw std::runtime_error("无法监听 obs_port=" + std::to_string(conf_.obs_port));
     }
+
+    // review round 1 的 Important 1:conf 必须写 LocalReserver 实际绑定到的
+    // 端口,不是请求的端口——corr_port/obs_port=0(让内核选)会让
+    // conf 里写出 "127.0.0.1:0",rtkrcv 拿着这个地址去连,永远连不上任何
+    // 东西,而且不会有任何错误日志。请求非 0 端口时 bound_port() 应该等于
+    // 请求值,这里统一回填不额外分支,两种情况都覆盖。
+    conf_.corr_port = corr_reserver_.bound_port();
+    conf_.obs_port = obs_reserver_.bound_port();
+
     RCLCPP_INFO(node_->get_logger(), "本机服务已就绪: corr_port=%d obs_port=%d",
                 conf_.corr_port, conf_.obs_port);
   }
@@ -210,17 +258,40 @@ private:
                 binary_.c_str(), run_dir_.c_str());
   }
 
-  // 有界轮询,只为了在日志里打一行"spawned pid",不是业务逻辑依赖项——
-  // 找不到也不影响后续接线(supervisor 自己会一直重试)。
-  void log_initial_pid() {
+  // review round 1 的 Minor(promoted):原来这是构造函数里的一段阻塞轮询
+  // (最多 3s),后果是——1) 节点在 spin() 之前就可能吃满 3s,这段时间
+  // Ctrl-C 没有 executor 在跑,进不了 rclcpp 的信号处理路径;2) 订阅
+  // corrections/raw_obs 的时机被推迟,窗口期内上行发布的差分字节会被
+  // 直接丢弃。改成一个独立的、有界的后台线程,不阻塞构造函数继续往下走,
+  // 只是打一行诊断日志,找不到 pid 也不影响接线。
+  void start_pid_logger() {
+    pid_log_running_.store(true);
+    pid_log_thread_ = std::thread([this] { pid_log_loop(); });
+  }
+
+  void stop_pid_logger() {
+    {
+      std::lock_guard<std::mutex> lk(pid_log_mutex_);
+      pid_log_running_.store(false);
+    }
+    pid_log_cv_.notify_all();
+    if (pid_log_thread_.joinable()) pid_log_thread_.join();
+  }
+
+  void pid_log_loop() {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (std::chrono::steady_clock::now() < deadline) {
+    for (;;) {
       const int pid = supervisor_->last_child_pid();
       if (pid > 0) {
         RCLCPP_INFO(node_->get_logger(), "rtkrcv spawned pid %d", pid);
         return;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      std::unique_lock<std::mutex> lk(pid_log_mutex_);
+      if (!pid_log_running_.load()) return;
+      if (std::chrono::steady_clock::now() >= deadline) break;
+      pid_log_cv_.wait_for(lk, std::chrono::milliseconds(20),
+                            [this] { return !pid_log_running_.load(); });
+      if (!pid_log_running_.load()) return;
     }
     RCLCPP_WARN(node_->get_logger(),
                 "3s 内未观测到 rtkrcv 子进程 pid,继续接线(supervisor 会持续重试)");
@@ -245,6 +316,17 @@ private:
         [this](bool connected, const std::string& detail) {
           RCLCPP_INFO(node_->get_logger(), "sol stream: %s %s",
                       connected ? "connected" : "disconnected", detail.c_str());
+          if (!connected) {
+            // review round 1 的 Important 4:rtkrcv 被杀/连接断开时,
+            // sol_splitter_ 里可能还留着一段没等到 '\n' 的半行。如果不清掉,
+            // 重连后新流的第一条完整行会被拼在这段陈旧残留后面——拼出来的
+            // 东西如果凑巧还有 >=10 个字段,parse_llh_solution 会"解析
+            // 成功",发布一条新旧字段混杂的假解,新鲜的 header.stamp 配上
+            // 一段过期/错位的数据,下游没有任何办法分辨。这个回调和
+            // on_data 跑在同一个 TcpStream 线程上,不存在和 on_solution_bytes
+            // 并发的竞态。
+            sol_splitter_.reset();
+          }
         });
     sol_stream_->start();
   }
@@ -253,6 +335,7 @@ private:
   // 按 '\n' 切分,半行留到下一次回调(brief 点名的坑:一行被切在两个块
   // 中间,如果直接当成两条破损的行解析,就是静默丢数据)。
   void on_solution_bytes(const uint8_t* d, size_t n) {
+    const size_t prev_overflow = sol_splitter_.overflow_count();
     for (const auto& line : sol_splitter_.feed(d, n)) {
       gnss_core::PosRecord rec;
       if (!gnss_core::parse_llh_solution(line, rec, pos_opts_)) continue;
@@ -262,6 +345,14 @@ private:
                                             // 两者之差是轮 3 的 stamp_skew 诊断输入
       msg.header.frame_id = frame_id_;
       rtk_fix_pub_->publish(msg);
+    }
+    if (sol_splitter_.overflow_count() != prev_overflow) {
+      // 限流:超限本身在真正配错(binary format / 接错端口)的场景下会
+      // 持续发生,不节流会刷屏。
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                            "sol 流单行超过上限被丢弃(累计 %zu 次)——"
+                            "检查 outstr1-format / sol_port 是否接对了流",
+                            sol_splitter_.overflow_count());
     }
   }
 
@@ -299,19 +390,19 @@ private:
   }
 
   void stat_tail_loop() {
-    fs::path current_file;
-    std::uintmax_t offset = 0;
+    bool first_poll = true;
 
     while (stat_running_.load()) {
-      const fs::path latest = find_latest_stat_file(run_dir_);
-      if (!latest.empty()) {
-        if (latest != current_file) {
-          // rtkrcv (再)起来后新开的 .stat 文件:从头开始 tail。
-          current_file = latest;
-          offset = 0;
-        }
-        tail_new_bytes(current_file, offset);
+      // review round 1 的 Minor(promoted):整个轮询体包一层 try/catch——
+      // 这是一个没有人 join 失败路径的独立线程,任何逃逸的异常
+      // (fs::filesystem_error、rclcpp 发布失败……)都会变成
+      // std::terminate() 干掉整个进程,而不是这一轮跳过、下一轮重试。
+      try {
+        run_one_stat_poll(first_poll);
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR(node_->get_logger(), "stat tail 轮询出错(已跳过这一轮): %s", e.what());
       }
+      first_poll = false;
 
       std::unique_lock<std::mutex> lk(stat_mutex_);
       stat_cv_.wait_for(lk, std::chrono::duration<double>(stat_poll_interval_s_),
@@ -319,27 +410,53 @@ private:
     }
   }
 
-  void tail_new_bytes(const fs::path& file, std::uintmax_t& offset) {
-    std::error_code ec;
-    const auto size = fs::file_size(file, ec);
-    if (ec || size <= offset) return;   // 没有新增内容(或文件被截断/轮转,offset 已在切换文件时归零)
+  void run_one_stat_poll(bool first_poll) {
+    const auto candidates = list_stat_candidates(run_dir_);
+    const auto decision =
+        plan_stat_tail(candidates, stat_current_file_, stat_current_offset_, first_poll);
+    if (!decision.has_target) return;
+
+    stat_current_file_ = decision.file;
+    stat_current_offset_ = decision.read_from;
+    if (decision.read_to <= decision.read_from) return;   // 没有新内容
+
+    stat_current_offset_ =
+        decision.read_from + tail_read_and_publish(decision.file, decision.read_from, decision.read_to);
+  }
+
+  // review round 1 的 Important 3(第二条):按块读取/发布,不是不管文件
+  // 涨到多大都一次性 read() 成一个 vector 再塞进一条 RawStream——长时间跑
+  // 下来 .stat 文件可能到几百 MB,首次追上historical内容(或者 tail 线程
+  // 卡顿一阵之后一次性追平)时,不加节制的话就是一次巨大分配 + 一条巨大的
+  // DDS 消息。返回实际读到并发布出去的字节数,供调用方推进 offset——即使
+  // 中途遇到短读,offset 也只会推进到真正发出去的那一段,不会把没读到的
+  // 部分当成"已经处理过"而漏掉。
+  uint64_t tail_read_and_publish(const std::string& file, uint64_t from, uint64_t to) {
+    constexpr size_t kChunkBytes = 64 * 1024;
 
     std::ifstream ifs(file, std::ios::binary);
-    if (!ifs) return;
-    ifs.seekg(static_cast<std::streamoff>(offset));
+    if (!ifs) return 0;
+    ifs.seekg(static_cast<std::streamoff>(from));
+    if (!ifs) return 0;
 
-    std::vector<uint8_t> buf(static_cast<size_t>(size - offset));
-    ifs.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
-    const auto got = static_cast<std::uintmax_t>(ifs.gcount());
-    if (got == 0) return;
-    buf.resize(got);
-    offset += got;
+    uint64_t total = 0;
+    std::vector<uint8_t> buf(kChunkBytes);
+    while (from + total < to) {
+      const size_t want = static_cast<size_t>(std::min<uint64_t>(kChunkBytes, to - from - total));
+      ifs.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(want));
+      const auto got = static_cast<uint64_t>(ifs.gcount());
+      if (got == 0) break;   // 文件比预期的 to 更短(被截断),下一轮 plan_stat_tail 会处理
 
-    gnss_msgs::msg::RawStream msg;
-    msg.header.stamp = node_->now();
-    msg.header.frame_id = "rtkrcv_stat";
-    msg.data = std::move(buf);
-    stat_pub_->publish(msg);
+      gnss_msgs::msg::RawStream msg;
+      msg.header.stamp = node_->now();
+      msg.header.frame_id = "rtkrcv_stat";
+      msg.data.assign(buf.begin(), buf.begin() + static_cast<long>(got));
+      stat_pub_->publish(msg);
+
+      total += got;
+      if (got < want) break;   // 短读:大概率已经到文件末尾
+    }
+    return total;
   }
 
   rclcpp::Node* node_;
@@ -367,10 +484,17 @@ private:
   rclcpp::Publisher<gnss_msgs::msg::RawStream>::SharedPtr stat_pub_;
   rclcpp::Subscription<gnss_msgs::msg::RawStream>::SharedPtr corr_sub_, obs_sub_;
 
+  std::thread pid_log_thread_;
+  std::atomic<bool> pid_log_running_{false};
+  std::mutex pid_log_mutex_;
+  std::condition_variable pid_log_cv_;
+
   std::thread stat_thread_;
   std::atomic<bool> stat_running_{false};
   std::mutex stat_mutex_;
   std::condition_variable stat_cv_;
+  std::string stat_current_file_;
+  uint64_t stat_current_offset_ = 0;
 };
 
 }  // namespace gnss_bringup
@@ -394,9 +518,9 @@ int main(int argc, char** argv) {
 
   rclcpp::spin(node);
 
-  // 显式按 supervisor -> sol_stream -> reservers 的镜像顺序停止(见类析构
-  // 函数注释),必须发生在 node 本身析构之前——sup 析构时 node 仍然完整
-  // 存活,回调里 node_->now() / publisher::publish() 都还是安全的。
+  // 显式按类析构函数注释里那套顺序停止,必须发生在 node 本身析构之前——
+  // sup 析构时 node 仍然完整存活,回调里 node_->now() / publisher::publish()
+  // 都还是安全的。
   sup.reset();
   rclcpp::shutdown();
   return 0;
