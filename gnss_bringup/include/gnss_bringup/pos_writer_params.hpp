@@ -54,8 +54,63 @@ inline bool is_sane_leap_seconds(int leap_seconds) {
 inline constexpr double kMinSaneUtcStamp = 946684800.0;   // 2000-01-01T00:00:00Z
 inline constexpr double kMaxSaneUtcStamp = 4102444800.0;  // 2100-01-01T00:00:00Z
 
+// round 2 review 的 Minor:丢弃时的日志原来一律写"gnss_time 与 header.stamp
+// 都缺失或异常",但一个落在合理区间之外、却既非 0 也非非有限数的时间戳
+// (比如 1990 年的某个真实 unix 秒——两个字段都被填了,只是填的时间不对,
+// 或者是某种单位/换算错误)用这句话描述是误导的:它暗示"字段缺失",但
+// 实际情况是"字段都在,只是不像真实的 GNSS 解算时刻"。分开分类,让日志
+// 说得准确,操作人员据此能判断该去查驱动的时间戳来源还是查换算逻辑。
+enum class StampSanity {
+  kOk,          // 落在合理区间内
+  kNonFinite,   // NaN/±inf——两个字段都没给,或者上游算出了非数
+  kNearEpoch,   // 接近 0——gnss_time 与 header.stamp 都缺失时的典型特征
+  kOutOfRange,  // 有限、不接近 0,但落在 [kMin, kMax] 区间之外——字段都在,
+                // 只是不像真实的 GNSS 解算时刻(单位错/换算错/钟不对之类)
+};
+
+// 0 附近的判据:两个字段都缺失时 to_pos_record 会原样传下 0.0;留一点点
+// 余量(±1 秒)而不是严格等于 0.0,同样能覆盖"缺失"这个语义,又不必用
+// bit-exact 比较。
+inline constexpr double kNearEpochToleranceS = 1.0;
+
+inline StampSanity classify_utc_stamp(double utc_stamp) {
+  if (!std::isfinite(utc_stamp)) return StampSanity::kNonFinite;
+  if (std::fabs(utc_stamp) < kNearEpochToleranceS) return StampSanity::kNearEpoch;
+  if (utc_stamp < kMinSaneUtcStamp || utc_stamp > kMaxSaneUtcStamp) return StampSanity::kOutOfRange;
+  return StampSanity::kOk;
+}
+
 inline bool is_sane_utc_stamp(double utc_stamp) {
-  return std::isfinite(utc_stamp) && utc_stamp >= kMinSaneUtcStamp && utc_stamp <= kMaxSaneUtcStamp;
+  return classify_utc_stamp(utc_stamp) == StampSanity::kOk;
+}
+
+// 人类可读的分类说明,供节点拼日志用——分类逻辑只写一遍,文案也只写一遍。
+inline const char* describe_stamp_sanity(StampSanity s) {
+  switch (s) {
+    case StampSanity::kNonFinite:
+      return "不是有限数(NaN/inf)——两个时间字段大概率都没给,或者上游算出了非数";
+    case StampSanity::kNearEpoch:
+      return "接近 UTC 纪元零点——gnss_time 与 header.stamp 大概率都缺失";
+    case StampSanity::kOutOfRange:
+      return "是有限数,但不落在合理的 GNSS 时间范围内——字段本身有值,"
+             "但不像真实的解算/接收时刻(检查单位换算或时钟source)";
+    case StampSanity::kOk:
+      return "合理";
+  }
+  return "未知";
+}
+
+// ---------- period_s 参数(1 Hz 抽稀周期)----------
+// round 2 review 的 Minor(promoted):period_s 只校验"正数且有限"是不够的
+// ——period_s=1e-12 一样能通过那道校验,但 PosDecimator::accept() 内部算
+// floor(stamp / period_s) 时,一个正常量级的 stamp(~4.1e9)除以 1e-12 会
+// 产生一个远超 long long 表示范围的浮点数,随后的 static_cast<long long> 是
+// 未定义行为。下限取 1e-3(1 ms)——比这个节点存在的意义(1 Hz 摘要)快
+// 1000 倍,足够宽松到不会误伤任何合理配置,同时远离溢出边界。
+inline constexpr double kMinSanePeriodSeconds = 1e-3;
+
+inline bool is_sane_period_seconds(double period_s) {
+  return std::isfinite(period_s) && period_s >= kMinSanePeriodSeconds;
 }
 
 }  // namespace gnss_bringup

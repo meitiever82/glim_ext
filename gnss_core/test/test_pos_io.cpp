@@ -210,6 +210,39 @@ TEST(PosDecimator, ClockJumpBackwardsDoesNotStallOutput) {
   EXPECT_TRUE(d.accept(at(1000.00))) << "时钟回跳后必须继续写出,而不是静默丢弃到追上为止";
 }
 
+// round 2 review 的 Important 2:一个按接收时刻打时间戳的源,相邻记录完全
+// 可能在整秒边界两侧来回摆动(比如 625.995 → 626.003 → 625.998 → 626.001 →
+// …)。修复前的规则("桶号只要变化就放行")会把这种摆动的每一次跳变都当成
+// 新的一秒放行——10 Hz 输入实测被写出 30 行而不是 3 行(reviewer 复测数字)。
+// 用显式的逐条断言而不是计数器,是为了不让"第一条记录无条件放行"这条规则
+// (has_bin_==false 时没有'上一次'可比较)悄悄污染计数逻辑本身。
+TEST(PosDecimator, JitterAcrossASecondBoundaryDoesNotMultiplyOutput) {
+  PosDecimator d;
+  EXPECT_TRUE(d.accept(at(1000.000)));   // 第一条:无条件放行,真实的第 1 秒
+  EXPECT_FALSE(d.accept(at(1000.003)));  // 同一秒内的重复
+  EXPECT_FALSE(d.accept(at(999.998)));   // 摆回上一个桶——抖动,丢弃
+  EXPECT_FALSE(d.accept(at(1000.004)));  // 摆回来——还是同一秒,丢弃
+  EXPECT_FALSE(d.accept(at(999.997)));   // 再摆一次——抖动,丢弃
+  EXPECT_TRUE(d.accept(at(1001.000)));   // 真正推进到下一秒
+  EXPECT_FALSE(d.accept(at(1001.004)));
+  EXPECT_FALSE(d.accept(at(1000.998)));  // 摆回上一秒边界——抖动,丢弃
+  EXPECT_FALSE(d.accept(at(1001.002)));
+  EXPECT_TRUE(d.accept(at(1002.000)));   // 再推进一秒——3 个真实秒,3 次放行
+  EXPECT_FALSE(d.accept(at(1002.003)));
+  EXPECT_FALSE(d.accept(at(1001.995)));  // 摆回上一秒边界——抖动,丢弃
+  EXPECT_FALSE(d.accept(at(1002.004)));
+}
+
+// 摆动本身(后退 1 个桶)必须被当成抖动丢弃,但更大的后退(真实回跳)
+// 仍然必须继续放行——两条行为不能互相抵消。
+TEST(PosDecimator, JitterToleranceDoesNotSwallowARealBackwardJump) {
+  PosDecimator d;
+  ASSERT_TRUE(d.accept(at(1001.00)));                 // bin=1001
+  EXPECT_FALSE(d.accept(at(1000.995))) << "只后退 1 个桶——抖动,丢弃";
+  EXPECT_TRUE(d.accept(at(998.00))) << "后退 3 个桶(相对上一次真正放行的 1001)——"
+                                       "真实回跳,必须继续放行,不能被抖动容忍度吞掉";
+}
+
 TEST(PosDecimator, RespectsConfiguredPeriod) {
   PosDecimator d(0.5);
   ASSERT_TRUE(d.accept(at(1000.00)));

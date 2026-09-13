@@ -37,10 +37,25 @@ bool parse_date_time(const std::string& date, const std::string& time, double& o
 
 bool PosDecimator::accept(const PosRecord& r) {
   const long long bin = static_cast<long long>(std::floor(r.stamp / period_));
-  if (has_bin_ && bin == bin_) return false;
-  bin_ = bin;
-  has_bin_ = true;
-  return true;
+  if (!has_bin_) {
+    bin_ = bin;
+    has_bin_ = true;
+    return true;
+  }
+  if (bin > bin_) {
+    // 桶号前进:正常的下一秒,无条件放行。
+    bin_ = bin;
+    return true;
+  }
+  if (bin_ - bin > kJitterToleranceBins) {
+    // 桶号后退超过容忍范围——真实的时钟回跳(比如 ClockJumpBackwardsDoesNotStallOutput
+    // 覆盖的 1000 秒回跳),必须继续输出,不能等追上才恢复。
+    bin_ = bin;
+    return true;
+  }
+  // 桶号没变,或者只后退了 <= kJitterToleranceBins 格:前者是同一秒内的
+  // 重复,后者是抖动(在整秒边界两侧来回摆动)——两者都不是"新的一秒",丢弃。
+  return false;
 }
 
 Quality q_to_quality(int q) {

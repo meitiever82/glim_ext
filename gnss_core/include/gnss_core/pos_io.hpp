@@ -75,8 +75,23 @@ Quality q_to_quality(int q);
 
 // 1 Hz 抽稀(spec §5.3:rosbag2 存全量原始流,.pos 只存 1 Hz 摘要)。
 // 按 floor(stamp / period) 分桶,每个桶只放行第一条 —— 桶边界对齐整秒,
-// 因此输出的时间戳分布与 RTKLIB 1 Hz .pos 一致,且对抖动与时钟回跳都不会卡死
-// (回跳落进更早的桶,算作新桶直接放行,而不是等到"上次 + 1 s"才恢复)。
+// 因此输出的时间戳分布与 RTKLIB 1 Hz .pos 一致。
+//
+// round 2 review 的 Important 2(经 gnss_bringup 侧复测证实):最初的规则是
+// "桶号只要变化就放行",本意是让时钟回跳后不会卡在"永远追不上上次+1s"——
+// 但这条规则对着抖动同样成立,而抖动是真实存在的场景:一个按接收时刻(而非
+// 板卡历元)打时间戳的源,相邻两条记录完全可能落在整秒边界两侧来回摆动
+// (…625.995→626.003→625.998→626.001…),"桶号变化就放行"会让这种摆动的
+// 每一次跳变都被当成新桶放行——10 Hz 输入实测被写出 30 行而不是 3 行,直接
+// 污染 .pos 这个"1 Hz 摘要"文件的意义(它是下游标定量测权重系数的输入)。
+//
+// 修复:只有桶号真正前进(bin > bin_)才无条件放行;桶号后退时,后退超过
+// kJitterToleranceBins 个桶才算"真的跳变"(时钟被拨回去了,必须继续输出,
+// 不能等到追上才恢复),否则按抖动处理、丢弃。kJitterToleranceBins=1 恰好
+// 挡住"在同一条整秒边界两侧来回摆动"这种最常见的抖动模式(相邻桶号只差 1),
+// 同时对 ClockJumpBackwardsDoesNotStallOutput 覆盖的真实回跳场景(相差
+// 1000 个桶,远超过 1)完全不受影响——它就是为区分"抖动"与"真跳变"存在的
+// 阈值,不是随手挑的数字。
 class PosDecimator {
 public:
   explicit PosDecimator(double period_s = 1.0) : period_(period_s) {}
@@ -85,6 +100,10 @@ public:
   void reset() { has_bin_ = false; }
 
 private:
+  // 桶号后退不超过这么多格,按抖动处理(丢弃);超过则按真实时钟回跳处理
+  // (放行,避免永远追不上)。见上面类注释。
+  static constexpr long long kJitterToleranceBins = 1;
+
   double period_;
   long long bin_ = 0;
   bool has_bin_ = false;

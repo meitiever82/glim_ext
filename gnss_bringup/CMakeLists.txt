@@ -99,6 +99,15 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pos_writer_params test/test_pos_writer_params.cpp)
   target_link_libraries(test_pos_writer_params gnss_core::gnss_core)
   target_include_directories(test_pos_writer_params PRIVATE include)
+
+  # round 2 review 的 Important 4:pos_writer_node.cpp 里"一路 .pos 输出"的
+  # 状态机(PosDecimator+PosWriter+当前路径+失败锁存+沉默检测)抽成
+  # PosSourceWriter,不碰任何 ROS 类型,可以完全脱离节点单测——两个此前能
+  # 骗过全部 142 个测试的变异(轮转依据换成"现在"、失败锁存改坏)现在都会
+  # 被这里的用例直接抓到。
+  ament_add_gtest(test_pos_source_writer test/test_pos_source_writer.cpp)
+  target_link_libraries(test_pos_source_writer gnss_core::gnss_core)
+  target_include_directories(test_pos_source_writer PRIVATE include)
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
