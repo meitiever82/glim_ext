@@ -41,6 +41,11 @@ target_link_libraries(rtkrcv_node gnss_bringup_io gnss_core::gnss_core)
 ament_target_dependencies(rtkrcv_node rclcpp gnss_msgs)
 install(TARGETS rtkrcv_node DESTINATION lib/${PROJECT_NAME})
 
+add_executable(pos_writer src/pos_writer_node.cpp)
+target_link_libraries(pos_writer gnss_bringup_io gnss_core::gnss_core)
+ament_target_dependencies(pos_writer rclcpp gnss_msgs)
+install(TARGETS pos_writer DESTINATION lib/${PROJECT_NAME})
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_tcp_stream test/test_tcp_stream.cpp)
@@ -85,6 +90,15 @@ if(BUILD_TESTING)
   # 方式,单独可测。
   ament_add_gtest(test_pos_rotation test/test_pos_rotation.cpp)
   target_include_directories(test_pos_rotation PRIVATE include)
+
+  # pos_writer_params.hpp 是纯函数(time_system/leap_seconds/record 时间戳
+  # 合理性的校验),不碰 ROS 节点,pos_writer_node.cpp 自己的可独立测试的
+  # 部分,和 rtcm_bridge_params.hpp/test_rtcm_bridge_params 同样的处理方式。
+  # 头文件里用到 gnss_core::PosTimeSystem,需要链接 gnss_core 取得头文件的
+  # include 路径(与 test_rtk_fix_mapping 同样的道理)。
+  ament_add_gtest(test_pos_writer_params test/test_pos_writer_params.cpp)
+  target_link_libraries(test_pos_writer_params gnss_core::gnss_core)
+  target_include_directories(test_pos_writer_params PRIVATE include)
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
