@@ -4,6 +4,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -307,6 +308,14 @@ void ProcessSupervisor::run() {
       // 需要能对整组发信号才不会留下孤儿。setsid() 失败(比如已经是
       // session leader)不影响后续流程,忽略返回值。
       ::setsid();
+
+      // 父线程(即 supervisor 的 worker 线程)一旦终止,内核给本进程发 SIGTERM。
+      // 覆盖父进程被 SIGKILL / 崩溃 / OOM 的情形——那些路径下 stop() 根本来不及跑,
+      // 而 setsid() 已经让本进程脱离了父进程组,不会被任何组信号带走。
+      // man 2 prctl 的 "parent 指创建本进程的线程" 警告在这里反而正合适:
+      // 该线程的生命周期恰好等于 "supervisor 应当在运行"。
+      // 设置跨 execve 保留(非 setuid 二进制),因此对 execv 进来的 rtkrcv 依然有效。
+      ::prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0);
 
       // review round 1 的 Important:execv() 会原样保留调用者的信号处置
       // (SIG_IGN 会被继承,只有 SIG_DFL 才会被 exec 重置)。这里显式把

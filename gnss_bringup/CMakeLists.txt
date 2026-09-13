@@ -20,6 +20,7 @@ add_library(gnss_bringup_io SHARED
   src/local_reserver.cpp
   src/rtkrcv_conf.cpp
   src/process_supervisor.cpp
+  src/port_probe.cpp
 )
 target_include_directories(gnss_bringup_io PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -73,6 +74,11 @@ if(BUILD_TESTING)
   target_link_libraries(test_rtk_fix_mapping gnss_core::gnss_core)
   target_include_directories(test_rtk_fix_mapping PRIVATE include)
   ament_target_dependencies(test_rtk_fix_mapping gnss_msgs)
+
+  # port_probe 用 LocalReserver 自己起一个监听来验证探测结果,和进程监管
+  # 无关,单独成文件(task-1-brief.md 的要求)。
+  ament_add_gtest(test_port_probe test/test_port_probe.cpp)
+  target_link_libraries(test_port_probe gnss_bringup_io)
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})

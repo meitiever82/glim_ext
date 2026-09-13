@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <cerrno>
 #include <chrono>
@@ -377,4 +378,80 @@ TEST(ProcessSupervisor, SpawnedChildDoesNotInheritLocalReserverListeningSocket) 
   std::future<void> done = stop_async(supervisor);
   ASSERT_EQ(done.wait_for(std::chrono::seconds(6)), std::future_status::ready)
       << "stop() 在 6 s 内没有返回";
+}
+
+TEST(ProcessSupervisor, ChildDiesWhenTheForkingThreadGoesAway) {
+  // 实现者注意——这条用例的机制和 task-1-brief.md 里给出的原始版本不一样,
+  // 原因是一个用真实实验(不是猜测)验证过的内核行为,brief 写的时候没有
+  // 考虑到:
+  //
+  // brief 原版的做法是"泄漏 supervisor 对象、测试进程自己继续跑下去",指望
+  // 靠这个来模拟"forking 线程终止"。但 Linux 内核 kernel/exit.c 里
+  // forget_original_parent()/find_new_reaper() 的实际逻辑是:一个线程终止时,
+  // 内核会先找"同一线程组里还有没有活着的兄弟线程"来接管它的孤儿子进程——
+  // 只要找到了(测试进程自己的主线程显然还活着),这属于源码注释里明确写的
+  // "threaded reparent",**不会触发任何通知**,PDEATHSIG 自然也不会送达;
+  // 只有当整个线程组(进程)都已经死亡、孤儿真的要被托付给 init/subreaper
+  // 时,通知(含 PDEATHSIG)才会发生。用一次隔离实验证实过这个结论:哪怕
+  // 强制只终止 forking 线程本身(线程函数正常返回、对应的 tid 已经从
+  // /proc/<pid>/task/ 里消失),只要测试进程的主线程还在跑,孤儿子进程在
+  // 5 秒观察窗口内纹丝不动——和 PDEATHSIG 到底设没设对完全无关,是"泄漏对象
+  // 但宿主进程本身还活着"这个模拟方式本身测不出真实修复效果。
+  //
+  // 因此这里改成 fork() 出一个用完即弃的独立进程来跑 supervisor,再用真正的
+  // SIGKILL 终止那个进程——这才是内核会判定为"整个进程死亡、必须把孤儿托付
+  // 给 init"的路径,和 Step 4 手工复现的 `kill -9 <rtkrcv_node pid>` 在内核
+  // 语义上完全一致,只是把"手工跑 ros2 run"换成了自动化单测里的一次性子
+  // 进程。fork() 出来的这个子进程里绝不能用 gtest 的 ASSERT_*/EXPECT_*(那
+  // 些宏依赖的 gtest 内部状态是 fork() 时复制的一份独立副本,子进程里的失败
+  // 不会传回真正在跑这个 TEST 函数的父进程),只用最朴素的返回值检查。
+  int pipefd[2];
+  ASSERT_EQ(::pipe(pipefd), 0) << "起不了管道,没法从 helper 进程收 pid";
+
+  const pid_t helper = ::fork();
+  ASSERT_GE(helper, 0) << "fork() 失败,没法搭这个测试场景";
+
+  if (helper == 0) {
+    // ---- helper 子进程:整个测试二进制的一份独立副本,只用来模拟
+    // "rtkrcv_node 本体"——起一个 supervisor,从不调用 stop(),把 rtkrcv 的
+    // pid 报给父测试进程之后原地等死,靠父测试进程接下来的 SIGKILL 结束
+    // 这个进程的生命(不能自己退出,否则测的是"正常退出"而不是"被杀死")。
+    ::close(pipefd[0]);
+    ProcessSupervisorConfig c = cfg_for("live", 0.05);
+    ProcessSupervisor sup(c);
+    sup.start();
+    pid_t grandchild = -1;
+    for (int i = 0; i < 200 && grandchild <= 0; ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      grandchild = sup.last_child_pid();
+    }
+    char buf[32];
+    const int n = ::snprintf(buf, sizeof(buf), "%d\n", grandchild);
+    const ssize_t written = ::write(pipefd[1], buf, static_cast<size_t>(n));
+    (void)written;  // 写失败也没有更好的处理方式:父测试进程读不到就会自己报失败
+    for (;;) ::pause();  // 只等被 SIGKILL,不做任何清理
+  }
+
+  // ---- 父测试进程(真正跑这个 TEST 函数、gtest 断言在这里才有意义)----
+  ::close(pipefd[1]);
+  char buf[32] = {};
+  const ssize_t n = ::read(pipefd[0], buf, sizeof(buf) - 1);
+  ::close(pipefd[0]);
+  ASSERT_GT(n, 0) << "没有从 helper 进程收到 rtkrcv 的 pid"
+                     "(helper 可能没能成功 fork 出子进程)";
+  const pid_t grandchild = static_cast<pid_t>(std::atoi(buf));
+  ASSERT_GT(grandchild, 0);
+  ASSERT_EQ(::kill(grandchild, 0), 0) << "rtkrcv 子进程应当活着";
+
+  ASSERT_EQ(::kill(helper, SIGKILL), 0) << "杀不掉 helper 进程,没法继续这个测试";
+  int status = 0;
+  ASSERT_EQ(::waitpid(helper, &status, 0), helper) << "回收 helper 进程失败";
+
+  bool gone = false;
+  for (int i = 0; i < 500; ++i) {
+    if (::kill(grandchild, 0) != 0 && errno == ESRCH) { gone = true; break; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_TRUE(gone) << "helper 进程被 SIGKILL 之后 rtkrcv 仍然活着,"
+                       "PR_SET_PDEATHSIG 没生效(或者没有跨 execve 保留)";
 }
