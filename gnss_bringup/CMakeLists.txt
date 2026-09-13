@@ -79,6 +79,12 @@ if(BUILD_TESTING)
   # 无关,单独成文件(task-1-brief.md 的要求)。
   ament_add_gtest(test_port_probe test/test_port_probe.cpp)
   target_link_libraries(test_port_probe gnss_bringup_io)
+
+  # pos_rotation.hpp 是纯函数(按天轮转的目录/文件路径决策),不碰 ROS 节点
+  # 或真实文件系统,和 rtk_fix_mapping.hpp 里的 plan_stat_tail 同样的处理
+  # 方式,单独可测。
+  ament_add_gtest(test_pos_rotation test/test_pos_rotation.cpp)
+  target_include_directories(test_pos_rotation PRIVATE include)
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
