@@ -32,6 +32,53 @@ inline gnss_msgs::msg::RtkFix to_rtk_fix(const gnss_core::PosRecord& r) {
   return m;
 }
 
+// RtkFix.quality(归一化枚举)→ RTKLIB Q,是 gnss_core::q_to_quality 的逆映射
+// (1↔FIXED 2↔FLOAT 4↔DGPS 5↔SINGLE,其余→0)。放在 gnss_bringup 里而不是
+// gnss_core 里,是因为 gnss_core 不能改动;这条逆映射只有 ROS 消息这一侧
+// 用得到。
+inline int quality_to_q(gnss_core::Quality quality) {
+  switch (quality) {
+    case gnss_core::Quality::FIXED:  return 1;
+    case gnss_core::Quality::FLOAT:  return 2;
+    case gnss_core::Quality::DGPS:   return 4;
+    case gnss_core::Quality::SINGLE: return 5;
+    default: return 0;
+  }
+}
+
+// RtkFix → PosRecord(rtkrcv llh 解),to_rtk_fix 的反向映射。
+// 注意 σ 顺序:RtkFix.sigma_enu 是 E/N/U,PosRecord.sdne 要 N/E/U —— 前两项
+// 必须换回去,方向与 to_rtk_fix 相反,是同一个 spec §4.1 v2 坑的镜像。
+//
+// gnss_time==0 表示"源不提供该字段"(见 RtkFix.msg 字段注释)。如果原样
+// 写进 PosRecord.stamp,后续按日期滚动/分目录落盘 .pos 的逻辑会把这条记录
+// 归到 1970-01-01——几乎必然是错误的落盘位置。header.stamp 是接收/发布
+// 时刻(ROS 时钟),虽然不是解算历元本身,但足够代表"大致现在",用来兜底
+// 选对日期目录已经够用,所以这里退化为用 header.stamp,而不是让纪元零点
+// 原样流入 stamp。
+//
+// ratio(AR ratio)在 RtkFix 里没有对应字段——rtkrcv 的 .pos 有 ratio,
+// 但经 RtkFix 中转会丢失,这是消息定义的既有取舍,不在本任务修改范围,
+// 这里显式填 0 并在此说明,而不是留一个看似"忘了填"的默认值。
+inline gnss_core::PosRecord to_pos_record(const gnss_msgs::msg::RtkFix& m) {
+  gnss_core::PosRecord r;
+  if (m.gnss_time != 0.0) {
+    r.stamp = m.gnss_time;
+  } else {
+    r.stamp = static_cast<double>(m.header.stamp.sec) +
+              static_cast<double>(m.header.stamp.nanosec) * 1e-9;
+  }
+  r.lat = m.latitude;
+  r.lon = m.longitude;
+  r.height = m.altitude;
+  r.q = quality_to_q(static_cast<gnss_core::Quality>(m.quality));
+  r.ns = m.sats_used;
+  r.sdne = Eigen::Vector3d(m.sigma_enu[1], m.sigma_enu[0], m.sigma_enu[2]);  // N,E,U
+  r.age = m.diff_age;
+  r.ratio = 0.0;  // RtkFix 不携带 AR ratio,见上面注释
+  return r;
+}
+
 // 增量按行切分器:TcpStream 交付的是任意切分的字节块,不是行。
 // feed() 攒内部缓冲,吐出所有已经凑齐的完整行(不含末尾 \n,也会剥掉紧邻的
 // \r 以兼容 CRLF);半行留在缓冲里等下一次 feed()。与 gnss_core::RtcmFramer
