@@ -29,6 +29,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -44,7 +45,7 @@
 #include <gnss_msgs/msg/rtk_fix.hpp>
 
 #include "gnss_bringup/local_reserver.hpp"
-#include "gnss_bringup/port_probe.hpp"             // is_local_port_listening:启动时探测 sol_port 是否已被孤儿/第二实例占着
+#include "gnss_bringup/port_probe.hpp"             // probe_local_port:启动时探测 sol_port 是否已被孤儿/第二实例占着
 #include "gnss_bringup/process_supervisor.hpp"
 #include "gnss_bringup/rtcm_bridge_params.hpp"   // is_valid_port_for_direction:与 rtcm_bridge_node 共用的端口校验
 #include "gnss_bringup/rtk_fix_mapping.hpp"       // to_rtk_fix + LineSplitter + plan_stat_tail
@@ -121,9 +122,22 @@ public:
     // 挪到最后一行”这种容易被后续改动悄悄破坏的顺序假设。
     try {
       read_params();
+      // fix round 1(独立评审实测复现):这一步必须排在 start_local_reservers()/
+      // write_conf() 之前——check_sol_port_free() 只依赖 read_params() 已经
+      // 校验过的 conf_.sol_port,不依赖 corr_port/obs_port 的实际绑定结果,
+      // 没有理由等它们起好。原来的顺序(写完 conf 之后才检查)有两个真实
+      // 后果:1) 端口占用时,write_conf() 已经把 run_dir 下的 rtkrcv.conf
+      // 覆盖成了这次(即将失败的)启动用的参数——如果 run_dir 和另一个仍在
+      // 正常运行的 rtkrcv_node 实例共用(同一台机器上误开第二个实例的典型
+      // 场景),这一步会在检查失败之前就已经把活着的那个实例的 conf 静默
+      // 改写掉,下一次它的 supervisor 重启 rtkrcv 时会读到错误的端口/定位
+      // 模式,且没有任何报错;2) start_local_reservers() 已经把 corr_port/
+      // obs_port 绑定并进入监听状态几毫秒,足够让一个残留的孤儿 rtkrcv
+      // (作为 tcpcli)在此期间重新连上并被喂入新鲜的 RTCM 数据,而本节点
+      // 随后仍然会因为 sol_port 被占用而中止启动。
+      check_sol_port_free();
       start_local_reservers();
       write_conf();
-      check_sol_port_free();
       start_supervisor();
       start_pid_logger();
       connect_solution_stream();
@@ -309,25 +323,58 @@ private:
     RCLCPP_INFO(node_->get_logger(), "已写入 %s", conf_path_.c_str());
   }
 
-  // ---------- Step 3.5: sol_port 占用检查(prctl(PR_SET_PDEATHSIG) 的兜底)----------
+  // ---------- Step 1.5: sol_port 占用检查(prctl(PR_SET_PDEATHSIG) 的兜底)----------
   // README「部署要求」一节记录的最坏情况:上一个 rtkrcv_node 被 kill -9(或者
   // OOM killer)杀死之后,它监管的 rtkrcv 子进程被 init 收养、继续拿着
   // sol_port 当 TCP 服务端挂着。prctl(PR_SET_PDEATHSIG) 是预防(见
   // process_supervisor.cpp 的说明),但它只覆盖"这一次运行期间父进程死亡"
   // ——旧版本编译出来的、还没打这个补丁的 rtkrcv、或者运维不小心手动起了
-  // 第二个实例,都不会被 PDEATHSIG 挡住。这里在真正起 supervisor 之前探测
-  // 一次,占用就响亮失败,而不是让新起的 rtkrcv 绑不上端口、TcpStream 又
-  // 悄悄连上那个孤儿——那才是 README 描述的"时间戳新鲜、内容却是旧的/错的
-  // 定位解"这个最难排查的故障。
+  // 第二个实例,都不会被 PDEATHSIG 挡住。
+  //
+  // fix round 1(独立评审实测复现的 Important 1):这一步必须排在
+  // read_params() 之后、start_local_reservers()/write_conf() 之前,不能像
+  // 最初那样等 write_conf() 写完 conf 才检查——只依赖 conf_.sol_port(已经
+  // 被 read_params() 校验过),不依赖 corr_port/obs_port 的绑定结果,没有
+  // 理由拖到它们之后。原来的顺序有两个已经复现过的真实后果:1) 端口占用而
+  // 即将失败时,write_conf() 已经把 run_dir 下的 rtkrcv.conf 覆盖成了这次
+  // 启动的参数——如果 run_dir 和另一个仍在正常运行的 rtkrcv_node 实例共用
+  // (误开第二个实例的典型场景),这一步会在检查失败之前就静默改写掉那个
+  // 活实例的 conf,它的 supervisor 下次重启 rtkrcv 时会读到错误的端口/
+  // 定位模式,且没有任何报错;2) start_local_reservers() 已经把 corr_port/
+  // obs_port 绑定并进入监听状态几毫秒,足够让一个残留的孤儿 rtkrcv(作为
+  // tcpcli)在此期间重新连上并被喂入新鲜的 RTCM 数据,而本节点随后仍然会
+  // 因为 sol_port 被占用而中止启动。挪到最前面之后,失败路径不会碰
+  // run_dir/conf,也不会打开任何本机监听端口。
   void check_sol_port_free() {
-    if (gnss_bringup::is_local_port_listening(conf_.sol_port)) {
-      throw std::runtime_error(
-          "sol_port=" + std::to_string(conf_.sol_port) +
-          " 已经有人在监听——很可能是上一次 rtkrcv_node 异常退出(kill -9/OOM)"
-          "遗留的孤儿 rtkrcv 进程,也可能是误开的第二个实例。继续启动会导致"
-          "新起的 rtkrcv 绑不上这个端口,而本节点的 TcpStream 转而连上那个"
-          "孤儿,把它的陈旧解当新鲜数据发布出去。请先用 `pgrep -a rtkrcv` "
-          "排查并手动杀掉残留进程,确认端口空闲后再重启本节点。");
+    const gnss_bringup::PortProbeOutcome outcome =
+        gnss_bringup::probe_local_port(conf_.sol_port);
+    switch (outcome.result) {
+      case gnss_bringup::PortProbeResult::kFree:
+        return;
+      case gnss_bringup::PortProbeResult::kListening:
+        throw std::runtime_error(
+            "sol_port=" + std::to_string(conf_.sol_port) +
+            " 已经有人在监听——很可能是上一次 rtkrcv_node 异常退出(kill -9/OOM)"
+            "遗留的孤儿 rtkrcv 进程,也可能是误开的第二个实例。继续启动会导致"
+            "新起的 rtkrcv 绑不上这个端口,而本节点的 TcpStream 转而连上那个"
+            "孤儿,把它的陈旧解当新鲜数据发布出去。请先用 `pgrep -a rtkrcv` "
+            "排查并手动杀掉残留进程,确认端口空闲后再重启本节点。");
+      case gnss_bringup::PortProbeResult::kProbeFailed:
+        // fix round 1 的 Important 3:探测本身失败(比如 fd 耗尽导致
+        // socket() 都开不出来)绝不能被悄悄当成"端口空闲"继续往下走——万一
+        // 端口这时候真的被占着,新起的 rtkrcv 会绑不上,本节点的 TcpStream
+        // 转而连上残留的孤儿,复现的正是这个探测器存在的意义要防住的那类
+        // 故障,而且不会有任何日志。这里选择和"确认占用"同样响亮的失败
+        // 策略:宁可拒绝这一次启动,也不要带着一个没有验证过的假设继续跑
+        // 下去——main() 里现成的 catch 会把这个异常记成一行 RCLCPP_ERROR,
+        // 不是静默吞掉。
+        throw std::runtime_error(
+            "无法探测 sol_port=" + std::to_string(conf_.sol_port) +
+            " 是否已被占用(errno=" + std::to_string(outcome.probe_errno) + " " +
+            std::strerror(outcome.probe_errno) +
+            ")。为避免在没搞清楚端口状态的情况下继续启动、之后可能连上残留的"
+            "孤儿 rtkrcv,本节点拒绝这一次启动;请检查 fd 数量限制"
+            "(ulimit -n)等系统资源后重试。");
     }
   }
 

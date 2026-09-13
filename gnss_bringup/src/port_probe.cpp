@@ -1,68 +1,65 @@
 #include "gnss_bringup/port_probe.hpp"
 
 #include <arpa/inet.h>
-#include <fcntl.h>
 #include <netinet/in.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <cerrno>
-#include <cstring>
 
 namespace gnss_bringup {
 
-// 用一次 connect() 尝试判断 127.0.0.1:port 是否有人在监听——连得上就说明有人
-// 监听(不关心对方是谁,`rtkrcv_node` 只用这个函数在启动时"占没占着"这个
-// 二元判断上,不需要知道占用者的身份)。
-//
-// 非阻塞 connect() + 有界 poll() 超时,而不是一次阻塞 connect():这个函数在
-// rtkrcv_node 的构造函数里同步调用(还没有起 executor/spin()),阻塞的
-// connect() 一旦卡住(理论上不会发生在 127.0.0.1 上,但没有任何文档保证
-// 这一点)就会让整个节点在启动阶段失去响应。127.0.0.1 本机回环上,
-// connect() 无论成功还是被 RST 拒绝都应该是微秒级的,这里的超时只是一个
-// "不可能触发,但触发了也不能让节点卡死"的安全网,不是期望的正常路径。
-bool is_local_port_listening(int port) {
-  const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+// fix round 1 的 Important 3(含独立评审附带的 Minor):换成 bind()+
+// SO_REUSEADDR 探测,而不是原来的 connect() + poll() 超时。原来的 connect()
+// 方案有两个用真实实验复现过的问题,bind() 直接从根上绕开:
+//   1. 我们真正关心的问题是"待会儿 rtkrcv 自己去 bind()/listen() 这个端口
+//      时会不会成功"——bind() 直接回答这个问题;connect() 回答的是一个不
+//      完全一样的问题("现在有没有人在 accept 这个端口"),一个正在监听、
+//      但 accept 队列恰好占满的孤儿(它是被遗弃的,没有人在 accept())会
+//      被 connect() 探测误判成"空闲"(用 listen(fd,1) + 多个排队连接实测
+//      复现过);bind() 不关心对方的 accept 队列状态,只关心这个地址:端口
+//      有没有被别的 socket 占着。
+//   2. bind() 是一次同步、立即返回、不会被信号打断的调用,不存在 connect()
+//      方案里"非阻塞 connect() + poll() 超时,poll() 还可能被 EINTR 打断
+//      需要重试"这一整类问题,也不需要给一个"多久算超时"的经验值,更不会
+//      向一个可能存在的孤儿发起任何连接。
+// SO_REUSEADDR 只放行"绑定到处于 TIME_WAIT 的地址"这一类场景,不会让两个
+// 进程真的同时监听同一个地址:端口(那需要双方都设 SO_REUSEPORT)——对一个
+// 已经在 LISTEN 的地址:端口,bind() 仍然会正确返回 EADDRINUSE,不受这个
+// 选项影响。
+PortProbeOutcome probe_local_port(int port) {
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
-    // socket() 都失败了(fd 耗尽等极端情况),没法探测,保守地当成"没有
-    // 监听"——调用方(rtkrcv_node)在这个函数返回 false 时会继续正常启动
-    // 流程,不会因为探测本身的失败而拒绝启动。
-    return false;
+    return PortProbeOutcome{PortProbeResult::kProbeFailed, errno};
   }
+
+  int one = 1;
+  // 这里的 setsockopt 失败不影响正确性(顶多是没拿到 TIME_WAIT 复用这个
+  // 优化),不值得单独判定成探测失败,忽略返回值。
+  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = ::htons(static_cast<uint16_t>(port));
   if (::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
+    // 探测目标固定是字面量 "127.0.0.1",正常不会走到这里;真出现了,如实
+    // 报告成探测失败,不猜一个结果出来。
+    const int err = errno;
     ::close(fd);
-    return false;
+    return PortProbeOutcome{PortProbeResult::kProbeFailed, err};
   }
 
-  bool listening = false;
-  const int rc = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-  if (rc == 0) {
-    listening = true;
-  } else if (errno == EINPROGRESS) {
-    // 非阻塞 connect() 尚未完成:poll(POLLOUT) 等它有结果。200ms 对本机回环
-    // 连接来说已经是一个非常宽裕的上限——见函数顶部的说明。
-    pollfd pfd{fd, POLLOUT, 0};
-    const int pr = ::poll(&pfd, 1, 200);
-    if (pr > 0 && (pfd.revents & POLLOUT)) {
-      int so_error = 0;
-      socklen_t len = sizeof(so_error);
-      if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len) == 0 && so_error == 0) {
-        listening = true;
-      }
-    }
-    // pr<=0(超时/poll 出错)或者 so_error!=0(ECONNREFUSED 等):没有人监听,
-    // listening 保持 false。
+  PortProbeOutcome outcome;
+  if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+    outcome = PortProbeOutcome{PortProbeResult::kFree, 0};
+  } else if (errno == EADDRINUSE) {
+    outcome = PortProbeOutcome{PortProbeResult::kListening, 0};
+  } else {
+    outcome = PortProbeOutcome{PortProbeResult::kProbeFailed, errno};
   }
-  // rc<0 且 errno!=EINPROGRESS:立即失败(比如 ECONNREFUSED——本机回环上
-  // 最常见的"没人监听"信号),listening 保持 false。
 
   ::close(fd);
-  return listening;
+  return outcome;
 }
 
 }  // namespace gnss_bringup
