@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include "gnss_core/pos_io.hpp"
@@ -9,6 +10,21 @@ namespace {
 std::string tmp_path(const char* name) {
   const char* dir = std::getenv("TMPDIR");
   return std::string(dir ? dir : "/tmp") + "/" + name;
+}
+
+// 与既有 PosIo 用例(WriteReadRoundTrip)取值一致的一条样本记录。
+PosRecord sample_record() {
+  PosRecord r{};
+  r.stamp = 1788431025.0 + 0.25;   // UTC unix,含小数秒
+  r.lat = 44.50123456;
+  r.lon = 90.28765432;
+  r.height = 617.123;
+  r.q = 1;
+  r.ns = 30;
+  r.sdne = Eigen::Vector3d(0.012, 0.011, 0.030);
+  r.age = 0.8;
+  r.ratio = 20.5;
+  return r;
 }
 }  // namespace
 
@@ -207,4 +223,91 @@ TEST(PosDecimator, ResetAllowsNextRecordThrough) {
   ASSERT_FALSE(d.accept(at(1000.30)));
   d.reset();
   EXPECT_TRUE(d.accept(at(1000.30)));
+}
+
+// ---------- PosWriter(可追加、崩溃安全, spec §5.3) ----------
+
+TEST(PosWriter, WritesHeaderOnceForANewFile) {
+  const std::string p = tmp_path("pw_new.pos");
+  ::remove(p.c_str());
+  PosWriter w;
+  ASSERT_TRUE(w.open(p));
+  ASSERT_TRUE(w.write(sample_record()));
+  ASSERT_TRUE(w.write(sample_record()));
+  w.close();
+  // 表头行(以 % 开头)只应出现在文件开头,且数量与 write_pos 一致
+  std::ifstream in(p);
+  std::string line; int header_lines = 0, data_lines = 0;
+  while (std::getline(in, line)) { if (!line.empty() && line[0] == '%') ++header_lines; else if (!line.empty()) ++data_lines; }
+  EXPECT_EQ(data_lines, 2);
+  EXPECT_GT(header_lines, 0);
+  EXPECT_EQ(header_lines, 3) << "表头应与 write_pos 相同,且只写一次";
+}
+
+TEST(PosWriter, ReopeningAnExistingFileAppendsWithoutRewritingTheHeader) {
+  const std::string p = tmp_path("pw_append.pos");
+  ::remove(p.c_str());
+  { PosWriter w; ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(sample_record())); }
+  { PosWriter w; ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(sample_record())); }
+  std::ifstream in(p);
+  std::string line; int header_lines = 0, data_lines = 0;
+  while (std::getline(in, line)) { if (!line.empty() && line[0] == '%') ++header_lines; else if (!line.empty()) ++data_lines; }
+  EXPECT_EQ(data_lines, 2);
+  EXPECT_EQ(header_lines, 3) << "重开不得再写一遍表头";
+}
+
+TEST(PosWriter, OutputIsReadableByReadPos) {
+  // 写出的东西必须能被既有的 read_pos 原样读回 —— 这是格式没写歪的真正证明
+  const std::string p = tmp_path("pw_roundtrip.pos");
+  ::remove(p.c_str());
+  PosRecord a = sample_record();
+  PosRecord b = sample_record(); b.stamp += 1.0; b.q = 2; b.ns = 20;
+  { PosWriter w; ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(a)); ASSERT_TRUE(w.write(b)); }
+  const auto back = read_pos(p);
+  ASSERT_EQ(back.size(), 2u);
+  EXPECT_NEAR(back[0].lat, a.lat, 1e-8);
+  EXPECT_NEAR(back[0].stamp, a.stamp, 1e-3);
+  EXPECT_EQ(back[1].q, 2);
+  EXPECT_EQ(back[1].ns, 20);
+}
+
+TEST(PosWriter, MatchesWritePosByteForByte) {
+  // PosWriter 与 write_pos 必须产出完全相同的内容,否则格式就有两份实现了
+  const std::string p1 = tmp_path("pw_a.pos"), p2 = tmp_path("pw_b.pos");
+  ::remove(p1.c_str()); ::remove(p2.c_str());
+  std::vector<PosRecord> recs{sample_record(), sample_record()};
+  recs[1].stamp += 1.0;
+  write_pos(p1, recs);
+  { PosWriter w; ASSERT_TRUE(w.open(p2)); for (const auto& r : recs) ASSERT_TRUE(w.write(r)); }
+  std::ifstream f1(p1), f2(p2);
+  const std::string s1((std::istreambuf_iterator<char>(f1)), std::istreambuf_iterator<char>());
+  const std::string s2((std::istreambuf_iterator<char>(f2)), std::istreambuf_iterator<char>());
+  EXPECT_EQ(s1, s2);
+}
+
+TEST(PosWriter, CreatesMissingParentDirectories) {
+  const std::string dir = tmp_path("pw_deep/20260912");
+  const std::string p = dir + "/can.pos";
+  std::filesystem::remove_all(tmp_path("pw_deep"));
+  PosWriter w;
+  EXPECT_TRUE(w.open(p)) << "按天轮转会写到当天的新目录里,必须自动建目录";
+  EXPECT_TRUE(w.write(sample_record()));
+}
+
+TEST(PosWriter, OpenFailureIsReportedNotThrown) {
+  PosWriter w;
+  EXPECT_FALSE(w.open("/proc/definitely-not-writable/x.pos"));
+  EXPECT_FALSE(w.is_open());
+  EXPECT_FALSE(w.write(sample_record())) << "未打开时写入应返回 false 而不是崩";
+}
+
+TEST(PosWriter, EachRecordIsFlushedSoACrashKeepsWhatWasWritten) {
+  const std::string p = tmp_path("pw_flush.pos");
+  ::remove(p.c_str());
+  PosWriter w;
+  ASSERT_TRUE(w.open(p));
+  ASSERT_TRUE(w.write(sample_record()));
+  // 不 close,直接从另一个句柄读 —— 没 flush 的话读不到数据行
+  const auto back = read_pos(p);
+  EXPECT_EQ(back.size(), 1u) << "每条写完必须 flush,否则崩溃会丢掉整个缓冲";
 }

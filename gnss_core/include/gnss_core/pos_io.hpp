@@ -1,4 +1,5 @@
 #pragma once
+#include <fstream>
 #include <string>
 #include <vector>
 #include <Eigen/Core>
@@ -35,6 +36,39 @@ std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& o
 // records.stamp 为 UTC unix 秒;time_system=GPST 时写出时间加 leap_seconds。
 void write_pos(const std::string& path, const std::vector<PosRecord>& records,
                PosTimeSystem time_system = PosTimeSystem::GPST, int leap_seconds = 18);
+
+// .pos 表头三行(program 行 + 说明行 + 列名行),write_pos 与 PosWriter 共用,格式只写一遍。
+std::string pos_header(PosTimeSystem time_system);
+
+// 单条记录格式化为 .pos 数据行(含末尾换行),write_pos 与 PosWriter 共用。
+// r.stamp 为 UTC unix 秒;time_system=GPST 时输出时间加 leap_seconds。
+std::string format_pos_record(const PosRecord& r, PosTimeSystem time_system, int leap_seconds);
+
+// 追加式 .pos 写出器(spec §5.3:追加写、崩溃安全)。
+// 与 write_pos 共用同一套表头与单行格式化,格式只写一遍。
+// 打开已存在且非空的文件时不再重写表头,直接续写——因此进程重启不会破坏文件。
+class PosWriter {
+public:
+  PosWriter() = default;
+  explicit PosWriter(PosTimeSystem ts, int leap_seconds = 18) : ts_(ts), leap_(leap_seconds) {}
+  ~PosWriter();
+  PosWriter(const PosWriter&) = delete;
+  PosWriter& operator=(const PosWriter&) = delete;
+
+  // 打开(追加模式)。父目录不存在时创建。失败返回 false,不抛。
+  bool open(const std::string& path);
+  // 追加一条并 flush —— 崩溃安全的代价是每条一次 flush,1 Hz 下可忽略。
+  bool write(const PosRecord& r);
+  void close();
+  bool is_open() const { return out_.is_open(); }
+  const std::string& path() const { return path_; }
+
+private:
+  std::ofstream out_;
+  std::string path_;
+  PosTimeSystem ts_ = PosTimeSystem::GPST;
+  int leap_ = 18;
+};
 
 // RTKLIB Q → 归一化质量:1→FIXED 2→FLOAT 4→DGPS 5→SINGLE 其它→NONE
 Quality q_to_quality(int q);

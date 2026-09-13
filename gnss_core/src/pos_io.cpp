@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -85,35 +86,87 @@ std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& o
   return out;
 }
 
+std::string pos_header(PosTimeSystem time_system) {
+  std::string h;
+  h += "% program   : gnss_core write_pos\n";
+  h += "% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,2:float,4:dgps,5:single, time=";
+  h += (time_system == PosTimeSystem::GPST ? "GPST" : "UTC");
+  h += ")\n";
+  h += "%  ";
+  h += (time_system == PosTimeSystem::GPST ? "GPST" : "UTC ");
+  h += "                  latitude(deg) longitude(deg)  height(m)   Q  ns   sdn(m)   sde(m)   sdu(m)  sdne(m)  sdeu(m)  sdun(m) age(s)  ratio\n";
+  return h;
+}
+
+std::string format_pos_record(const PosRecord& r, PosTimeSystem time_system, int leap_seconds) {
+  double t = r.stamp;
+  if (time_system == PosTimeSystem::GPST) t += static_cast<double>(leap_seconds);
+  // 拆成整秒 + 毫秒,毫秒四舍五入并处理进位
+  double whole = std::floor(t);
+  int ms = static_cast<int>(std::lround((t - whole) * 1000.0));
+  if (ms >= 1000) { ms -= 1000; whole += 1.0; }
+  const std::time_t tt = static_cast<std::time_t>(whole);
+  std::tm tm{};
+  gmtime_r(&tt, &tm);
+  char buf[256];
+  std::string line;
+  std::snprintf(buf, sizeof(buf), "%04d/%02d/%02d %02d:%02d:%02d.%03d",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
+  line += buf;
+  std::snprintf(buf, sizeof(buf), " %14.9f %14.9f %10.4f %3d %3d %8.4f %8.4f %8.4f %8.4f %8.4f %8.4f %6.2f %6.1f\n",
+                r.lat, r.lon, r.height, r.q, r.ns, r.sdne(0), r.sdne(1), r.sdne(2), 0.0, 0.0, 0.0, r.age, r.ratio);
+  line += buf;
+  return line;
+}
+
 void write_pos(const std::string& path, const std::vector<PosRecord>& records,
                PosTimeSystem time_system, int leap_seconds) {
   std::ofstream out(path);
   if (!out) throw std::runtime_error("write_pos: cannot open " + path);
 
-  out << "% program   : gnss_core write_pos\n";
-  out << "% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,2:float,4:dgps,5:single, time="
-      << (time_system == PosTimeSystem::GPST ? "GPST" : "UTC") << ")\n";
-  out << "%  " << (time_system == PosTimeSystem::GPST ? "GPST" : "UTC ")
-      << "                  latitude(deg) longitude(deg)  height(m)   Q  ns   sdn(m)   sde(m)   sdu(m)  sdne(m)  sdeu(m)  sdun(m) age(s)  ratio\n";
-
-  char buf[256];
+  out << pos_header(time_system);
   for (const auto& r : records) {
-    double t = r.stamp;
-    if (time_system == PosTimeSystem::GPST) t += static_cast<double>(leap_seconds);
-    // 拆成整秒 + 毫秒,毫秒四舍五入并处理进位
-    double whole = std::floor(t);
-    int ms = static_cast<int>(std::lround((t - whole) * 1000.0));
-    if (ms >= 1000) { ms -= 1000; whole += 1.0; }
-    const std::time_t tt = static_cast<std::time_t>(whole);
-    std::tm tm{};
-    gmtime_r(&tt, &tm);
-    std::snprintf(buf, sizeof(buf), "%04d/%02d/%02d %02d:%02d:%02d.%03d",
-                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
-    out << buf;
-    std::snprintf(buf, sizeof(buf), " %14.9f %14.9f %10.4f %3d %3d %8.4f %8.4f %8.4f %8.4f %8.4f %8.4f %6.2f %6.1f\n",
-                  r.lat, r.lon, r.height, r.q, r.ns, r.sdne(0), r.sdne(1), r.sdne(2), 0.0, 0.0, 0.0, r.age, r.ratio);
-    out << buf;
+    out << format_pos_record(r, time_system, leap_seconds);
   }
+}
+
+PosWriter::~PosWriter() { close(); }
+
+bool PosWriter::open(const std::string& path) {
+  close();
+  std::error_code ec;
+  const std::filesystem::path fp(path);
+  const auto parent = fp.parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent, ec);   // 忽略"已存在";其余失败交给后面的 open 判定
+  }
+  // "新文件"指不存在或存在但长度为 0 —— 用这个判断是否需要写表头,
+  // 因此进程重启接续一个已有非空文件时不会再写一遍表头。
+  bool is_new = true;
+  {
+    std::error_code size_ec;
+    const auto sz = std::filesystem::file_size(fp, size_ec);
+    if (!size_ec) is_new = (sz == 0);
+  }
+  out_.open(path, std::ios::app);
+  if (!out_.is_open()) return false;
+  path_ = path;
+  if (is_new) {
+    out_ << pos_header(ts_);
+    out_.flush();
+  }
+  return true;
+}
+
+bool PosWriter::write(const PosRecord& r) {
+  if (!out_.is_open()) return false;
+  out_ << format_pos_record(r, ts_, leap_);
+  out_.flush();
+  return static_cast<bool>(out_);
+}
+
+void PosWriter::close() {
+  if (out_.is_open()) out_.close();
 }
 
 bool parse_llh_solution(const std::string& line, PosRecord& out, const PosReadOptions& opt) {
