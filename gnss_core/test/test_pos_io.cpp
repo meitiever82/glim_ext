@@ -903,38 +903,83 @@ TEST(PosWriter, TruncationInsideTheFirstHeaderLineStillProducesACleanHeaderOnReo
   EXPECT_NEAR(back[0].stamp, a.stamp, 1e-3);
 }
 
-// ---------- round 3 review:"读失败就必须 fail closed"这条规则少了一层 ----------
-// open() 打开一个已有文件时,截断检查通过之后还会再调一次 read_pos() 去
-// 收集去重键——这次调用原来包在一个"吞掉任何异常、照样返回 true(只是
-// 没有去重保护)"的 try/catch 里,理由是"文件已经确认存在,这里失败极
-// 不寻常"。但这次调用跟上面的截断检查读的是同一个文件、可能撞上同一种
-// 瞬时 I/O 错误——继续吞掉、照样成功,existing_keys_ 就是空的,新写入的
-// 记录不会跟文件里已有的内容去重,等于让这一整轮修复的三个数据正确性 bug
-// (A/B/C)原样复发,只是触发条件从"截断"换成了"去重键收集"。这里跟上面
-// 几个注入测试用的是同一个注入点(throw_if_injected),只是换了一个 step
-// 名字("dedup_scan"),从 PosWriter::open() 里紧挨着 read_pos() 调用的
-// 那一行之前抛出。
+// ---------- round 3 review 第三次纠正:read_pos() 内部的 std::getline
+// 真实失败时不会抛异常,只会安静地把流设成 badbit ----------
+// 上一版这里用 throw_if_injected 在 PosWriter::open() 调用 read_pos() 之前
+// 抢先抛一个异常,测出来的只是"这次调用被 try/catch 包住"这件事本身——
+// 但真实场景里 read_pos() 用 std::getline 读文件,这是一个格式化的
+// istream 操作,经过 istream::sentry:真实 I/O 错误发生时,sentry 会吞掉
+// underflow() 抛出的 std::ios_base::failure、把流设成 badbit,并且因为
+// 这个流的 exceptions() 掩码是默认的 goodbit,**不会重新抛出来**。这跟
+// 上面 full_content 那种绕开 sentry、直接用 istreambuf_iterator 操作
+// streambuf 的读法完全不是同一种失败方式(那种读法才会无条件抛异常,
+// round 3 的 BLOCKING 修复正是针对它)。旧的测试的注入点从来没有真正
+// 进入过 read_pos() 内部,测不出"read_pos() 从来没有对这种情况报过错"
+// 这件事——对着没修的代码它一样会通过。
+//
+// 真正的修复在 read_pos() 自己身上:循环结束后检查 in.bad(),真的把这种
+// 情况报成异常(风格上跟"打不开文件"用同一个 std::runtime_error,不新增
+// 第二套错误约定;PosWriter::open() 已有的 catch 直接就能接住)。这同时
+// 也补上了 read_pos() 其它调用方(离线工具 calibrate_sigma_scale /
+// estimate_lever_arm)今天会在真实 I/O 错误下悄悄收到一份被截断的数据、
+// 自己却毫无察觉的同一个缺口。
 
-TEST(PosWriter, InjectedDedupScanFailureLeavesFileUntouchedAndOpenFails) {
-  const std::string p = tmp_path("pw_inject_dedup_scan.pos");
+TEST(PosIo, ReadPosThrowsInsteadOfSilentlyReturningAPartialResultOnAMidScanReadFailure) {
+  const std::string p = tmp_path("read_pos_inject_scan.pos");
+  ::remove(p.c_str());
+  {
+    std::ofstream f(p);
+    f << pos_header(PosTimeSystem::GPST);
+    PosRecord a = sample_record();
+    PosRecord b = a; b.stamp += 1.0;
+    PosRecord c = a; c.stamp += 2.0;
+    f << format_pos_record(a, PosTimeSystem::GPST, 18);
+    f << format_pos_record(b, PosTimeSystem::GPST, 18);
+    f << format_pos_record(c, PosTimeSystem::GPST, 18);   // 三条完整记录,文件本身完全正常
+  }
+
+  gnss_core::testing::set_trailing_line_read_failure_injector(
+      [](const char* step) { return std::string(step) == "read_pos_scan"; });
+  EXPECT_THROW(read_pos(p), std::runtime_error)
+      << "getline 内部真的撞上 I/O 错误时不会抛异常、只会把流设成 "
+         "badbit——read_pos() 必须自己在循环结束后检查 in.bad() 并报错,"
+         "而不是安静地把已经读到的那几条当成“就是全部内容”返回回去";
+  gnss_core::testing::set_trailing_line_read_failure_injector(nullptr);
+
+  // 注入器关掉之后,同一个文件必须照常完整读出全部三条——证明这个注入
+  // 点平时确实是 nullptr、不影响正常路径,前面的 EXPECT_THROW 不是靠
+  // 弄坏了文件本身才抛出来的。
+  const auto back = read_pos(p);
+  EXPECT_EQ(back.size(), 3u);
+}
+
+// PosWriter::open() 端到端:去重键收集这一步真的撞上这种"安静截断"的
+// I/O 错误时,必须让 open() 直接失败——而不是像 reviewer 复现的那样:
+// existing_keys_ 只装到故障之前读到的那几条,open() 照样返回 true,
+// 下一条本该重复的记录就不会被去重(reviewer 的复现:500 行文件写成
+// 501 行,70755 B → 70896 B)。
+TEST(PosWriter, InjectedReadPosScanFailureDuringDedupScanLeavesFileUntouchedAndOpenFails) {
+  const std::string p = tmp_path("pw_inject_read_pos_scan.pos");
   ::remove(p.c_str());
   const PosRecord a = sample_record();
+  PosRecord b = a; b.stamp += 1.0;
   {
     PosWriter w;
     ASSERT_TRUE(w.open(p));
-    ASSERT_TRUE(w.write(a));   // 完整、干净的文件——不需要触发截断分支,专门测去重键收集这一步
+    ASSERT_TRUE(w.write(a));
+    ASSERT_TRUE(w.write(b));   // 完整、干净的文件,两条记录——不需要触发截断分支,专门测去重键收集这一步
   }
   const std::string original = read_raw(p);
 
   gnss_core::testing::set_trailing_line_read_failure_injector(
-      [](const char* step) { return std::string(step) == "dedup_scan"; });
+      [](const char* step) { return std::string(step) == "read_pos_scan"; });
   PosWriter w;
   const bool opened = w.open(p);
   gnss_core::testing::set_trailing_line_read_failure_injector(nullptr);
 
   EXPECT_FALSE(opened)
-      << "收集去重键这一步(read_pos())失败时,open() 必须直接失败——不能"
-         "像旧代码那样吞掉异常、照样返回 true 但没有去重保护,那等于让"
-         "重放/重启重复写行的 bug 原样复发";
+      << "去重键收集这一步真的撞上 I/O 错误(getline 安静截断,不抛异常)"
+         "时,open() 必须直接失败——不能像旧代码那样只收集到故障之前的那"
+         "几条键、照样返回 true,那样下一条本该重复的记录就不会被去重";
   EXPECT_EQ(read_raw(p), original) << "去重键收集失败时文件必须一字节都没被动过";
 }

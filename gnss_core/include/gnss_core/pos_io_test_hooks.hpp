@@ -6,15 +6,36 @@
 // LD_PRELOAD 在真实二进制上打进程级的 EIO 复现的;在 gtest 里更干净、
 // 确定性更强的做法是给这一步单独开一个可注入的钩子)。
 //
-// round 3 review 纠正了这个钩子最初的用法:一开始只是"读成功之后再问
-// 一句要不要假装失败",这测不出"读操作本身被 try/catch 保护住"这件事——
-// libstdc++ 在真实 I/O 错误时会从读操作内部直接抛异常,不是读完之后才能
-// 查到的一个状态位。因此"last_byte"/"full_content" 这两步现在会在真正
-// 读取之前直接抛出一个 std::ios_base::failure,模拟同一种失败方式(见
-// pos_io.cpp 的 throw_if_injected);"resize" 这一步走的是 std::error_code
-// 而不是异常,所以是直接让 gnss_core::PosWriter::open() 认为 resize_file()
-// 失败了,同时确保真正的 resize_file() 系统调用被跳过、文件在磁盘上一字
-// 节都不会被动过。
+// round 3 review 前后一共纠正过两次这个钩子的用法,教训是同一个:
+// **必须让"这一步"本身真的失败,而不是检查一个事后补上的判定值**——
+// 一个测出来只是"这个 if 分支存在"的注入点,删掉它要防的那段代码,测试
+// 也不会失败。
+//
+// 但"真的失败"具体长什么样,取决于这一步在 libstdc++ 里到底是怎么读的,
+// 两种失败方式并不一样:
+//   - "full_content" 用 istreambuf_iterator 直接操作 streambuf,绕开了
+//     istream::sentry——真实 I/O 错误发生时,basic_filebuf::underflow()
+//     会*无条件*抛出 std::ios_base::failure,不受这个流的 exceptions()
+//     掩码影响。这一步的注入因此也用抛异常模拟(见 pos_io.cpp 的
+//     throw_if_injected),让 pos_io.cpp 里包着这段读取的 try/catch 是
+//     真的被测试覆盖到的代码——删掉那个 try/catch,注入的异常就会一路
+//     捅穿,测试会因为未捕获异常而失败,而不是安静地继续通过。
+//   - "last_byte"(in.get())和 "read_pos_scan"(read_pos() 内部的
+//     std::getline)都是**格式化的** istream 操作,会经过 sentry:真实
+//     I/O 错误发生时,sentry 会吞掉 underflow() 抛出的异常、把流设成
+//     badbit,并且因为默认的 exceptions() 掩码是 goodbit,**不会重新
+//     抛出来**——这两处的真实失败方式根本不是"抛异常"。"read_pos_scan"
+//     的注入因此直接把流设成 badbit(不抛),精确复现这个真实失败方式,
+//     测的是 read_pos() 循环结束后有没有检查 in.bad()。"last_byte" 仍然
+//     用抛异常模拟——这不是在复现一个观察到的真实失败方式(get() 真的
+//     遇到 I/O 错误时不会抛,`if (!in) return kFailed` 这一句已经足够接住
+//     它),而是防御性地确认"就算这里将来因为某种实现差异真的抛出来,
+//     周围的 try/catch 也接得住"。两处的最终行为都是同一个 kFailed,只是
+//     "last_byte" 这一支没有对应的、真实会发生的失败路径需要单独证明。
+//   - "resize" 走的是 std::error_code 而不是异常(std::filesystem::
+//     resize_file 的这个重载不抛),所以是直接让 gnss_core::PosWriter::
+//     open() 认为 resize_file() 失败了,同时确保真正的 resize_file()
+//     系统调用被跳过、文件在磁盘上一字节都不会被动过。
 //
 // 只在 BUILD_TESTING 时存在:这个头文件不会被安装到非测试构建的 include/
 // 里(见 CMakeLists.txt 的 install() 排除规则),pos_io.cpp 里对应的实现也
@@ -26,16 +47,17 @@
 namespace gnss_core::testing {
 
 // step 标识读取/截断/去重扫描过程走到了哪一步:
-//   "last_byte"    —— 读文件最后一个字节,判断它是不是 '\n'
-//   "full_content" —— 把整份文件读进内存,定位最后一个 '\n' 以确定截断点
-//   "resize"       —— 真正执行 resize_file() 把不完整的末行截掉
-//   "dedup_scan"   —— PosWriter::open() 调用 read_pos() 收集去重键这一步
-//                     (round 3 review:这里原来的 catch 会静默吞掉异常、
-//                     照样返回 true——跟上面三步同一条"读失败就必须让
-//                     open() 直接失败"的规则)
-// 返回 true 表示"在这一步注入一次失败",调用方必须把它当成真实的失败
+//   "last_byte"     —— 读文件最后一个字节,判断它是不是 '\n'(防御性注入,
+//                      见上面的类注释——真实 I/O 错误在这里不会抛异常)
+//   "full_content"  —— 把整份文件读进内存,定位最后一个 '\n' 以确定截断点
+//                      (真实会无条件抛异常的那一步)
+//   "resize"        —— 真正执行 resize_file() 把不完整的末行截掉
+//   "read_pos_scan" —— read_pos() 内部 std::getline 循环的每一次迭代
+//                      (真实失败方式是安静地把流设成 badbit,不抛异常;
+//                      round 3 review 第三次纠正的对象)
+// 返回 true 表示"在这一步注入一次失败"。调用方必须把它当成真实的失败
 // 处理:不截断、不继续、把失败原样报给 PosWriter::open() 的调用方(返回
-// false),且磁盘上的文件不能有任何变化。
+// false)或者从 read_pos() 抛出来,且磁盘上的文件不能有任何变化。
 using TrailingLineReadFailureInjector = bool (*)(const char* step);
 
 // 设置/清除注入器(传 nullptr 清除)。全局、非线程安全——单测里用完必须

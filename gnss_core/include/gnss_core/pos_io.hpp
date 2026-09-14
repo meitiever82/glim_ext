@@ -31,7 +31,15 @@ struct PosReadOptions {
 
 // 读取 .pos:跳过 % 注释行(但扫描其中 time=GPST/UTC);
 // 数据列 "YYYY/MM/DD HH:MM:SS.sss lat lon height Q ns sdn sde sdu sdne sdeu sdun age ratio"。
-// 列数不足 10(到 sdu)的行跳过;age/ratio 缺省为 0。文件打不开抛 std::runtime_error。
+// 列数不足 10(到 sdu)的行跳过;age/ratio 缺省为 0。文件打不开抛
+// std::runtime_error;读到一半真的撞上 I/O 错误(std::getline 内部把流
+// 设成 badbit,这种情况下 libstdc++ 不会抛异常)也会抛同一个
+// std::runtime_error——round 3 review 的第三次纠正:这里以前不检查
+// in.bad(),会安静地把"读到故障发生前"当成"读完了整份文件",返回一份
+// 不完整的 vector 却不报任何错;PosWriter::open() 用它收集去重键的那次
+// 调用因此会在这种情况下悄悄丢失去重保护,而 calibrate_sigma_scale /
+// estimate_lever_arm 这些直接调用 read_pos() 的离线工具会悄悄拿到被
+// 截断的数据自己却毫无察觉。现在两者都会看到异常。
 std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& opt = {});
 
 // 写标准 RTKLIB .pos(头 "% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,...,time=GPST|UTC)" + 列名注释 + 14 列数据)。
@@ -100,19 +108,28 @@ std::string format_pos_record(const PosRecord& r, PosTimeSystem time_system, int
 // (不是两套不一致的容错策略——两处都遵守它):判断"最后一行是否完整"
 // 本身需要读文件(至少一次、必要时两次),重新打开一个已有文件时收集
 // 去重键还要再读一遍(read_pos())——这些读**都可能失败**(瞬时 I/O
-// 错误、没有读权限……),而且失败的表现形式不止"流状态标志位"一种:
-// libstdc++ 的 basic_filebuf::underflow() 在真实 I/O 错误时会无条件抛
-// std::ios_base::failure,不受这个流的 exceptions() 掩码影响,也不会
-// 等调用方去查 rdstate()(round 3 review 用 LD_PRELOAD 在真实二进制上
-// 复现过)。这一步失败绝不能被当成"读到了正常字节""不需要截断"或者
-// "没有去重保护但照样能用"去蒙混过关——那样要么会拿一份读坏的内容去算
-// 截断点(可能把整个文件截没,已经复现过),要么会假装不需要截断、直接
-// 往下 append,把新记录粘连到还没写完的半行上(bug A 复发),要么会让
-// existing_keys_ 是空的/不完整的,新记录不会跟文件里已有的内容去重
-// (bug B/C 原样复发)。因此:检查/截断/重新收集去重键过程中的任何失败
-// (读失败、读到一半直接抛出来的异常、截断本身失败)都会让这次 open()
-// **直接返回 false**——不截断、不新建 out_、不 append、不抛——调用方
-// 按普通的"打开失败"处理,文件在磁盘上原样不动。
+// 错误、没有读权限……),而且失败的表现形式不止一种,取决于具体是哪种
+// istream 操作:直接操作 streambuf、绕开 sentry 的读法(判断最后一行是否
+// 完整时,把整份文件读进内存那一步用的 istreambuf_iterator)在真实 I/O
+// 错误时,libstdc++ 的 basic_filebuf::underflow() 会无条件抛
+// std::ios_base::failure,不受这个流的 exceptions() 掩码影响(round 3
+// review 用 LD_PRELOAD 在真实二进制上复现过,修复是包一层 try/catch);
+// 而经过 sentry 的格式化读法(判断最后一行是否完整时读最后一个字节用的
+// in.get(),以及 read_pos() 内部逐行读取用的 std::getline)反过来,真实
+// I/O 错误发生时 sentry 会把异常吞掉、只把流设成 badbit,并不会抛出来
+// (round 3 review 的第三次纠正——之前一度以为这里也需要靠 try/catch,
+// 结果那个 try/catch 从来没有真正被触发过,因为异常根本不会到那里;真正
+// 的修复是显式检查 rdstate())。这一步失败绝不能被当成"读到了正常字节"
+// "不需要截断"或者"没有去重保护但照样能用"去蒙混过关——那样要么会拿一份
+// 读坏的内容去算截断点(可能把整个文件截没,已经复现过),要么会假装不
+// 需要截断、直接往下 append,把新记录粘连到还没写完的半行上(bug A
+// 复发),要么会让 existing_keys_ 是空的/不完整的,新记录不会跟文件里
+// 已有的内容去重(bug B/C 原样复发)。因此:检查/截断/重新收集去重键
+// 过程中的任何失败——不管它是以异常的形式冒出来(read_pos() 现在对
+// "读到一半真的撞上 I/O 错误"也会抛,而不是安静地返回一份不完整的结果),
+// 还是安静地把流状态弄坏被显式检查发现,或者截断本身失败——都会让这次
+// open() **直接返回 false**——不截断、不新建 out_、不 append、不抛——
+// 调用方按普通的"打开失败"处理,文件在磁盘上原样不动。
 class PosWriter {
 public:
   PosWriter() = default;

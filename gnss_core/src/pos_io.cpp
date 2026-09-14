@@ -101,9 +101,26 @@ void throw_if_injected(const char* step) {
 bool injected_resize_failure() {
   return g_trailing_line_read_failure_injector != nullptr && g_trailing_line_read_failure_injector("resize");
 }
+
+// round 3 review 的第三次纠正:read_pos() 用 std::getline 读文件——这是
+// 一个"格式化的"istream 操作,内部会经过 istream::sentry。真实 I/O 错误
+// 发生时,libstdc++ 的 sentry 会*吞掉* underflow() 抛出的
+// std::ios_base::failure、把流设成 badbit,并且——因为这个流的
+// exceptions() 掩码默认是 goodbit——**不会重新抛出来**。这跟
+// full_content 那种绕开 sentry、直接用 istreambuf_iterator 操作
+// streambuf 的读法完全不是同一种失败方式,那种读法才会无条件抛异常
+// (round 3 的 BLOCKING 修复正是针对那种情况)。因此这里不能像上面
+// throw_if_injected 那样抛异常来模拟——那样测出来的是"read_pos 会不会
+// 抛异常",而真实场景里它根本不抛,只是安静地把流设成 badbit、循环提前
+// 结束、返回一份不完整的结果。这个注入点直接把流设成同样的状态,精确
+// 复现"没有异常、只是从此往后读不到东西"这个真正的失败方式。
+bool injected_read_pos_scan_failure() {
+  return g_trailing_line_read_failure_injector != nullptr && g_trailing_line_read_failure_injector("read_pos_scan");
+}
 #else
 inline void throw_if_injected(const char*) {}   // 非测试构建:这段代码整体不存在,调用处优化成空操作
 inline bool injected_resize_failure() { return false; }
+inline bool injected_read_pos_scan_failure() { return false; }
 #endif
 
 // 一次截断在“最后一行没写完整”这个前提下,理论上能去掉的字节数不会超过
@@ -132,10 +149,19 @@ TrailingLineOutcome truncate_incomplete_trailing_line(const std::filesystem::pat
   try {
     in.seekg(static_cast<std::streamoff>(file_size) - 1);
     char last = 0;
+    // round 3 review 的第三次纠正:in.get() 是格式化的 istream 操作,会
+    // 经过 sentry——真实 I/O 错误在这里发生时,sentry 会吞掉 underflow()
+    // 抛出的异常、把流设成 badbit,并不会重新抛出来(这跟下面
+    // full_content 那种绕开 sentry、直接操作 streambuf、无条件抛异常的
+    // 读法不是同一回事)。下面的 if (!in) 检查才是这一步真正生效的失败
+    // 处理;这里的 throw_if_injected 只是防御性的——万一将来因为某种
+    // 实现差异这里真的抛出来,确认周围的 try/catch 也接得住,不代表在
+    // 复现一个已知会发生的真实失败路径(见 pos_io_test_hooks.hpp 的
+    // 类注释)。
     throw_if_injected("last_byte");
     in.get(last);
-    // 失败但没有抛异常(比如单纯的 fail/eof,不是 underflow() 那种真正的
-    // I/O 错误)同样不能被当成"读到了 0",必须立刻当成失败处理。
+    // 失败但没有抛异常(sentry 吞掉了,或者单纯的 fail/eof)同样不能被
+    // 当成"读到了 0",必须立刻当成失败处理——这是这一步真正的失败通道。
     if (!in) return TrailingLineOutcome::kFailed;
     if (last == '\n') return TrailingLineOutcome::kNoTruncationNeeded;   // 最后一行完整,不用截断
 
@@ -263,6 +289,13 @@ std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& o
   std::vector<PosRecord> out;
   std::string line;
   while (std::getline(in, line)) {
+    if (injected_read_pos_scan_failure()) {
+      // 测试注入(仅 BUILD_TESTING):见上面 injected_read_pos_scan_failure
+      // 的注释——直接把流设成 badbit,不抛异常,精确复现真实 I/O 错误在
+      // getline 这里的失败方式。
+      in.setstate(std::ios::badbit);
+      break;
+    }
     if (line.empty()) continue;
     if (line[0] == '%') {
       if (line.find("time=GPST") != std::string::npos) ts = PosTimeSystem::GPST;
@@ -284,6 +317,19 @@ std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& o
     line_opt.default_time_system = ts;
     PosRecord r;
     if (parse_llh_solution(line, r, line_opt)) out.push_back(r);
+  }
+  // round 3 review 的第三次纠正:上面的循环只在 getline 因为正常 EOF
+  // 结束(设置 eofbit,但不设置 badbit)时才应该被信任为"读完了整份
+  // 文件"。真实 I/O 错误发生时,getline 内部的 istream::sentry 会把流
+  // 设成 badbit、循环因为流状态不再"好"而提前结束——但**不会抛异常**
+  // (exceptions() 掩码默认是 goodbit),因此不检查这里就会安静地把
+  // "读到故障发生前"当成"读到了全部内容",返回一份不完整的 vector 却不
+  // 报任何错。这里统一按 read_pos() 已有的"打不开文件"同一个错误约定
+  // (std::runtime_error)报出来——调用方(PosWriter::open() 的
+  // try/catch,以及离线工具 calibrate_sigma_scale/estimate_lever_arm 只要
+  // 补上 try/catch)不用再猜"这份结果到底完不完整"。
+  if (in.bad()) {
+    throw std::runtime_error("read_pos: I/O error while reading " + path);
   }
   return out;
 }
@@ -390,23 +436,24 @@ bool PosWriter::open(const std::string& path) {
   //
   // round 3 review:这里原来的 catch 会静默吞掉任何异常、让 open() 照样
   // 返回 true(只是没有去重保护)——理由是"文件已经确认存在,这里失败
-  // 极不寻常"。但 read_pos() 内部的 std::getline 跟上面
-  // truncate_incomplete_trailing_line 用的是同一个流,同样可能撞上
-  // libstdc++ basic_filebuf::underflow() 在真实 I/O 错误时无条件抛异常
-  // 的那个坑——继续吞掉、照样成功,等于让"这一整轮修复的三个数据正确性
+  // 极不寻常"。继续吞掉、照样成功,等于让"这一整轮修复的三个数据正确性
   // bug"原样复发(existing_keys_ 是空的或不完整的,新写入的记录不会跟
   // 文件里已有的内容去重)。这是跟上面截断检查完全同一条"读失败就必须让
   // open() 直接失败"的规则,不该是两套不一致的容错策略——统一改成失败
   // 直接返回 false。理论上也可能是文件在 file_size() 判过之后被并发删除
   // 这种更罕见的竞态,但同样没有办法安全区分"这是哪一种失败",按同一条
   // 规则处理。
+  //
+  // round 3 review 的第三次纠正:这个 catch 曾经一度靠 open() 这一侧
+  // 抢先抛一个异常来"测出它存在"——但 read_pos() 内部用的是 std::getline
+  // (格式化 istream 操作,经过 sentry),真实 I/O 错误在这里根本不会抛
+  // 异常,只会把流设成 badbit、循环提前结束、安静地返回一份不完整的
+  // vector(跟上面 truncate_incomplete_trailing_line 里 istreambuf_iterator
+  // 那种绕开 sentry、无条件抛异常的失败方式不是同一回事)。真正的修复在
+  // read_pos() 自己身上(见其实现里 in.bad() 之后 throw 的那一段)——
+  // read_pos() 现在会对这种情况真的抛出来,这里的 catch 才有意义接住它。
   if (!is_new) {
     try {
-      // 测试注入点(仅 BUILD_TESTING):模拟 read_pos() 内部的
-      // std::getline 撞上跟上面截断检查同一种"读到一半直接抛异常"的
-      // I/O 错误——不改动 read_pos() 本身(它是通用函数,不是
-      // PosWriter 专属的),只在这一个调用点前面插一句判断。
-      throw_if_injected("dedup_scan");
       const auto existing = read_pos(path, PosReadOptions{leap_, ts_});
       for (const auto& rec : existing) existing_keys_.insert(record_time_key_ms(rec, ts_, leap_));
     } catch (const std::exception&) {
