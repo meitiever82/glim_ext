@@ -46,6 +46,10 @@ public:
 
   TickResult tick(double now);
   std::vector<EventTransition> shutdown(double now);
+  // 运维确认基站确实搬迁后调用:以最后收到的 1005/1006 坐标为新基线(BaseStationMonitor::reset),
+  // held 的基站位移同时清零。返回的 BaseUpdate 供壳持久化基线、写 base.pos(feed = reset 的结果);
+  // 还没收到过任何 1005/1006 时什么都不做,返回 nullopt。
+  std::optional<BaseUpdate> reset_base_baseline(double t);
   std::optional<Ecef> baseline() const { return base_.baseline(); }
 
 private:
@@ -64,6 +68,7 @@ private:
 
   std::optional<double> corr_last_t_;
   std::optional<double> base_offset_m_;
+  std::optional<BaseStationCoords> last_base_coords_;   // 最后收到的 1005/1006 坐标
   std::optional<SolutionSample> sol_;
   std::optional<double> sol_t_;
   std::optional<SolutionSample> dev_;     // 最新一个 610 解:corr_age 回退与事件位置用

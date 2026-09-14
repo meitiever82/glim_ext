@@ -41,6 +41,7 @@ std::vector<BaseUpdate> DiagnosisEngine::on_corrections(double t, const uint8_t*
   for (const auto& msg : framer_.feed(data, len)) {
     BaseStationCoords coords;
     if (!parse_base_station(msg, coords)) continue;
+    last_base_coords_ = coords;
     BaseUpdate u;
     u.t = t;
     u.coords = coords;
@@ -143,6 +144,16 @@ TickResult DiagnosisEngine::tick(double now) {
   metrics["corr_gap_s"] = corr_last_t_ ? now - *corr_last_t_ : 0.0;
   out.transitions = events_.update(now, out.result.verdicts, pos, metrics);
   return out;
+}
+
+std::optional<BaseUpdate> DiagnosisEngine::reset_base_baseline(double t) {
+  if (!last_base_coords_) return std::nullopt;
+  BaseUpdate u;
+  u.t = t;
+  u.coords = *last_base_coords_;
+  u.feed = base_.reset(Ecef{u.coords.x, u.coords.y, u.coords.z});
+  base_offset_m_ = 0.0;   // held 位移同时清零,下一拍就不再报 base_shift
+  return u;
 }
 
 std::vector<EventTransition> DiagnosisEngine::shutdown(double now) { return events_.close_all(now); }

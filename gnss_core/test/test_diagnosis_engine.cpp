@@ -219,6 +219,38 @@ TEST(DiagnosisEngine, BaseStationShiftFromRtcm1005) {
   EXPECT_TRUE(opened(r, "base_shift"));
 }
 
+// final fix F3:运维确认基站确实搬迁后,通过引擎以最后收到的 1005/1006 坐标重置基线
+TEST(DiagnosisEngine, ResetBaseBaselineClearsBaseShift) {
+  DiagnosisConfig cfg;
+  cfg.base_warmup_s = 10.0;
+  auto e = make_engine(cfg);
+  const std::vector<uint8_t> garbage = {0x01, 0x02, 0x03};
+  e.on_corrections(0.0, garbage.data(), garbage.size());
+  EXPECT_FALSE(e.reset_base_baseline(0.0).has_value()) << "还没收到过 1005/1006,没有坐标可用";
+
+  const auto base = make_1005_frame(7, X, Y, Z);
+  e.on_corrections(0.0, base.data(), base.size());
+  ASSERT_TRUE(e.on_corrections(10.0, base.data(), base.size())[0].feed.baseline_learned);
+  const auto moved = make_1005_frame(7, X + 0.8, Y, Z);
+  e.on_corrections(11.0, moved.data(), moved.size());
+  e.on_solution(11.0, fixed());
+  ASSERT_TRUE(has_code(e.tick(11.5), "base_shift"));
+
+  const auto u = e.reset_base_baseline(11.5);
+  ASSERT_TRUE(u.has_value());
+  EXPECT_DOUBLE_EQ(u->t, 11.5);
+  EXPECT_EQ(u->coords.station_id, 7);
+  EXPECT_NEAR(u->coords.x, X + 0.8, 1e-3);
+  ASSERT_TRUE(u->feed.offset_m.has_value());
+  EXPECT_DOUBLE_EQ(*u->feed.offset_m, 0.0);
+  EXPECT_TRUE(u->feed.baseline_learned);
+  ASSERT_TRUE(e.baseline().has_value());
+  EXPECT_NEAR(e.baseline()->x, X + 0.8, 1e-3);
+
+  e.on_solution(12.0, fixed());
+  EXPECT_FALSE(has_code(e.tick(12.0), "base_shift")) << "重置后 held 的基站位移必须同时清零,不能等下一条 1005";
+}
+
 TEST(DiagnosisEngine, PersistedBaselineIsUsedImmediately) {
   auto e = DiagnosisEngine(DiagnosisConfig{}, {}, true, Ecef{X, Y, Z}, Ecef{X, Y, Z});
   const auto moved = make_1005_frame(7, X, Y + 0.3, Z);
