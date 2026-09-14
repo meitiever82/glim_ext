@@ -1,5 +1,7 @@
 #include "gnss_core/pos_io.hpp"
-#include "gnss_core/pos_io_test_hooks.hpp"
+#ifdef GNSS_CORE_WITH_TEST_HOOKS
+#include "gnss_core/pos_io_test_hooks.hpp"   // 仅在 BUILD_TESTING 时编译进来(见 CMakeLists.txt),不随生产库一起发布
+#endif
 #include "gnss_core/rtkstat.hpp"   // parse_llh_solution 在此实现:与 .pos 数据行是同一套列解析
 
 #include <cmath>
@@ -51,6 +53,18 @@ long long record_time_key_ms(const PosRecord& r, PosTimeSystem ts, int leap_seco
 // 分不清,于是当成"不需要截断"继续往下 append,把新记录粘连到还没写完的
 // 半行上——跟完全没做这个截断修复时一模一样的 bug A 又回来了。
 //
+// round 3 复盘(final-fix-report.md 之后又发现的问题):上一版虽然在读完
+// 之后检查了流状态,但 libstdc++ 的 basic_filebuf::underflow() 在真实
+// I/O 错误时会*无条件*抛 std::ios_base::failure——不受这个流的
+// exceptions() 掩码影响,也不会等着让调用方去查 rdstate()。reviewer 用
+// LD_PRELOAD 在真实二进制上复现:读整份内容那次 istreambuf_iterator 读取
+// 在第 2/3/5/20 次内部缓冲区重新填充时命中一次瞬时 EIO,异常直接从这段
+// 代码里抛出来,原来完全没有 try/catch,一路捅穿 open() "打开失败返回
+// false、不抛"的承诺(靠 pos_writer_node.cpp 里一个本不该需要存在的
+// try/catch 兜底,才没有真的崩)。现在把这几行读操作整体包进 try/catch,
+// 把任何 std::exception 都当成 kFailed——不管失败是"读完之后查状态发现
+// 的"还是"读到一半直接抛出来的",处理方式必须是同一条规则。
+//
 // 现在返回一个三态结果:任何一步(读最后一个字节、读整份内容、真正
 // resize_file)失败,都归为 kFailed——调用方必须把它当成 open() 本身失败
 // (返回 false,不截断、不 append、不抛),绝不能猜"大概不需要截断"就
@@ -61,13 +75,36 @@ enum class TrailingLineOutcome {
   kFailed,              // 检查/截断过程本身失败——调用方必须让 open() 直接失败
 };
 
-// 仅供 test_pos_io.cpp 通过 pos_io_test_hooks.hpp 注入;生产环境恒为
-// nullptr,open() 里只多一次判空,不影响任何逐条记录的热路径。
+// 仅在 BUILD_TESTING 时存在(GNSS_CORE_WITH_TEST_HOOKS 由 CMakeLists.txt
+// 按 BUILD_TESTING 条件定义)——一个测试注入点不应该出现在正式发布的
+// libgnss_core.so 导出符号表里。
+#ifdef GNSS_CORE_WITH_TEST_HOOKS
 gnss_core::testing::TrailingLineReadFailureInjector g_trailing_line_read_failure_injector = nullptr;
 
-bool inject_read_failure(const char* step) {
-  return g_trailing_line_read_failure_injector != nullptr && g_trailing_line_read_failure_injector(step);
+// round 3 复盘的教训:上一版这里只是"读成功之后再问一句要不要假装失败",
+// 测的只是"这个 if 分支存在",从来没有真正让任何一次读失败过——删掉
+// try/catch(round 3 复现的那个 bug)之后,这个注入点原样通过,测不出
+// 问题。现在直接在"真正要去读"之前抛出一个和 libstdc++ 同类型的异常
+// (std::ios_base::failure),把"这次读失败"做成一次真的异常传播,而不是
+// 一个被检查的返回值——这样下面的 try/catch 才是真正被这个测试用例覆盖
+// 到的代码,删掉它测试就会因为异常没被接住而失败(进程异常终止/gtest
+// 报告未捕获异常),而不是安静地继续通过。
+void throw_if_injected(const char* step) {
+  if (g_trailing_line_read_failure_injector != nullptr && g_trailing_line_read_failure_injector(step)) {
+    throw std::ios_base::failure(std::string("gnss_core test injection: ") + step);
+  }
 }
+// resize_file() 走 std::error_code、不走异常,所以这里不需要 throw——
+// 直接问一句"这一步要不要模拟失败",跟 throw_if_injected 是同一个注入点
+// 的两种表现形式(读用抛异常模拟,resize 用返回值模拟,各自贴近生产代码
+// 里这一步真实的失败方式)。
+bool injected_resize_failure() {
+  return g_trailing_line_read_failure_injector != nullptr && g_trailing_line_read_failure_injector("resize");
+}
+#else
+inline void throw_if_injected(const char*) {}   // 非测试构建:这段代码整体不存在,调用处优化成空操作
+inline bool injected_resize_failure() { return false; }
+#endif
 
 // 一次截断在“最后一行没写完整”这个前提下,理论上能去掉的字节数不会超过
 // 一行的最坏长度——format_pos_record 的列宽是固定的(日期时间 24 字节 +
@@ -76,6 +113,11 @@ bool inject_read_failure(const char* step) {
 // 防御:即便"读到的字节数恰好等于文件大小"这个校验也被蒙混过去(比如
 // 某种读错误凑巧返回了等长但错误的数据),截断量一旦远超"一行"的量级,
 // 就说明拿到的 content 根本不可信,拒绝截断远比截掉不该截的东西安全。
+//
+// 已知的权衡(round 3 review 明确要求本轮不修):如果一行真的超过这个
+// 上限(比如未来格式改动让某一列变成变长字段),这个文件会永远打不开
+// (每次 open() 都判定成"截断量可疑"而拒绝)。安全的方向是"拒绝而不是
+// 冒险截错",但确实缺一条"为什么打不开"的诊断日志——留到下一轮。
 constexpr std::uintmax_t kMaxPlausibleIncompleteLineBytes = 4096;
 
 TrailingLineOutcome truncate_incomplete_trailing_line(const std::filesystem::path& fp) {
@@ -87,40 +129,67 @@ TrailingLineOutcome truncate_incomplete_trailing_line(const std::filesystem::pat
   std::ifstream in(fp, std::ios::binary);
   if (!in) return TrailingLineOutcome::kFailed;   // 比如没有读权限(BLOCKING 2 的 chmod 200 场景)
 
-  in.seekg(static_cast<std::streamoff>(file_size) - 1);
-  char last = 0;
-  in.get(last);
-  // 这一步失败(EIO/短读)绝不能被当成"读到了 0",必须立刻当成失败处理——
-  // 这正是 BLOCKING 1 复现命中的那一行。
-  if (!in || inject_read_failure("last_byte")) return TrailingLineOutcome::kFailed;
-  if (last == '\n') return TrailingLineOutcome::kNoTruncationNeeded;   // 最后一行完整,不用截断
+  try {
+    in.seekg(static_cast<std::streamoff>(file_size) - 1);
+    char last = 0;
+    throw_if_injected("last_byte");
+    in.get(last);
+    // 失败但没有抛异常(比如单纯的 fail/eof,不是 underflow() 那种真正的
+    // I/O 错误)同样不能被当成"读到了 0",必须立刻当成失败处理。
+    if (!in) return TrailingLineOutcome::kFailed;
+    if (last == '\n') return TrailingLineOutcome::kNoTruncationNeeded;   // 最后一行完整,不用截断
 
-  in.clear();
-  in.seekg(0);
-  if (!in) return TrailingLineOutcome::kFailed;
-  const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  const bool stream_had_io_error = in.bad();
-  in.close();
-  // 第二道防线,比单看流状态更可靠:istreambuf_iterator 读到 EOF 不会
-  // 设置 failbit,一次真正的中途 I/O 错误未必会体现在流状态上——但读到的
-  // 字节数一定会跟文件大小对不上。两者任一为真都不可信。
-  if (stream_had_io_error || content.size() != static_cast<std::uintmax_t>(file_size) ||
-      inject_read_failure("full_content")) {
+    in.clear();
+    in.seekg(0);
+    if (!in) return TrailingLineOutcome::kFailed;
+    throw_if_injected("full_content");
+    const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const bool stream_had_io_error = in.bad();
+    in.close();
+    // 第二道防线,比单看流状态更可靠:istreambuf_iterator 读到 EOF 不会
+    // 设置 failbit,一次真正的中途 I/O 错误未必会体现在流状态上(如果它
+    // 没有像 underflow() 那样直接抛出来的话)——但读到的字节数一定会跟
+    // 文件大小对不上。两者任一为真都不可信。
+    if (stream_had_io_error || content.size() != static_cast<std::uintmax_t>(file_size)) {
+      return TrailingLineOutcome::kFailed;
+    }
+
+    const auto pos_nl = content.find_last_of('\n');
+    const std::uintmax_t old_size = static_cast<std::uintmax_t>(file_size);
+    const std::uintmax_t new_size = (pos_nl == std::string::npos) ? 0 : static_cast<std::uintmax_t>(pos_nl + 1);
+    if (old_size - new_size > kMaxPlausibleIncompleteLineBytes) {
+      // 算出来的截断量比一整行还大得多——content 不可信,拒绝截断。
+      return TrailingLineOutcome::kFailed;
+    }
+
+    // round 3 review 纠正了上一轮的一个错误判断:曾经以为 resize_file()
+    // 失败这条分支是"defense-in-depth"、可有可无,理由是它跟下面
+    // out_.open(path, ios::app) 共用同一个"对文件要有写权限"的判定,两者
+    // 总是同时失败或同时成功。reviewer 用 chattr +a(只读文件系统的
+    // append-only 属性:允许 O_APPEND 追加,拒绝 truncate())构造出一个
+        // "能读、能 append,但 truncate() 会被 EPERM 拒绝"的真实场景,证明
+    // 这两个权限判定并不总是绑在一起——去掉这里的检查之后,open() 会
+    // 误判成功,write() 真的把新记录 append 了上去,直接粘连在还没被截掉
+    // 的半行后面(复现:988 字节的文件变成 1129 字节,bug A 原样复发)。
+    // 这条检查是这条路径下的第一道、也是唯一一道防线,不是冗余。
+    std::error_code trunc_ec;
+    if (injected_resize_failure()) {
+      // 测试注入:跳过真正的 resize_file() 调用,直接模拟它失败——这样
+      // 才能在没有 root/CAP_LINUX_IMMUTABLE 的沙箱里确定性地覆盖这条分支
+      // (chattr +a 需要 root,这台机器上的普通用户做不到),同时保证文件
+      // 在磁盘上确实一字节没被动过。
+      trunc_ec = std::make_error_code(std::errc::operation_not_permitted);
+    } else {
+      std::filesystem::resize_file(fp, new_size, trunc_ec);
+    }
+    if (trunc_ec) return TrailingLineOutcome::kFailed;   // 截断本身失败(比如没有写权限,或者 chattr +a)
+    return TrailingLineOutcome::kTruncated;
+  } catch (const std::exception&) {
+    // libstdc++ 在真实 I/O 错误时可能从上面任意一次读取里直接抛出来
+    // (见本函数前面的类注释),不管流的 exceptions() 掩码——open() 的
+    // "打开失败返回 false、不抛"承诺要求这里必须接住,不能让它捅穿。
     return TrailingLineOutcome::kFailed;
   }
-
-  const auto pos_nl = content.find_last_of('\n');
-  const std::uintmax_t old_size = static_cast<std::uintmax_t>(file_size);
-  const std::uintmax_t new_size = (pos_nl == std::string::npos) ? 0 : static_cast<std::uintmax_t>(pos_nl + 1);
-  if (old_size - new_size > kMaxPlausibleIncompleteLineBytes) {
-    // 算出来的截断量比一整行还大得多——content 不可信,拒绝截断。
-    return TrailingLineOutcome::kFailed;
-  }
-
-  std::error_code trunc_ec;
-  std::filesystem::resize_file(fp, new_size, trunc_ec);
-  if (trunc_ec) return TrailingLineOutcome::kFailed;   // 截断本身失败(比如没有写权限)
-  return TrailingLineOutcome::kTruncated;
 }
 
 // "YYYY/MM/DD" + "HH:MM:SS.sss" → 按 UTC 日历合成 unix 秒。
@@ -145,11 +214,13 @@ bool parse_date_time(const std::string& date, const std::string& time, double& o
 
 }  // namespace
 
+#ifdef GNSS_CORE_WITH_TEST_HOOKS
 namespace testing {
 void set_trailing_line_read_failure_injector(TrailingLineReadFailureInjector injector) {
   g_trailing_line_read_failure_injector = injector;
 }
 }  // namespace testing
+#endif
 
 bool PosDecimator::accept(const PosRecord& r) {
   const long long bin = static_cast<long long>(std::floor(r.stamp / period_));
@@ -316,13 +387,30 @@ bool PosWriter::open(const std::string& path) {
   // (见 pos_io.hpp 类注释)。复用 read_pos()(不写第二个 .pos 解析器)
   // 解析已有内容,对每一条都按当前 open() 使用的 ts_/leap_ 重新算出它在
   // .pos 里占的那个毫秒键,塞进 existing_keys_。
+  //
+  // round 3 review:这里原来的 catch 会静默吞掉任何异常、让 open() 照样
+  // 返回 true(只是没有去重保护)——理由是"文件已经确认存在,这里失败
+  // 极不寻常"。但 read_pos() 内部的 std::getline 跟上面
+  // truncate_incomplete_trailing_line 用的是同一个流,同样可能撞上
+  // libstdc++ basic_filebuf::underflow() 在真实 I/O 错误时无条件抛异常
+  // 的那个坑——继续吞掉、照样成功,等于让"这一整轮修复的三个数据正确性
+  // bug"原样复发(existing_keys_ 是空的或不完整的,新写入的记录不会跟
+  // 文件里已有的内容去重)。这是跟上面截断检查完全同一条"读失败就必须让
+  // open() 直接失败"的规则,不该是两套不一致的容错策略——统一改成失败
+  // 直接返回 false。理论上也可能是文件在 file_size() 判过之后被并发删除
+  // 这种更罕见的竞态,但同样没有办法安全区分"这是哪一种失败",按同一条
+  // 规则处理。
   if (!is_new) {
     try {
+      // 测试注入点(仅 BUILD_TESTING):模拟 read_pos() 内部的
+      // std::getline 撞上跟上面截断检查同一种"读到一半直接抛异常"的
+      // I/O 错误——不改动 read_pos() 本身(它是通用函数,不是
+      // PosWriter 专属的),只在这一个调用点前面插一句判断。
+      throw_if_injected("dedup_scan");
       const auto existing = read_pos(path, PosReadOptions{leap_, ts_});
       for (const auto& rec : existing) existing_keys_.insert(record_time_key_ms(rec, ts_, leap_));
     } catch (const std::exception&) {
-      // 文件已经确认存在(上面 file_size 没报错),这里失败极不寻常
-      // (比如竞态下被删掉)——不让它阻止 open(),只是没有去重保护。
+      return false;
     }
   }
 

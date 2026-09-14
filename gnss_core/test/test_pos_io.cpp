@@ -770,6 +770,44 @@ TEST(PosWriter, ResizeFileFailureLeavesFileUntouchedAndOpenFails) {
   EXPECT_EQ(read_raw(p), original) << "resize_file 失败时文件必须一字节都没被动过";
 }
 
+// round 3 review 纠正了上一轮报告里的一个错误结论:上面这个 chmod 444
+// 用例曾被当成"resize_file 失败分支是 defense-in-depth、可有可无"的证据,
+// 理由是它跟 out_.open(path, ios::app) 共用同一个"要有写权限"的判定。
+// reviewer 用 chattr +a(只读文件系统的 append-only 属性:允许 O_APPEND
+// 追加,拒绝 truncate())构造出一个"能读、能 append,但 truncate() 会被
+// EPERM 拒绝"的真实场景,证明这两个权限判定并不总是绑在一起——去掉
+// resize_file 失败检查之后,open() 会误判成功,write() 真的把新记录
+// append 了上去,直接粘连在还没被截掉的半行后面(reviewer 复现:988 字节
+// 变成 1129 字节)。chattr +a 需要 root/CAP_LINUX_IMMUTABLE,这台机器上的
+// 普通用户做不到(试过,Operation not permitted),所以这里用跟上面两个
+// "读失败"用例同一套思路的确定性注入:让 resize 这一步本身失败,而真正
+// 的 resize_file() 系统调用被跳过,不依赖任何特殊权限或 root。
+TEST(PosWriter, InjectedResizeFailureLeavesFileUntouchedAndOpenFails) {
+  const std::string p = tmp_path("pw_inject_resize.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  {
+    std::ofstream f(p);
+    f << pos_header(PosTimeSystem::GPST);
+    f << format_pos_record(a, PosTimeSystem::GPST, 18);
+    f << "2026/09/03 10:23:46.000 44.5 90.2";   // 没有换行结尾,确实需要走到 resize_file 这一步
+  }
+  const std::string original = read_raw(p);
+
+  gnss_core::testing::set_trailing_line_read_failure_injector(
+      [](const char* step) { return std::string(step) == "resize"; });
+  PosWriter w;
+  const bool opened = w.open(p);
+  gnss_core::testing::set_trailing_line_read_failure_injector(nullptr);
+
+  EXPECT_FALSE(opened)
+      << "resize_file() 本身失败这条分支是真正的第一道防线(reviewer 用 "
+         "chattr +a 证明它跟 out_.open(app) 的权限判定并不总是绑在一起),"
+         "去掉它 open() 就会误判成功";
+  EXPECT_EQ(read_raw(p), original)
+      << "注入失败时真正的 resize_file() 调用必须被跳过,文件一字节都不能变";
+}
+
 // ---------- round 2 review:三个当前没有测试守住的 mutant ----------
 
 // (a) 如果 open() 收集去重键时把时间系统写死成 GPST,UTC 的 PosWriter
@@ -863,4 +901,40 @@ TEST(PosWriter, TruncationInsideTheFirstHeaderLineStillProducesACleanHeaderOnReo
   const auto back = read_pos(p);
   ASSERT_EQ(back.size(), 1u);
   EXPECT_NEAR(back[0].stamp, a.stamp, 1e-3);
+}
+
+// ---------- round 3 review:"读失败就必须 fail closed"这条规则少了一层 ----------
+// open() 打开一个已有文件时,截断检查通过之后还会再调一次 read_pos() 去
+// 收集去重键——这次调用原来包在一个"吞掉任何异常、照样返回 true(只是
+// 没有去重保护)"的 try/catch 里,理由是"文件已经确认存在,这里失败极
+// 不寻常"。但这次调用跟上面的截断检查读的是同一个文件、可能撞上同一种
+// 瞬时 I/O 错误——继续吞掉、照样成功,existing_keys_ 就是空的,新写入的
+// 记录不会跟文件里已有的内容去重,等于让这一整轮修复的三个数据正确性 bug
+// (A/B/C)原样复发,只是触发条件从"截断"换成了"去重键收集"。这里跟上面
+// 几个注入测试用的是同一个注入点(throw_if_injected),只是换了一个 step
+// 名字("dedup_scan"),从 PosWriter::open() 里紧挨着 read_pos() 调用的
+// 那一行之前抛出。
+
+TEST(PosWriter, InjectedDedupScanFailureLeavesFileUntouchedAndOpenFails) {
+  const std::string p = tmp_path("pw_inject_dedup_scan.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  {
+    PosWriter w;
+    ASSERT_TRUE(w.open(p));
+    ASSERT_TRUE(w.write(a));   // 完整、干净的文件——不需要触发截断分支,专门测去重键收集这一步
+  }
+  const std::string original = read_raw(p);
+
+  gnss_core::testing::set_trailing_line_read_failure_injector(
+      [](const char* step) { return std::string(step) == "dedup_scan"; });
+  PosWriter w;
+  const bool opened = w.open(p);
+  gnss_core::testing::set_trailing_line_read_failure_injector(nullptr);
+
+  EXPECT_FALSE(opened)
+      << "收集去重键这一步(read_pos())失败时,open() 必须直接失败——不能"
+         "像旧代码那样吞掉异常、照样返回 true 但没有去重保护,那等于让"
+         "重放/重启重复写行的 bug 原样复发";
+  EXPECT_EQ(read_raw(p), original) << "去重键收集失败时文件必须一字节都没被动过";
 }
