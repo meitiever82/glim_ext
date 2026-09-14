@@ -343,36 +343,26 @@ bash src/glim_ext/gnss_bringup/scripts/record_gnss.sh
 任务(cron/systemd timer 之类)手动清理超期的 bag,否则磁盘会被写满。旧 `.pos`
 文件的 gzip 压缩同样不在本轮范围内(见文末「遗留」)。
 
-## 未验证项
+## 已验证 / 未验证项
 
-本包开发机上**没有安装 RTKLIB**,以下事项只用 `test/fake_rtkrcv.sh`(一个模拟
-`rtkrcv` 命令行行为但不真正解算的 shell 脚本)验证了进程监管、conf 生成与流
-转发的"管道"是否正确,**没有用真实 rtkrcv 二进制验证过**:
+2026-09-14 在开发机上用 **RTKLIB-EX 2.5.1** 验证过。回归用例是 `test/test_rtkrcv_real_binary.cpp`
+(未装 rtkrcv 或 libfaketime 时自动跳过)与 `test/test_rtkrcv_node_process.cpp`:
 
-- **conf 是否被真实 rtkrcv 接受**——`render_rtkrcv_conf()` 生成的键名
-  (`pos1-posmode`、`pos1-elmask`、`pos2-armode`、`pos1-navsys`、`out-timesys`
-  等)是否是真实 RTKLIB(demo5)认识的键名、是否还缺 Task 5 未覆盖到的必需
-  字段,只能靠真机验证。
-- **真实的 llh 解算内容与节奏**——`parse_llh_solution` 期望的列序是照文档和
-  假设对齐的,真实 RTKLIB 在各种解质量(float/DGPS/单点)、丢星、AR 状态切换
-  下实际吐出的行是否总能被正确解析,未验证。
-- **真实 `$SAT`/`.stat` 文件格式与命名**——`-r 2` 参数下 rtkrcv 实际生成的
-  文件名模式、是否会在长时间运行后滚动出多个文件、`plan_stat_tail()`
-  按 mtime 取最新是否总能对上真实场景,未用真实二进制验证。
-- **rtkrcv 对 SIGTERM 的真实响应**——`ProcessSupervisor` 的信号/超时升级逻辑
-  本身已用假二进制验证过,但真实 rtkrcv 收到 SIGTERM 后是否会先 flush 完
-  `.stat`/解算流再退出,未知。
-- **崩溃循环退避在真实 conf 错误下的表现**——例如一个 rtkrcv 无法识别的 conf
-  字段导致它秒退,`crash_loop_life_s` 退避是否如预期触发,未用真实二进制验证过
-  (退避逻辑本身已用 `fake_rtkrcv.sh` 单测覆盖,这里只是没有用真实二进制复现过)。
-- **多客户端/大流量下 `LocalReserver` 与 rtkrcv 的真实交互**——目前只验证了单个
-  自制 TCP 客户端收到 `LocalReserver` 广播的字节;rtkrcv 作为 `tcpcli` 连入后的
-  真实读取节奏、断线重连行为,未验证。
-- **端到端**——`rtcm_bridge` → `rtkrcv_node` → `~/rtk_fix` 的全链路需要真实的
-  差分流与观测流,现场设备到位前无法验证。
+- 生成的 conf 键全部被 2.5.1 识别并生效(用 rtkrcv 控制台 `option` 逐项核对过)
+- `-s -nc -r 2 -o <conf>` 能无终端常驻,SIGTERM 下正常退出
+- 两路上行按字节原样送达(corrections → `inpstr2`,raw_obs → `inpstr1`),节点连得上 `sol_port`,
+  `.stat` 文件名为 `rtkrcv_%Y%m%d%h%M.stat`
+- 真实双站 RTCM3 回放(RTKLIB 自带 2005 年 GSI 两站 RINEX 转换而来,基线约 3.3 km):
+  `RtkFix` 与 rtkrcv 原始解算行逐字段一致(经纬高、质量、NEU→ENU 标准差、卫星数、龄期),
+  `pos_writer` 按 UTC 日轮转写出 `.pos`
 
-装上 demo5 版 RTKLIB 后,建议按上面七条逐一补验,而不是假定管道跑通了就等于
-解算正确。
+仍未验证:
+
+- **固定率**:回放数据只得到浮点解(转换成 RTCM 时丢了锁定信息,原始 RINEX 后处理可以固定),
+  固定率只能用现场数据判断
+- 现场板卡的原始观测格式,以及平台差分流是否带 1005/1006(`base_pos_type: rtcm` 的前提)
+- 现场端点与连接方向(见「现场待确认」)
+- 长时间运行、真实丢星与 AR 状态切换下的解算行
 
 ## 已知问题
 

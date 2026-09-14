@@ -128,6 +128,18 @@ if(BUILD_TESTING)
   target_compile_definitions(test_rtkrcv_node_process PRIVATE
     RTKRCV_NODE_PATH="$<TARGET_FILE:rtkrcv_node>"
     FAKE_RTKRCV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test/fake_rtkrcv.sh")
+
+  # 真实 rtkrcv(RTKLIB-EX 2.5.1)+ libfaketime 回放双站 RTCM3 的端到端回归。
+  # 机器上没有 rtkrcv 或 libfaketime 时 GTEST_SKIP;rtkrcv 版本不对时 FAIL。
+  ament_add_gtest(test_rtkrcv_real_binary test/test_rtkrcv_real_binary.cpp TIMEOUT 180)
+  target_link_libraries(test_rtkrcv_real_binary gnss_bringup_io)
+  target_include_directories(test_rtkrcv_real_binary PRIVATE include test)
+  ament_target_dependencies(test_rtkrcv_real_binary rclcpp gnss_msgs)
+  add_dependencies(test_rtkrcv_real_binary rtkrcv_node)
+  target_compile_definitions(test_rtkrcv_real_binary PRIVATE
+    RTKRCV_NODE_PATH="$<TARGET_FILE:rtkrcv_node>"
+    RTKRCV_FAKETIME_WRAPPER="${CMAKE_CURRENT_SOURCE_DIR}/test/rtkrcv_faketime.sh"
+    GNSS_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/data")
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
