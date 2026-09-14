@@ -41,7 +41,10 @@ rtcm_bridge:
 
 rtkrcv_node:
   ros__parameters:
-    binary: "rtkrcv"            # RTKLIB demo5;开发机未安装,见 README 缺口登记
+    # RTKLIB-EX 2.5.1 的 rtkrcv。裸名字按 PATH 查找(sudo cmake --install 装在
+    # /usr/local/bin);找不到时节点启动即失败并打印 PATH。安装方法见 README
+    # 「安装 RTKLIB-EX 2.5.1」——不要用 apt 的 rtklib(2.4.3 b34 不认 -nc)。
+    binary: "rtkrcv"
     run_dir: "/tmp/rtkrcv_run"
     # 故意不用 RtkrcvConfParams 的内置默认值(rtkrcv_conf.hpp 里 corr_port=15031、
     # obs_port=15032)——那两个端口号与上面 rtcm_bridge.rtcm_corrections.port
@@ -61,6 +64,16 @@ rtkrcv_node:
     navsys: 63
     elmask: 10.0
     ar_mode: "continuous"
+    # 基准站坐标来源(conf 的 ant2-postype)。"rtcm":取平台差分流里的 RTCM
+    # 1005/1006(默认——前提是差分流带这两条电文,现场待确认);"single":用基准站
+    # 观测的单点解。不写这个键时 rtkrcv 默认 llh 0,0,0,RTK 一条解都不会输出
+    # (2026-09-14 用 RTKLIB-EX 2.5.1 实测)。
+    base_pos_type: "rtcm"
+    # 北斗 / GLONASS 模糊度固定。取值与 RTKLIB-EX 2.5.1 自身默认一致,显式写出是
+    # 为了换版本时默认值不会悄悄变化;现场按固定率再调(bds_ar_mode: off|on,
+    # glo_ar_mode: off|on|autocal|fix-and-hold)。
+    bds_ar_mode: "off"
+    glo_ar_mode: "fix-and-hold"
 
     # rtcm_bridge 发布上行数据用的话题名,必须与上面 rtcm_bridge 的
     # topic 取值一致——这里重复写一遍是因为两个节点各自独立声明参数,
@@ -123,9 +136,10 @@ pos_writer:
     # 现场需要接入 rtkrcv 这一路时:先 `-p enable_rtkrcv:=true`(或在覆盖
     # 文件里打开它)启动 rtkrcv_node,再把这里改成
     # `sources: ["can", "rtkrcv"]`;如果 gnss_cgi610 驱动确实会发布
-    # gpchc 这一路(现场协议确认之后),再加上 "gpchc"。下面 can/gpchc/
-    # rtkrcv 三行 topic 映射都保留在配置里,按需把对应的名字加进 sources
-    # 即可,不需要另外声明。
+    # gpchc 这一路(现场协议确认之后),再加上 "gpchc"。注意下面只有 can 的
+    # topic 映射是生效的,gpchc/rtkrcv 两行是注释:把名字加进 sources 时必须
+    # 同时取消对应那一行的注释——否则 <name>.topic 会回落到默认值
+    # "/gnss/<name>",那个话题没有任何发布者,现象只是一条沉默告警。
     sources: ["can"]
     # 1 Hz 抽稀周期(spec §5.3)。落盘的是"每 period_s 秒取一条"的摘要,不是
     # 全量流——全量原始数据由下面的 rosbag2 录制脚本另外负责。

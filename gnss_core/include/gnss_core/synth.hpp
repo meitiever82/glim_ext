@@ -1,5 +1,6 @@
 #pragma once
 // 轨迹 → 合成 RTK 观测(spec §12.3,Task 13)。纯函数,无 ROS 依赖。
+#include <istream>
 #include <string>
 #include <vector>
 #include <Eigen/Core>
@@ -19,6 +20,9 @@ struct TrajPose {
 // 读 TUM 格式轨迹;'#' 开头与空行跳过;列数不足的行跳过;打不开抛 std::runtime_error。
 // 输出按 stamp 升序(文件本身乱序时排序)。
 std::vector<TrajPose> read_glim_traj(const std::string& path);
+
+// 从输入流读 TUM 轨迹(规则同上)。读错误(badbit)抛 std::runtime_error。
+std::vector<TrajPose> read_glim_traj(std::istream& in);
 
 // 在 traj 上插值 t 时刻位姿:位置线性、姿态 slerp。t 超出 [front, back] 返回 false。
 bool interpolate_pose(const std::vector<TrajPose>& traj, double t, TrajPose& out);

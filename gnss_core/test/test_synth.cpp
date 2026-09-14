@@ -3,15 +3,18 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 
 #include "gnss_core/geodetic.hpp"
 #include "gnss_core/pos_io.hpp"
 #include "gnss_core/synth.hpp"
 #include "synth_fixtures.hpp"
+#include "failing_streambuf.hpp"
 
 using namespace gnss_core;
 using gnss_core::test_fixtures::straight_then_turn;
+using gnss_core::test_fixtures::FailingStreambuf;
 
 TEST(Synth, ZeroNoiseZeroLeverReproducesTrajectory) {
   SynthConfig cfg;
@@ -189,4 +192,17 @@ TEST(Synth, SampleToPosRecordRoundTrip) {
     EXPECT_EQ(b.sats_used, s.sats_used);
     EXPECT_DOUBLE_EQ(b.gnss_time, s.stamp);
   }
+}
+
+TEST(Synth, ReadGlimTrajFromStreamThrowsWhenTheStreambufFailsMidScan) {
+  std::string content = "# timestamp tx ty tz qx qy qz qw\n";
+  for (int i = 0; i < 20; ++i) content += std::to_string(100 + i) + " 1 2 3 0 0 0 1\n";
+  FailingStreambuf buf(content, content.size() / 2);
+  std::istream in(&buf);
+  EXPECT_THROW(read_glim_traj(in), std::runtime_error)
+      << "读到一半 I/O 出错时不能把前一半轨迹当成全部返回——"
+         "estimate_lever_arm 会拿半条轨迹算出一个看起来正常的杆臂";
+
+  std::istringstream healthy(content);
+  EXPECT_EQ(read_glim_traj(healthy).size(), 20u);
 }

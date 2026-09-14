@@ -43,6 +43,27 @@ bash src/glim_ext/setup_workspace.sh
 > `driver_ws` 都要 `colcon build --packages-select gnss_msgs`(及其下游包)
 > 再重启相关节点,两边缺一不可。
 
+## 安装 RTKLIB-EX 2.5.1(`rtkrcv`)
+
+`rtkrcv_node` 需要 **RTKLIB-EX 2.5.1**(rtklibexplorer 维护,原 demo5)。
+**不要用 `apt install rtklib`**:Ubuntu 22.04 源里是 Takasu 原版 2.4.3 b34,不认 `-nc`,
+遇到就打印用法并以 0 退出,节点会陷入崩溃循环。
+
+```bash
+# 源码:https://github.com/rtklibexplorer/RTKLIB/releases/tag/v2.5.1
+cd RTKLIB-2.5.1
+# 只要命令行工具:关掉 Qt(系统 Qt6 缺 SerialPort 模块会让配置失败)。
+# 需要 GUI 时去掉最后一个 -D,改传 -DCMAKE_PREFIX_PATH=<带 SerialPort 的 Qt6 目录>。
+rm -rf build && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_QT=TRUE
+cmake --build build -j"$(nproc)"
+sudo cmake --install build
+sudo ldconfig        # 必须:librtklib.so 装在 /usr/local/lib,不刷新缓存 rtkrcv 起不来
+rtkrcv --version     # 应输出:rtkrcv RTKLIB EX 2.5.1
+```
+
+`binary` 参数默认 `rtkrcv`,节点按 `PATH` 查找;找不到时节点启动即失败,日志里带着当时的 `PATH`。
+
 ## 快速开始
 
 ```bash
@@ -194,6 +215,12 @@ rtcm_bridge:
 写错一个参数名不会报错,只是那个设置根本没生效——所以下面两组容易被漏掉的参数
 专门说明一下:
 
+- **`base_pos_type`(默认 `rtcm`)**——基准站坐标来源,对应 conf 的 `ant2-postype`。
+  `rtcm` 要求平台差分流带 RTCM 1005/1006;没有时改成 `single`(基准站单点解,精度差)。
+  **这一项不写时 rtkrcv 默认坐标 0,0,0,RTK 一条解都不输出**。`bds_ar_mode`/`glo_ar_mode`
+  是北斗/GLONASS 模糊度固定开关,默认值与 RTKLIB-EX 2.5.1 一致,现场按固定率调整。
+  所有枚举参数在节点启动时按 RTKLIB-EX 2.5.1 的取值表校验,写错直接拒绝启动——
+  rtkrcv 自己遇到非法取值只会悄悄回落到默认值继续跑。
 - **`leap_seconds`(默认 18)**——GPST 与 UTC 之间的闰秒偏移量。这个值不是常量,
   IERS 每次宣布插入新闰秒后都需要手动更新;`rtkrcv_node` 用它把解算历元
   (GPST)换算成 UTC。
@@ -304,7 +331,12 @@ bash src/glim_ext/gnss_bringup/scripts/record_gnss.sh
 `/gnss_cgi610/rtk_fix_gpchc`、`/rtkrcv_node/rtk_fix`、`/rtkrcv_node/stat`
 六路话题,输出到 `$HOME/gnss_bags/gnss_<时间戳>/`(按 `--max-bag-duration` 分卷,
 默认 86400 秒即一天一卷——注意这是"从录制进程启动那一刻起满 N 秒就切卷",不是
-像 `.pos` 那样按 UTC 自然日对齐,两者是不同的机制)。启动时会先检查每个话题是否
+像 `.pos` 那样按 UTC 自然日对齐,两者是不同的机制)。
+
+其中 `/gnss_cgi610/rtk_fix_gpchc` 目前没有任何发布者(驱动是否发布 gpchc 这一路待现场协议确认),
+录到的 bag 里这个话题为空是正常的。
+
+启动时会先检查每个话题是否
 已经在总线上,**不存在只警告、不阻止启动**——录制一个当前还没有发布者的话题是
 合法的,链路上各个节点完全可能按不同顺序、先后起来。输出根目录、话题清单、
 分卷时长、存储后端均可用环境变量覆盖,默认值和用法写在脚本顶部的注释里
@@ -316,36 +348,34 @@ bash src/glim_ext/gnss_bringup/scripts/record_gnss.sh
 任务(cron/systemd timer 之类)手动清理超期的 bag,否则磁盘会被写满。旧 `.pos`
 文件的 gzip 压缩同样不在本轮范围内(见文末「遗留」)。
 
-## 未验证项
+## 已验证 / 未验证项
 
-本包开发机上**没有安装 RTKLIB**,以下事项只用 `test/fake_rtkrcv.sh`(一个模拟
-`rtkrcv` 命令行行为但不真正解算的 shell 脚本)验证了进程监管、conf 生成与流
-转发的"管道"是否正确,**没有用真实 rtkrcv 二进制验证过**:
+2026-09-14 在开发机上用 **RTKLIB-EX 2.5.1** 验证过。
 
-- **conf 是否被真实 rtkrcv 接受**——`render_rtkrcv_conf()` 生成的键名
-  (`pos1-posmode`、`pos1-elmask`、`pos2-armode`、`pos1-navsys`、`out-timesys`
-  等)是否是真实 RTKLIB(demo5)认识的键名、是否还缺 Task 5 未覆盖到的必需
-  字段,只能靠真机验证。
-- **真实的 llh 解算内容与节奏**——`parse_llh_solution` 期望的列序是照文档和
-  假设对齐的,真实 RTKLIB 在各种解质量(float/DGPS/单点)、丢星、AR 状态切换
-  下实际吐出的行是否总能被正确解析,未验证。
-- **真实 `$SAT`/`.stat` 文件格式与命名**——`-r 2` 参数下 rtkrcv 实际生成的
-  文件名模式、是否会在长时间运行后滚动出多个文件、`plan_stat_tail()`
-  按 mtime 取最新是否总能对上真实场景,未用真实二进制验证。
-- **rtkrcv 对 SIGTERM 的真实响应**——`ProcessSupervisor` 的信号/超时升级逻辑
-  本身已用假二进制验证过,但真实 rtkrcv 收到 SIGTERM 后是否会先 flush 完
-  `.stat`/解算流再退出,未知。
-- **崩溃循环退避在真实 conf 错误下的表现**——例如一个 rtkrcv 无法识别的 conf
-  字段导致它秒退,`crash_loop_life_s` 退避是否如预期触发,未用真实二进制验证过
-  (退避逻辑本身已用 `fake_rtkrcv.sh` 单测覆盖,这里只是没有用真实二进制复现过)。
-- **多客户端/大流量下 `LocalReserver` 与 rtkrcv 的真实交互**——目前只验证了单个
-  自制 TCP 客户端收到 `LocalReserver` 广播的字节;rtkrcv 作为 `tcpcli` 连入后的
-  真实读取节奏、断线重连行为,未验证。
-- **端到端**——`rtcm_bridge` → `rtkrcv_node` → `~/rtk_fix` 的全链路需要真实的
-  差分流与观测流,现场设备到位前无法验证。
+由回归用例持续守护(`test/test_rtkrcv_real_binary.cpp`,未装 rtkrcv 或 libfaketime 时自动跳过;
+`test/test_rtkrcv_node_process.cpp` 用替身二进制):
 
-装上 demo5 版 RTKLIB 后,建议按上面七条逐一补验,而不是假定管道跑通了就等于
-解算正确。
+- `rtkrcv_node` 按 `PATH` 解析 `binary`(用替身二进制验证),解析不到时拒绝启动且不写 conf
+- 真实 rtkrcv 以 `-s -nc -r 2 -o <conf>` 常驻,节点 SIGINT 后正常退出
+- conf 默认写入 `ant2-postype =rtcm`;缺了这一行时真实回放一条解都没有
+- 真实双站 RTCM3 回放(RTKLIB 自带 2005 年 GSI 两站 RINEX 转换而来,基线约 3.3 km):
+  节点发布 `RtkFix`(约 100 条,质量为浮点或固定,经纬高与时间落在预期范围)并转发 `.stat`
+
+只在 2026-09-14 手工核对过、没有用例守护:
+
+- 生成的 conf 键全部被 2.5.1 识别并生效(用 rtkrcv 控制台 `option` 逐项核对)
+- 两路上行按字节原样送达(corrections → `inpstr2`,raw_obs → `inpstr1`),
+  `.stat` 文件名为 `rtkrcv_%Y%m%d%h%M.stat`
+- `RtkFix` 与 rtkrcv 原始解算行逐字段一致(经纬高、质量、NEU→ENU 标准差、卫星数、龄期)
+- `pos_writer` 订阅 `rtkrcv_node` 的输出、按 UTC 日轮转写出 `.pos`,行内容与原始解算行一致
+
+仍未验证:
+
+- **固定率**:回放数据只得到浮点解(转换成 RTCM 时丢了锁定信息,原始 RINEX 后处理可以固定),
+  固定率只能用现场数据判断
+- 现场板卡的原始观测格式,以及平台差分流是否带 1005/1006(`base_pos_type: rtcm` 的前提)
+- 现场端点与连接方向(见「现场待确认」)
+- 长时间运行、真实丢星与 AR 状态切换下的解算行
 
 ## 已知问题
 

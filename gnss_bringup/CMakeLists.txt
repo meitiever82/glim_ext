@@ -21,6 +21,7 @@ add_library(gnss_bringup_io SHARED
   src/rtkrcv_conf.cpp
   src/process_supervisor.cpp
   src/port_probe.cpp
+  src/executable_lookup.cpp
 )
 target_include_directories(gnss_bringup_io PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -73,6 +74,11 @@ if(BUILD_TESTING)
   target_compile_definitions(test_process_supervisor PRIVATE
     FAKE_RTKRCV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test/fake_rtkrcv.sh")
 
+  # resolve_executable:ProcessSupervisor 在父进程里按 PATH 解析 binary(execv
+  # 不查 PATH,子进程又已 chdir 到 run_dir,裸名字 "rtkrcv" 以前永远起不来)。
+  ament_add_gtest(test_executable_lookup test/test_executable_lookup.cpp)
+  target_link_libraries(test_executable_lookup gnss_bringup_io)
+
   # rtk_fix_mapping.hpp 是纯函数(不碰 ROS 节点),含 LineSplitter 这个供
   # rtkrcv_node 按行切分 TcpStream 字节流用的纯逻辑,单独可测。
   ament_add_gtest(test_rtk_fix_mapping test/test_rtk_fix_mapping.cpp)
@@ -108,6 +114,32 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pos_source_writer test/test_pos_source_writer.cpp)
   target_link_libraries(test_pos_source_writer gnss_core::gnss_core)
   target_include_directories(test_pos_source_writer PRIVATE include)
+
+  # sol 流状态日志去重闸门:纯逻辑,不碰 ROS
+  ament_add_gtest(test_sol_stream_log_gate test/test_sol_stream_log_gate.cpp)
+  target_include_directories(test_sol_stream_log_gate PRIVATE include)
+
+  # 节点级测试:把 rtkrcv_node 可执行文件当子进程起,配 fake_rtkrcv.sh。
+  # 用 gtest 而不是 launch_testing:开发机的 pytest 9.1.1 与 Humble 的
+  # launch_testing 插件不兼容。
+  ament_add_gtest(test_rtkrcv_node_process test/test_rtkrcv_node_process.cpp TIMEOUT 180)
+  target_include_directories(test_rtkrcv_node_process PRIVATE include test)
+  add_dependencies(test_rtkrcv_node_process rtkrcv_node)
+  target_compile_definitions(test_rtkrcv_node_process PRIVATE
+    RTKRCV_NODE_PATH="$<TARGET_FILE:rtkrcv_node>"
+    FAKE_RTKRCV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test/fake_rtkrcv.sh")
+
+  # 真实 rtkrcv(RTKLIB-EX 2.5.1)+ libfaketime 回放双站 RTCM3 的端到端回归。
+  # 机器上没有 rtkrcv 或 libfaketime 时 GTEST_SKIP;rtkrcv 版本不对时 FAIL。
+  ament_add_gtest(test_rtkrcv_real_binary test/test_rtkrcv_real_binary.cpp TIMEOUT 180)
+  target_link_libraries(test_rtkrcv_real_binary gnss_bringup_io)
+  target_include_directories(test_rtkrcv_real_binary PRIVATE include test)
+  ament_target_dependencies(test_rtkrcv_real_binary rclcpp gnss_msgs)
+  add_dependencies(test_rtkrcv_real_binary rtkrcv_node)
+  target_compile_definitions(test_rtkrcv_real_binary PRIVATE
+    RTKRCV_NODE_PATH="$<TARGET_FILE:rtkrcv_node>"
+    RTKRCV_FAKETIME_WRAPPER="${CMAKE_CURRENT_SOURCE_DIR}/test/rtkrcv_faketime.sh"
+    GNSS_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/data")
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})

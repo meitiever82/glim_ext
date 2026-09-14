@@ -5,23 +5,25 @@
 // 接线顺序(brief §Step 4,顺序本身是要点——rtkrcv 首次连接本机端口如果连不上,
 // 会白白吃掉一次退避周期什么都不干):
 //   1. 读参数
-//   2. LocalReserver 起两个本机服务端口(corr/obs),供 rtkrcv 当 tcpcli 连入
-//   3. render_rtkrcv_conf() 写 conf 文件(用 LocalReserver 实际绑定到的端口,
+//   2. 检查 binary 可解析(找不到就直接拒绝启动,不留给监管线程去无限退避重试)
+//   3. LocalReserver 起两个本机服务端口(corr/obs),供 rtkrcv 当 tcpcli 连入
+//   4. render_rtkrcv_conf() 写 conf 文件(用 LocalReserver 实际绑定到的端口,
 //      不是请求的端口——见 write_conf() 前的 IMPORTANT 说明)
-//   4. ProcessSupervisor 起 rtkrcv;后台起一个不阻塞构造函数的线程打印
-//      "spawned pid" 日志
-//   5. TcpStream 连 rtkrcv 的解算输出端口,按行切分喂 parse_llh_solution
-//   6. 订阅 corrections/raw_obs,broadcast 进两个 LocalReserver
-//   7. 轮询 run_dir 下最新的 rtkrcv_*.stat,tail 新增字节,原样发布
+//   5. ProcessSupervisor 起 rtkrcv;每次派生/退出都由 on_spawn/on_exit 回调打日志
+//   6. TcpStream 连 rtkrcv 的解算输出端口,按行切分喂 parse_llh_solution
+//   7. 订阅 corrections/raw_obs,broadcast 进两个 LocalReserver
+//   8. 轮询 run_dir 下最新的 rtkrcv_*.stat,tail 新增字节,原样发布
 //
-// 析构顺序:先停我们自己起的两个辅助线程(pid 日志、stat tail——它们只是
-// 观察者,不参与 Task 1-6 组件之间的数据流,谁先停都不影响正确性),然后
-// 严格按 brief 规定的镜像顺序停止 Task 1-6 的组件:先停 ProcessSupervisor
-// (杀 rtkrcv,它不会再往 sol TcpStream 写数据),再停 TcpStream(它的线程
-// 不会再回调 on_data),最后停两个 LocalReserver——全部发生在 node 和它的
-// publisher 被销毁之前。这些组件都在各自的线程上回调,回调打到一个已经
-// 析构的 publisher 上就是一次崩溃(与 rtcm_bridge_node.cpp 在
-// rclcpp::shutdown() 之前 streams.clear() 是同一个道理)。
+// 析构顺序:先停我们自己起的辅助线程(stat tail——它只是观察者,不参与
+// Task 1-6 组件之间的数据流,什么时候停都不影响正确性),然后严格按 brief
+// 规定的镜像顺序停止 Task 1-6 的组件:先停 ProcessSupervisor(杀 rtkrcv,它
+// 不会再往 sol TcpStream 写数据;on_spawn/on_exit 回调在监管线程上运行,
+// stop() 会等这个线程退出后才返回,回调捕获的 this 因此在 stop() 返回前
+// 一直有效),再停 TcpStream(它的线程不会再回调 on_data),最后停两个
+// LocalReserver——全部发生在 node 和它的 publisher 被销毁之前。这些组件都
+// 在各自的线程上回调,回调打到一个已经析构的 publisher 上就是一次崩溃
+// (与 rtcm_bridge_node.cpp 在 rclcpp::shutdown() 之前 streams.clear() 是
+// 同一个道理)。
 
 #include <algorithm>
 #include <atomic>
@@ -29,6 +31,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -44,12 +47,14 @@
 #include <gnss_msgs/msg/raw_stream.hpp>
 #include <gnss_msgs/msg/rtk_fix.hpp>
 
+#include "gnss_bringup/executable_lookup.hpp"     // resolve_executable:启动前确认 binary 能被解析
 #include "gnss_bringup/local_reserver.hpp"
 #include "gnss_bringup/port_probe.hpp"             // probe_local_port:启动时探测 sol_port 是否已被孤儿/第二实例占着
 #include "gnss_bringup/process_supervisor.hpp"
 #include "gnss_bringup/rtcm_bridge_params.hpp"   // is_valid_port_for_direction:与 rtcm_bridge_node 共用的端口校验
 #include "gnss_bringup/rtk_fix_mapping.hpp"       // to_rtk_fix + LineSplitter + plan_stat_tail
 #include "gnss_bringup/rtkrcv_conf.hpp"
+#include "gnss_bringup/sol_stream_log_gate.hpp"   // sol 流状态日志去重
 #include "gnss_bringup/tcp_stream.hpp"
 #include "gnss_core/rtkstat.hpp"                  // parse_llh_solution
 
@@ -121,7 +126,7 @@ public:
     // 不会被认为构造完成——~RtkrcvSupervisorNode() 不会被调用,C++ 只会
     // 自动析构“已经构造完成的成员子对象”。LocalReserver/TcpStream/
     // ProcessSupervisor 都在自己的析构函数里正确 stop()/join() 了各自内部
-    // 的线程,天然安全;但 pid_log_thread_/stat_thread_ 是裸 std::thread
+    // 的线程,天然安全;但 stat_thread_ 是裸 std::thread
     // 成员——一个仍然 joinable 的 std::thread 被析构会直接
     // std::terminate() 干掉整个进程,绕开 main() 里那个专门为了把配置
     // 错误报成一行 RCLCPP_ERROR 而写的 catch(复现:
@@ -130,7 +135,7 @@ public:
     //
     // 这里统一兜底:不变量是“构造函数还可能抛异常的任何一个时间点上,不
     // 存在一个 joinable 的线程成员活到这个对象的生命周期结束之外”——用
-    // try/catch(...) 兜住,先把可能已经起来的两个线程停掉、join 干净,
+    // try/catch(...) 兜住,先把可能已经起来的辅助线程停掉、join 干净,
     // 再原样把异常继续往外抛给 main() 的 catch,而不是依赖“把起线程的语句
     // 挪到最后一行”这种容易被后续改动悄悄破坏的顺序假设。
     try {
@@ -149,16 +154,20 @@ public:
       // (作为 tcpcli)在此期间重新连上并被喂入新鲜的 RTCM 数据,而本节点
       // 随后仍然会因为 sol_port 被占用而中止启动。
       check_sol_port_free();
+      check_binary_resolvable();
       start_local_reservers();
       write_conf();
       start_supervisor();
-      start_pid_logger();
       connect_solution_stream();
       subscribe_uplink_streams();
       start_stat_tailer();
     } catch (...) {
-      stop_pid_logger();
       stop_stat_tailer();
+      // 与析构函数保持同样的停止顺序:subscribe_uplink_streams() 等后续步骤
+      // 抛异常时,supervisor_/sol_stream_ 可能已经在跑,先停掉会回调进成员
+      // 的线程,再让下面的成员析构,避免用到已析构的对象。
+      if (supervisor_) supervisor_->stop();
+      if (sol_stream_) sol_stream_->stop();
       throw;
     }
   }
@@ -167,7 +176,6 @@ public:
   // 自动倒序析构——那样一来这里的顺序意图会散落在类定义的字段排列里,
   // 后来者改一下字段顺序就能悄悄改变停止顺序而不自知。
   ~RtkrcvSupervisorNode() {
-    stop_pid_logger();
     stop_stat_tailer();
     if (supervisor_) supervisor_->stop();
     if (sol_stream_) sol_stream_->stop();
@@ -202,6 +210,9 @@ private:
     conf_.navsys = static_cast<int>(node_->declare_parameter<int>("navsys", conf_.navsys));
     conf_.elmask = node_->declare_parameter<double>("elmask", conf_.elmask);
     conf_.ar_mode = node_->declare_parameter<std::string>("ar_mode", conf_.ar_mode);
+    conf_.base_pos_type = node_->declare_parameter<std::string>("base_pos_type", conf_.base_pos_type);
+    conf_.bds_ar_mode = node_->declare_parameter<std::string>("bds_ar_mode", conf_.bds_ar_mode);
+    conf_.glo_ar_mode = node_->declare_parameter<std::string>("glo_ar_mode", conf_.glo_ar_mode);
 
     run_dir_ = node_->declare_parameter<std::string>("run_dir", "/tmp/rtkrcv_run");
     binary_ = node_->declare_parameter<std::string>("binary", "rtkrcv");
@@ -393,6 +404,47 @@ private:
     }
   }
 
+  // 启动前就确认 binary 能被解析:rtkrcv 没装、或写成了找不到的名字时,
+  // 直接拒绝启动并说清楚,而不是起来之后在监管线程里无限退避重试。
+  void check_binary_resolvable() {
+    const char* path_env = std::getenv("PATH");
+    if (gnss_bringup::resolve_executable(binary_, path_env).empty()) {
+      throw std::invalid_argument(
+          "binary=" + binary_ + " 找不到或不可执行(PATH=" +
+          (path_env ? path_env : "<未设置>") +
+          ")。rtkrcv 需要 RTKLIB-EX 2.5.1,安装方法见 gnss_bringup/README.md「安装 RTKLIB-EX 2.5.1」");
+    }
+  }
+
+  void log_child_exit(const ChildExitInfo& e) {
+    if (e.spawn_failed) {
+      if (!e.will_restart) {
+        RCLCPP_ERROR(node_->get_logger(), "rtkrcv 无法启动:%s(节点正在停止,不再重试)",
+                     e.detail.c_str());
+      } else {
+        RCLCPP_ERROR(node_->get_logger(), "rtkrcv 无法启动:%s;%.1f s 后重试",
+                     e.detail.c_str(), e.next_delay_s);
+      }
+      return;
+    }
+    if (!e.will_restart) {
+      RCLCPP_INFO(node_->get_logger(), "rtkrcv 已随节点停止 pid=%d", e.pid);
+      return;
+    }
+    std::string how = "状态未知";
+    if (e.exited) {
+      how = "code=" + std::to_string(e.exit_code);
+    } else if (e.signaled) {
+      how = "signal=" + std::to_string(e.signal) + "(" + ::strsignal(e.signal) + ")";
+    }
+    const bool crash_loop = e.lifetime_s < crash_loop_life_s_;
+    RCLCPP_WARN(node_->get_logger(), "rtkrcv 退出 pid=%d %s,存活 %.1f s,%.1f s 后重启%s",
+                e.pid, how.c_str(), e.lifetime_s, e.next_delay_s,
+                crash_loop ? "——疑似崩溃循环:检查 run_dir 下的 rtkrcv.conf 与 rtkrcv 版本"
+                             "(需要 RTKLIB-EX 2.5.1;旧版不认 -nc,会打印用法后以 0 退出)"
+                           : "");
+  }
+
   // ---------- Step 4: 起 rtkrcv ----------
   void start_supervisor() {
     ProcessSupervisorConfig scfg;
@@ -404,59 +456,16 @@ private:
     scfg.args = {"-s", "-nc", "-r", "2", "-o", conf_path_};
     for (const auto& a : extra_args_) scfg.args.push_back(a);
 
+    // 两个回调在监管线程上执行:只打日志,不碰 supervisor_ 本身
+    scfg.on_spawn = [this](int pid, const std::string& executable) {
+      RCLCPP_INFO(node_->get_logger(), "rtkrcv 已启动 pid=%d (%s)", pid, executable.c_str());
+    };
+    scfg.on_exit = [this](const ChildExitInfo& e) { log_child_exit(e); };
+
     supervisor_ = std::make_unique<ProcessSupervisor>(scfg);
     supervisor_->start();
     RCLCPP_INFO(node_->get_logger(), "已启动 rtkrcv 监管: binary=%s cwd=%s",
                 binary_.c_str(), run_dir_.c_str());
-  }
-
-  // review round 1 的 Minor(promoted):原来这是构造函数里的一段阻塞轮询
-  // (最多 3s),后果是——1) 节点在 spin() 之前就可能吃满 3s,这段时间
-  // Ctrl-C 没有 executor 在跑,进不了 rclcpp 的信号处理路径;2) 订阅
-  // corrections/raw_obs 的时机被推迟,窗口期内上行发布的差分字节会被
-  // 直接丢弃。改成一个独立的、有界的后台线程,不阻塞构造函数继续往下走,
-  // 只是打一行诊断日志,找不到 pid 也不影响接线。
-  void start_pid_logger() {
-    pid_log_running_.store(true);
-    pid_log_thread_ = std::thread([this] { pid_log_loop(); });
-  }
-
-  void stop_pid_logger() {
-    {
-      std::lock_guard<std::mutex> lk(pid_log_mutex_);
-      pid_log_running_.store(false);
-    }
-    pid_log_cv_.notify_all();
-    if (pid_log_thread_.joinable()) pid_log_thread_.join();
-  }
-
-  void pid_log_loop() {
-    // review round 2 的"也要修"项:与 stat_tail_loop 同样的道理——这是一个
-    // 独立线程,任何逃逸的异常都会 std::terminate() 干掉整个进程,而不是
-    // 简单地放弃这一次打日志。stat_tail_loop 这一轮已经补了 try/catch,
-    // 这里补齐,让两个辅助线程在“绝不能让异常逃出去”这件事上保持对称。
-    try {
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-      for (;;) {
-        const int pid = supervisor_->last_child_pid();
-        if (pid > 0) {
-          RCLCPP_INFO(node_->get_logger(), "rtkrcv spawned pid %d", pid);
-          return;
-        }
-        std::unique_lock<std::mutex> lk(pid_log_mutex_);
-        if (!pid_log_running_.load()) return;
-        if (std::chrono::steady_clock::now() >= deadline) break;
-        pid_log_cv_.wait_for(lk, std::chrono::milliseconds(20),
-                              [this] { return !pid_log_running_.load(); });
-        if (!pid_log_running_.load()) return;
-      }
-      RCLCPP_WARN(node_->get_logger(),
-                  "3s 内未观测到 rtkrcv 子进程 pid,继续接线(supervisor 会持续重试)");
-    } catch (const std::exception& e) {
-      RCLCPP_ERROR(node_->get_logger(), "pid 日志线程出错(已放弃打印 pid): %s", e.what());
-    } catch (...) {
-      // 非 std::exception 派生的异常同样不能让它逃出这个线程。
-    }
   }
 
   // ---------- Step 5: 连解算输出,发布 RtkFix ----------
@@ -481,14 +490,32 @@ private:
           // 触发的终态路径是 eventfd() 分配失败),不会再有任何重连尝试。
           // 这个节点不会自动重启它,也没有健康检查话题,现场只能靠这行
           // 日志发现——必须是 ERROR。
+          // 隧道里 rtkrcv 长时间没有解算输出时,TcpStream 每 sol_idle_timeout_s
+          // 报一次 idle timeout 断开、紧接着一次 connected——不加控制会在
+          // INFO 级别刷一整夜。SolStreamLogGate 只放行第一次 idle 周期,
+          // 安静期内的重复降为 DEBUG(见 sol_stream_log_gate.hpp 的规则)。
+          bool print = true;
+          {
+            std::lock_guard<std::mutex> lk(sol_log_mutex_);
+            print = sol_log_gate_.on_status(connected, detail);
+          }
           if (terminal) {
             RCLCPP_ERROR(node_->get_logger(),
                          "sol stream: %s %s(worker 线程已永久退出,不会再有任何"
                          "重连尝试,需要人工介入/重启节点)",
                          connected ? "connected" : "disconnected", detail.c_str());
+          } else if (print) {
+            const bool idle = !connected && detail == "idle timeout";
+            RCLCPP_INFO(node_->get_logger(), "sol stream: %s %s%s",
+                        connected ? "connected" : "disconnected", detail.c_str(),
+                        idle ? "(rtkrcv 暂无解算输出:隧道内属正常;若在开阔天空下持续"
+                               "如此,检查 base_pos_type 所需的 RTCM 1005/1006、"
+                               "obs_format 与两路上行流。收到下一条解之前不再重复打印"
+                               "空闲重连)"
+                             : "");
           } else {
-            RCLCPP_INFO(node_->get_logger(), "sol stream: %s %s",
-                        connected ? "connected" : "disconnected", detail.c_str());
+            RCLCPP_DEBUG(node_->get_logger(), "sol stream: %s %s",
+                         connected ? "connected" : "disconnected", detail.c_str());
           }
           if (!connected) {
             // review round 1 的 Important 4:rtkrcv 被杀/连接断开时,
@@ -513,6 +540,11 @@ private:
     for (const auto& line : sol_splitter_.feed(d, n)) {
       gnss_core::PosRecord rec;
       if (!gnss_core::parse_llh_solution(line, rec, pos_opts_)) continue;
+
+      {
+        std::lock_guard<std::mutex> lk(sol_log_mutex_);
+        sol_log_gate_.on_solution_line();
+      }
 
       auto msg = to_rtk_fix(rec);
       msg.header.stamp = node_->now();     // 接收时刻;msg.gnss_time 是解算历元,
@@ -658,10 +690,11 @@ private:
   rclcpp::Publisher<gnss_msgs::msg::RawStream>::SharedPtr stat_pub_;
   rclcpp::Subscription<gnss_msgs::msg::RawStream>::SharedPtr corr_sub_, obs_sub_;
 
-  std::thread pid_log_thread_;
-  std::atomic<bool> pid_log_running_{false};
-  std::mutex pid_log_mutex_;
-  std::condition_variable pid_log_cv_;
+  // sol 流状态日志去重闸门。TcpStream 的数据回调(on_solution_bytes,更新
+  // sol_log_gate_)与状态回调(connect_solution_stream 里的那个 lambda)是否
+  // 同线程不做假设,统一加锁。
+  SolStreamLogGate sol_log_gate_;
+  std::mutex sol_log_mutex_;
 
   std::thread stat_thread_;
   std::atomic<bool> stat_running_{false};

@@ -11,8 +11,10 @@
 #include <fstream>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 #include "gnss_bringup/local_reserver.hpp"
 #include "gnss_bringup/process_supervisor.hpp"
 using namespace gnss_bringup;
@@ -55,6 +57,29 @@ std::future<void> stop_async(std::shared_ptr<ProcessSupervisor> s) {
     promise->set_value();
   }).detach();
   return done;
+}
+
+// 记录监管回调。用 shared_ptr 持有:stop_async() 超时的情况下监管对象会比
+// 测试函数活得久,回调捕获裸 this 会变成悬空指针。
+struct Recorder {
+  std::mutex mu;
+  std::vector<int> spawned;
+  std::vector<ChildExitInfo> exits;
+  std::size_t exit_count() {
+    std::lock_guard<std::mutex> lk(mu);
+    return exits.size();
+  }
+};
+
+void attach_recorder(ProcessSupervisorConfig& c, const std::shared_ptr<Recorder>& rec) {
+  c.on_spawn = [rec](int pid, const std::string&) {
+    std::lock_guard<std::mutex> lk(rec->mu);
+    rec->spawned.push_back(pid);
+  };
+  c.on_exit = [rec](const ChildExitInfo& e) {
+    std::lock_guard<std::mutex> lk(rec->mu);
+    rec->exits.push_back(e);
+  };
 }
 }  // namespace
 
@@ -123,31 +148,123 @@ TEST(ProcessSupervisor, StopWithoutStartSpawnsNothing) {
   EXPECT_EQ(s.spawn_count(), 0) << "没 start 过就不该派生任何子进程";
 }
 
-TEST(ProcessSupervisor, MissingBinaryKeepsRetryingAndBacksOff) {
-  // 二进制不存在时,exec 在子进程里失败 → 子进程立刻退出 → 属于崩溃循环。
-  // 要断言的是"确实在重试"且"确实退避了",而不只是"没崩"。
-  //
-  // review round 1 指出的时序缺口:spawn_count_ 在子进程死活揭晓之前就已
-  // 经自增(见 process_supervisor.cpp 里 fork() 成功后的注释),所以
-  // spawn_count()>=2 只能保证"已经分类过一次死亡"(current_delay_ 从初始
-  // 值刚被设成 restart_delay_s),不能保证"已经分类过两次"——旧版本在这里
-  // 只等 spawn_count()>=2 就去读 current_delay_s(),存在一个纯属测试自身
-  // 的、和被测代码时序耦合过紧的窗口,实测约 2.7% 概率读到还没来得及翻倍
-  // 的 0.05,和"崩溃循环没有退避"这个真正的缺陷长得一模一样。改成直接等
-  // 待要断言的那个条件本身成立(current_delay_s() 已经 > restart_delay_s),
-  // 不再依赖 spawn_count 和 current_delay_ 更新之间的相对时序。
+TEST(ProcessSupervisor, BareBinaryNameIsFoundThroughPath) {
+  // 回归:yaml 默认 binary: "rtkrcv" 是裸名字。execv() 不查 PATH,子进程又已经
+  // chdir(cwd),以前会在 cwd 下找这个名字、_exit(127)、无限重启。
+  const std::string full = fake();
+  const std::string dir = full.substr(0, full.rfind('/'));
+  const std::string name = full.substr(full.rfind('/') + 1);
+  const char* old = std::getenv("PATH");
+  const std::string saved = old ? old : "";
+  ::setenv("PATH", (dir + ":" + saved).c_str(), 1);
+
   ProcessSupervisorConfig c = cfg_for("live", 0.05);
-  c.binary = "/nonexistent/rtkrcv";
+  c.binary = name;
   ProcessSupervisor s(c);
   s.start();
-  for (int i = 0; i < 100 && (s.spawn_count() < 2 || s.current_delay_s() <= 0.05); ++i)
+  for (int i = 0; i < 100 && s.spawn_count() < 1; ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  const int pid = s.last_child_pid();
+  const bool alive = pid > 0 && ::kill(pid, 0) == 0;
+  const int spawns = s.spawn_count();
+  s.stop();
+  ::setenv("PATH", saved.c_str(), 1);
+
+  EXPECT_TRUE(alive) << "裸名字必须按 PATH 找到并真正跑起来";
+  EXPECT_EQ(spawns, 1) << "跑起来的 live 子进程不该被反复重启";
+}
+
+TEST(ProcessSupervisor, OnExitReportsExitCodeLifetimeAndNextDelay) {
+  auto rec = std::make_shared<Recorder>();
+  ProcessSupervisorConfig c = cfg_for("die", 0.05);
+  attach_recorder(c, rec);
+  ProcessSupervisor s(c);
+  s.start();
+  for (int i = 0; i < 300 && rec->exit_count() < 2; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  s.stop();
+
+  std::lock_guard<std::mutex> lk(rec->mu);
+  ASSERT_GE(rec->exits.size(), 2u);
+  ASSERT_GE(rec->spawned.size(), 1u);
+  const ChildExitInfo& e = rec->exits[0];
+  EXPECT_FALSE(e.spawn_failed);
+  EXPECT_TRUE(e.exited);
+  EXPECT_EQ(e.exit_code, 1) << "fake_rtkrcv.sh die 以 1 退出";
+  EXPECT_FALSE(e.signaled);
+  EXPECT_EQ(e.pid, rec->spawned[0]);
+  EXPECT_GE(e.lifetime_s, 0.0);
+  EXPECT_LT(e.lifetime_s, 0.5);
+  EXPECT_GT(e.next_delay_s, 0.0);
+  EXPECT_TRUE(e.will_restart);
+  EXPECT_GE(rec->exits[1].next_delay_s, e.next_delay_s) << "崩溃循环里下一次等待不应缩短";
+}
+
+TEST(ProcessSupervisor, OnExitReportsTheKillingSignal) {
+  auto rec = std::make_shared<Recorder>();
+  ProcessSupervisorConfig c = cfg_for("live", 0.05);
+  c.restart_delay_s = 5.0;
+  c.max_restart_delay_s = 5.0;   // 被杀之后的重启等待足够长,stop() 负责打断
+  attach_recorder(c, rec);
+  ProcessSupervisor s(c);
+  s.start();
+  for (int i = 0; i < 100 && s.spawn_count() < 1; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  ASSERT_EQ(::kill(s.last_child_pid(), SIGKILL), 0);
+  for (int i = 0; i < 300 && rec->exit_count() < 1; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  s.stop();
+
+  std::lock_guard<std::mutex> lk(rec->mu);
+  ASSERT_GE(rec->exits.size(), 1u);
+  EXPECT_TRUE(rec->exits[0].signaled);
+  EXPECT_EQ(rec->exits[0].signal, SIGKILL);
+  EXPECT_FALSE(rec->exits[0].exited);
+  EXPECT_TRUE(rec->exits[0].will_restart);
+}
+
+TEST(ProcessSupervisor, MissingBinaryIsReportedWithoutForkingAndBacksOff) {
+  auto rec = std::make_shared<Recorder>();
+  ProcessSupervisorConfig c = cfg_for("live", 0.05);
+  c.binary = "/nonexistent/rtkrcv";
+  attach_recorder(c, rec);
+  ProcessSupervisor s(c);
+  s.start();
+  for (int i = 0; i < 100 && (s.start_failure_count() < 2 || s.current_delay_s() <= 0.05); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  const int failures = s.start_failure_count();
   const int spawns = s.spawn_count();
   const double delay = s.current_delay_s();
   s.stop();
-  EXPECT_GE(spawns, 2) << "必须持续重试";
-  EXPECT_GT(delay, 0.05) << "崩溃循环必须退避";
+
+  EXPECT_GE(failures, 2) << "必须持续重试";
+  EXPECT_EQ(spawns, 0) << "解析不到可执行文件时不该 fork 一个注定 _exit(127) 的子进程";
+  EXPECT_GT(delay, 0.05) << "必须退避";
   EXPECT_LE(delay, 0.4) << "但不得超过 max_restart_delay_s";
+  std::lock_guard<std::mutex> lk(rec->mu);
+  ASSERT_FALSE(rec->exits.empty());
+  EXPECT_TRUE(rec->exits[0].spawn_failed);
+  EXPECT_EQ(rec->exits[0].pid, -1);
+  EXPECT_NE(rec->exits[0].detail.find("/nonexistent/rtkrcv"), std::string::npos) << rec->exits[0].detail;
+}
+
+TEST(ProcessSupervisor, ExitCausedByStopIsReportedAsNotRestarting) {
+  auto rec = std::make_shared<Recorder>();
+  ProcessSupervisorConfig c = cfg_for("live", 0.05);
+  attach_recorder(c, rec);
+  auto s = std::make_shared<ProcessSupervisor>(c);
+  s->start();
+  for (int i = 0; i < 100 && s->spawn_count() < 1; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  auto done = stop_async(s);
+  ASSERT_EQ(done.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+
+  std::lock_guard<std::mutex> lk(rec->mu);
+  ASSERT_EQ(rec->exits.size(), 1u);
+  EXPECT_FALSE(rec->exits[0].will_restart);
 }
 
 TEST(ProcessSupervisor, StartThenImmediateStopNeverHangs) {

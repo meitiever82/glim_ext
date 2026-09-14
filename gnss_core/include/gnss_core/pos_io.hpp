@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <fstream>
+#include <istream>
 #include <set>
 #include <string>
 #include <vector>
@@ -41,6 +42,10 @@ struct PosReadOptions {
 // estimate_lever_arm 这些直接调用 read_pos() 的离线工具会悄悄拿到被
 // 截断的数据自己却毫无察觉。现在两者都会看到异常。
 std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& opt = {});
+
+// 从任意输入流读 .pos(语义与按路径读取相同)。读错误(流上出现 badbit)抛
+// std::runtime_error,绝不把读到一半的结果当成全部返回。
+std::vector<PosRecord> read_pos(std::istream& in, const PosReadOptions& opt = {});
 
 // 写标准 RTKLIB .pos(头 "% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,...,time=GPST|UTC)" + 列名注释 + 14 列数据)。
 // records.stamp 为 UTC unix 秒;time_system=GPST 时写出时间加 leap_seconds。

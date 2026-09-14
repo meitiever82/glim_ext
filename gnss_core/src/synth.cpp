@@ -12,9 +12,7 @@
 
 namespace gnss_core {
 
-std::vector<TrajPose> read_glim_traj(const std::string& path) {
-  std::ifstream in(path);
-  if (!in) throw std::runtime_error("read_glim_traj: cannot open " + path);
+std::vector<TrajPose> read_glim_traj(std::istream& in) {
   std::vector<TrajPose> out;
   std::string line;
   while (std::getline(in, line)) {
@@ -29,8 +27,18 @@ std::vector<TrajPose> read_glim_traj(const std::string& path) {
     p.T_world_imu.translation() = Eigen::Vector3d(x, y, z);
     out.push_back(p);
   }
+  // 与 read_pos 同一个坑:getline 的 sentry 吞掉 underflow() 抛出的 I/O 异常、
+  // 只置 badbit;不检查就会把读到一半的轨迹当成全部返回——estimate_lever_arm
+  // 会拿半条轨迹算出一个看起来正常、实则错误的杆臂。
+  if (in.bad()) throw std::runtime_error("read_glim_traj: I/O error while reading");
   std::stable_sort(out.begin(), out.end(), [](const TrajPose& a, const TrajPose& b) { return a.stamp < b.stamp; });
   return out;
+}
+
+std::vector<TrajPose> read_glim_traj(const std::string& path) {
+  std::ifstream in(path);
+  if (!in) throw std::runtime_error("read_glim_traj: cannot open " + path);
+  return read_glim_traj(in);
 }
 
 bool interpolate_pose(const std::vector<TrajPose>& traj, double t, TrajPose& out) {

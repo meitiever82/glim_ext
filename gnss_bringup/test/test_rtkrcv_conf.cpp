@@ -45,12 +45,12 @@ TEST(RtkrcvConf, SolutionFormatIsHeadlessLlhInGpst) {
 }
 
 TEST(RtkrcvConf, StreamFormatsAreConfigurable) {
-  // P0 未定:板卡原始格式若不是 rtcm3(如 novatel / ublox),只改参数不改代码
+  // P0 未定:板卡原始格式若不是 rtcm3(如 oem4 / ublox),只改参数不改代码
   RtkrcvConfParams p;
-  p.obs_format = "novatel";
+  p.obs_format = "oem4";
   p.corr_format = "rtcm3";
   const auto c = render_rtkrcv_conf(p);
-  EXPECT_TRUE(has_line(c, "inpstr1-format =novatel"));
+  EXPECT_TRUE(has_line(c, "inpstr1-format =oem4"));
   EXPECT_TRUE(has_line(c, "inpstr2-format =rtcm3"));
 }
 
@@ -159,4 +159,77 @@ TEST(RtkrcvConf, WholeNumberElmaskFormatsWithoutDecimal) {
   p.elmask = 15.0;
   const auto c = render_rtkrcv_conf(p);
   EXPECT_TRUE(has_line(c, "pos1-elmask =15"));
+}
+
+TEST(RtkrcvConf, BasePositionComesFromRtcmByDefault) {
+  // 回归(2026-09-14 实测):不写 ant2-postype 时 rtkrcv 默认 llh 0,0,0,
+  // RTK 模式一条解都不输出。
+  const auto c = render_rtkrcv_conf(RtkrcvConfParams{});
+  EXPECT_TRUE(has_line(c, "ant2-postype =rtcm"));
+}
+
+TEST(RtkrcvConf, SinglePointBasePositionIsSelectable) {
+  RtkrcvConfParams p;
+  p.base_pos_type = "single";
+  EXPECT_TRUE(has_line(render_rtkrcv_conf(p), "ant2-postype =single"));
+}
+
+TEST(RtkrcvConf, BasePositionTypesNeedingCoordinatesAreRejected) {
+  RtkrcvConfParams p;
+  p.base_pos_type = "llh";
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+}
+
+TEST(RtkrcvConf, AmbiguityResolutionOptionsArePinnedExplicitly) {
+  // 显式写出 2.5.1 自身的默认值:换 RTKLIB 版本时默认值悄悄变化不会带进来
+  const auto c = render_rtkrcv_conf(RtkrcvConfParams{});
+  EXPECT_TRUE(has_line(c, "pos2-bdsarmode =off"));
+  EXPECT_TRUE(has_line(c, "pos2-gloarmode =fix-and-hold"));
+
+  RtkrcvConfParams p;
+  p.bds_ar_mode = "on";
+  p.glo_ar_mode = "autocal";
+  const auto c2 = render_rtkrcv_conf(p);
+  EXPECT_TRUE(has_line(c2, "pos2-bdsarmode =on"));
+  EXPECT_TRUE(has_line(c2, "pos2-gloarmode =autocal"));
+}
+
+TEST(RtkrcvConf, UnknownEnumValuesAreRejectedInsteadOfSilentlyFallingBack) {
+  // rtkrcv 遇到非法取值只打一行警告、回落到默认值继续跑(实测
+  // pos2-armode =continuouss → fix-and-hold),所以必须在生成 conf 时拒绝
+  const auto expect_rejected = [](RtkrcvConfParams p, const std::string& field) {
+    try {
+      render_rtkrcv_conf(p);
+      ADD_FAILURE() << field << " 的非法取值没有被拒绝";
+    } catch (const std::invalid_argument& e) {
+      EXPECT_EQ(std::string(e.what()).rfind(field + "=", 0), 0u) << e.what();
+    }
+  };
+  RtkrcvConfParams p;
+  p.pos_mode = "kinematicc";   expect_rejected(p, "pos_mode");     p = {};
+  p.ar_mode = "continuouss";   expect_rejected(p, "ar_mode");      p = {};
+  p.obs_format = "novatel";    expect_rejected(p, "obs_format");   p = {};
+  p.corr_format = "rtcm";      expect_rejected(p, "corr_format");  p = {};
+  p.bds_ar_mode = "yes";       expect_rejected(p, "bds_ar_mode");  p = {};
+  p.glo_ar_mode = "hold";      expect_rejected(p, "glo_ar_mode");  p = {};
+  p.base_pos_type = "xyz";     expect_rejected(p, "base_pos_type");
+}
+
+TEST(RtkrcvConf, EveryRtklibEx251PositioningModeIsAccepted) {
+  for (const char* m : {"single", "dgps", "kinematic", "static", "static-start", "movingbase",
+                        "fixed", "ppp-kine", "ppp-static", "ppp-fixed"}) {
+    RtkrcvConfParams p;
+    p.pos_mode = m;
+    EXPECT_NO_THROW(render_rtkrcv_conf(p)) << m;
+  }
+}
+
+TEST(RtkrcvConf, NavsysOutsideTheSystemBitmaskIsRejected) {
+  RtkrcvConfParams p;
+  p.navsys = 0;
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+  p.navsys = 128;
+  EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
+  p.navsys = 127;
+  EXPECT_NO_THROW(render_rtkrcv_conf(p));
 }
