@@ -263,10 +263,12 @@ TEST(PosDecimator, ResetAllowsNextRecordThrough) {
 TEST(PosWriter, WritesHeaderOnceForANewFile) {
   const std::string p = tmp_path("pw_new.pos");
   ::remove(p.c_str());
+  PosRecord second = sample_record();
+  second.stamp += 1.0;   // 与去重不变量(同一个毫秒键至多写一次)无关,这里只想要两条不同的行
   PosWriter w;
   ASSERT_TRUE(w.open(p));
   ASSERT_TRUE(w.write(sample_record()));
-  ASSERT_TRUE(w.write(sample_record()));
+  ASSERT_TRUE(w.write(second));
   w.close();
   // 表头行(以 % 开头)只应出现在文件开头,且数量与 write_pos 一致
   std::ifstream in(p);
@@ -383,10 +385,15 @@ TEST(PosWriter, ReopeningWithAMixOfOverlappingAndNewRecordsOnlyAppendsTheNewOnes
   EXPECT_NEAR(back[3].stamp, d.stamp, 1e-3);
 }
 
-TEST(PosWriter, PartiallyWrittenLastRowFromAPowerCutDoesNotBreakTheResumeCutoff) {
+// bug A(final-fix-report.md 之后的复盘):断电导致最后一行只写了一半、
+// 没有换行结尾。旧实现里 write() 会直接接着这半行继续追加,下一条记录被
+// 物理粘连、连同这半行一起在 read_pos 里读成一整行(损坏的)数据——这个
+// 用例原来从不读回 next,因此从没真正验证过"next 完整无损"这件事,该 bug
+// 一直没被抓到。现在的修复是 open() 发现最后一个字节不是 '\n' 就把这半行
+// 原地截断(discarded_incomplete_line()),因此这里必须实际 read_pos() 回来
+// 核对 a 保留、半行消失、next 完整。
+TEST(PosWriter, PartiallyWrittenLastRowFromAPowerCutIsDiscardedAndNextRecordStaysIntact) {
   // 模拟断电:文件最后一行只写了一部分列(不足 10 列,没有换行结尾)。
-  // parse_llh_solution 本身就会跳过列数不足的行,分界线因此自然落在它之前
-  // 最后一条完整记录上——残缺行既不影响分界线的确定,也不会被就地修复。
   const std::string p = tmp_path("pw_resume_partial.pos");
   ::remove(p.c_str());
   const PosRecord a = sample_record();
@@ -394,25 +401,195 @@ TEST(PosWriter, PartiallyWrittenLastRowFromAPowerCutDoesNotBreakTheResumeCutoff)
     std::ofstream f(p);
     f << pos_header(PosTimeSystem::GPST);
     f << format_pos_record(a, PosTimeSystem::GPST, 18);
-    f << "2026/09/03 10:23:46.000 44.5 90.2";  // 断电:后面的列全部缺失
+    f << "2026/09/03 10:23:46.000 44.5 90.2";  // 断电:后面的列全部缺失,没有换行
   }
 
-  PosRecord overlap = a;                 // <= 分界线(a.stamp),应当被去重
-  PosRecord next = a; next.stamp += 1.0;  // 晚于分界线,应当落盘
+  PosRecord overlap = a;                  // 与文件里的 a 是同一个毫秒键,应当被去重
+  PosRecord next = a; next.stamp += 1.0;  // 新数据,应当落盘
 
   PosWriter w;
   ASSERT_TRUE(w.open(p));
+  EXPECT_TRUE(w.discarded_incomplete_line())
+      << "最后一行没有换行结尾,必须被判定为断电半行并原地丢弃";
   EXPECT_TRUE(w.write(overlap));
   EXPECT_TRUE(w.last_write_was_suppressed())
-      << "分界线必须是最后一条完整记录(a),不能被半行污染成别的值";
+      << "a 是文件里唯一保留下来的完整记录,重发同一个毫秒键必须去重";
   EXPECT_TRUE(w.write(next));
   EXPECT_FALSE(w.last_write_was_suppressed());
   EXPECT_EQ(w.suppressed_duplicate_count(), 1u);
 
+  // 这就是原来这个用例缺的一步:实际读回 next,证明它没有被半行拖累、
+  // 也没有跟半行粘连成一整行损坏数据。
+  const auto back = read_pos(p);
+  ASSERT_EQ(back.size(), 2u) << "a 保留,半行丢弃,next 追加——一共 2 条,不多不少";
+  EXPECT_NEAR(back[0].stamp, a.stamp, 1e-3);
+  EXPECT_NEAR(back[0].lat, a.lat, 1e-8);
+  EXPECT_NEAR(back[1].stamp, next.stamp, 1e-3);
+  EXPECT_NEAR(back[1].lat, next.lat, 1e-8);
+  EXPECT_NEAR(back[1].ratio, next.ratio, 1e-6) << "next 必须完整无损,不能被半行污染";
+
   std::ifstream in(p);
   const std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  EXPECT_NE(all.find("2026/09/03 10:23:46.000 44.5 90.2"), std::string::npos)
-      << "残缺行原样保留,不做就地修复";
+  EXPECT_EQ(all.find("44.5 90.2"), std::string::npos)
+      << "残缺行本身不应该原样留在最终文件里";
+}
+
+// bug A 的另一种表现:cut 不是落在"列数不够"处,而是恰好落在最后一列
+// (ratio)中间——旧实现里,断电前的这一行本身列数是够的,分界线会正常
+// 定到它前一条完整记录上;但 write() 仍然会直接接着这个半行追加,粘连出
+// 的一整行第一部分正好还是能被 parse_llh_solution 解析出来的合法记录,只是
+// ratio 列被下一行日期字符串的数字污染成一个离谱的值(reviewer 复现里是
+// ratio=2026)。新设计从根源上避免这种粘连:open() 直接把半行截掉,后面的
+// 写入永远从一个干净的新行开始。
+TEST(PosWriter, TruncatedLastLineWithCutInsideRatioColumnIsDiscardedOnOpen) {
+  const std::string p = tmp_path("pw_truncate_ratio.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  PosRecord b = a; b.stamp += 1.0; b.ratio = 12.3;   // 这一行断电时只写了一半
+  const std::string b_full = format_pos_record(b, PosTimeSystem::GPST, 18);
+  ASSERT_EQ(b_full.back(), '\n');
+  const std::string b_cut = b_full.substr(0, b_full.size() - 3);  // 砍掉结尾,cut 落在 ratio 列中间
+  ASSERT_NE(b_cut.back(), '\n');
+
+  {
+    std::ofstream f(p);
+    f << pos_header(PosTimeSystem::GPST);
+    f << format_pos_record(a, PosTimeSystem::GPST, 18);  // 断电前已经完整落盘的一行
+    f << b_cut;                                          // 断电:这一行只写了一半,没有换行结尾
+  }
+
+  PosRecord next = a; next.stamp += 2.0;
+  PosWriter w;
+  ASSERT_TRUE(w.open(p));
+  EXPECT_TRUE(w.discarded_incomplete_line())
+      << "b 那一行没有换行结尾,必须被判定为断电半行并原地丢弃";
+  ASSERT_TRUE(w.write(next));
+  EXPECT_FALSE(w.last_write_was_suppressed());
+
+  const auto back = read_pos(p);
+  ASSERT_EQ(back.size(), 2u) << "a 保留,b 的半行丢弃,next 追加——一共 2 条";
+  EXPECT_NEAR(back[0].stamp, a.stamp, 1e-3);
+  EXPECT_NEAR(back[0].ratio, a.ratio, 1e-6);
+  EXPECT_NEAR(back[1].stamp, next.stamp, 1e-3);
+  EXPECT_NEAR(back[1].ratio, next.ratio, 1e-6);
+  for (const auto& r : back) {
+    EXPECT_NE(r.ratio, 2026.0)
+        << "不应该出现旧实现那种被下一行日期数字污染出来的离谱 ratio";
+  }
+}
+
+TEST(PosWriter, DiscardedIncompleteLineIsFalseWhenTheFileEndsCleanly) {
+  const std::string p = tmp_path("pw_clean_reopen.pos");
+  ::remove(p.c_str());
+  { PosWriter w; ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(sample_record())); }
+  PosWriter w;
+  ASSERT_TRUE(w.open(p));
+  EXPECT_FALSE(w.discarded_incomplete_line())
+      << "正常换行结尾的文件不应该被误判成断电半行";
+}
+
+// ---------- bug B:sub-ms stamp 与 .pos 的毫秒分辨率 ----------
+// .pos 只存到毫秒,旧的"stamp <= 文件最后一条(读回来已经是 ms 取整)的
+// 裸浮点 stamp"比较,对亚毫秒级的差异只是运气——reviewer 实测约一半概率
+// 放过本该去重的边界记录。新设计按 format_pos_record 实际会渲染出的整数
+// 毫秒键做精确成员判定,不再有随机性。
+
+TEST(PosWriter, SubMillisecondBoundaryStampsAreDedupedAtTheFilesOwnMillisecondResolution) {
+  const std::string p = tmp_path("pw_resume_subms.pos");
+  ::remove(p.c_str());
+  const double whole = 1788431025.0;   // 整数秒,避免额外的进位干扰计算
+  PosRecord last = sample_record();
+  last.stamp = whole + 0.625;   // 四舍五入到 ms=625,文件里就是 "...:...625"
+  { PosWriter w; ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(last)); }
+
+  PosRecord resend_same_ms = last;
+  resend_same_ms.stamp = whole + 0.6250004;   // lround(625.0004)=625——与文件里那一行同一个毫秒键
+  PosRecord resend_next_ms = last;
+  resend_next_ms.stamp = whole + 0.6259996;   // lround(625.9996)=626——进到下一个毫秒键,是新数据
+
+  PosWriter w;
+  ASSERT_TRUE(w.open(p));
+  EXPECT_TRUE(w.write(resend_same_ms));
+  EXPECT_TRUE(w.last_write_was_suppressed())
+      << "渲染出来仍是 ms=625,与文件里已有的那一行是同一个毫秒键,必须稳定去重";
+  EXPECT_TRUE(w.write(resend_next_ms));
+  EXPECT_FALSE(w.last_write_was_suppressed())
+      << "渲染出来是 ms=626,进到了下一个整毫秒——真正的新数据,必须写盘";
+  EXPECT_EQ(w.suppressed_duplicate_count(), 1u);
+
+  const auto back = read_pos(p);
+  ASSERT_EQ(back.size(), 2u);
+  EXPECT_NEAR(back[0].stamp, whole + 0.625, 5e-4);
+  EXPECT_NEAR(back[1].stamp, whole + 0.626, 5e-4);
+}
+
+// ---------- bug C:补录更早时段的空洞不应该被当成"重叠"整体丢弃 ----------
+
+TEST(PosWriter, BackfillingAnEarlierGapIsWrittenNotSuppressed) {
+  const std::string p = tmp_path("pw_backfill.pos");
+  ::remove(p.c_str());
+  const PosRecord later = sample_record();   // 文件里已有的、更晚的记录
+  { PosWriter w; ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(later)); }
+
+  PosRecord earlier = later;
+  earlier.stamp -= 7200.0;   // 2 小时前的历元——重放一段填补更早时段空洞的 bag
+
+  PosWriter w;
+  ASSERT_TRUE(w.open(p));
+  EXPECT_TRUE(w.write(earlier));
+  EXPECT_FALSE(w.last_write_was_suppressed())
+      << "旧的“<=文件末尾 stamp 就判定重叠”规则会把这条合法的补录数据连同"
+         "“重叠”一起吞掉——现在按精确成员判定,不在集合里就必须写盘";
+  EXPECT_EQ(w.suppressed_duplicate_count(), 0u);
+
+  const auto back = read_pos(p);
+  ASSERT_EQ(back.size(), 2u);
+  EXPECT_NEAR(back[0].stamp, later.stamp, 1e-3);
+  EXPECT_NEAR(back[1].stamp, earlier.stamp, 1e-3)
+      << "补录的记录追加在文件末尾(乱序),但确实落盘了——.pos 逐行解析,"
+         "不要求整体按时间有序";
+}
+
+// ---------- 新去重规则的不变量:同一个毫秒键至多出现一次,包括同一次运行内 ----------
+
+TEST(PosWriter, RestartResendOfIdenticalStampsIsSuppressedWithCorrectCount) {
+  const std::string p = tmp_path("pw_restart_resend.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  PosRecord b = a; b.stamp += 1.0;
+  PosRecord c = a; c.stamp += 2.0;
+  { PosWriter w; ASSERT_TRUE(w.open(p));
+    ASSERT_TRUE(w.write(a)); ASSERT_TRUE(w.write(b)); ASSERT_TRUE(w.write(c)); }
+
+  // 进程重启后原样重放 a/b/c——三条的毫秒键都已经在文件里。
+  PosWriter w;
+  ASSERT_TRUE(w.open(p));
+  EXPECT_TRUE(w.write(a));
+  EXPECT_TRUE(w.write(b));
+  EXPECT_TRUE(w.write(c));
+  EXPECT_TRUE(w.last_write_was_suppressed());
+  EXPECT_EQ(w.suppressed_duplicate_count(), 3u)
+      << "三条全部重放,汇总计数必须精确等于 3,而不是漏计或多计";
+  const auto back = read_pos(p);
+  EXPECT_EQ(back.size(), 3u) << "重放的三条一条也不应该落盘,文件内容不变";
+}
+
+TEST(PosWriter, SameSessionDuplicateStampIsSuppressedWithoutReopening) {
+  const std::string p = tmp_path("pw_samesession_dup.pos");
+  ::remove(p.c_str());
+  PosWriter w;
+  ASSERT_TRUE(w.open(p));
+  ASSERT_TRUE(w.write(sample_record()));
+  EXPECT_FALSE(w.last_write_was_suppressed());
+  EXPECT_TRUE(w.write(sample_record()))   // 同一次运行内,完全相同的 stamp 再写一次
+      << "write() 判定为重复也返回 true,不是 I/O 失败";
+  EXPECT_TRUE(w.last_write_was_suppressed())
+      << "旧设计里分界线只在 open() 时确定一次,同一次运行内的重复完全不受"
+         "保护;新设计里 write() 成功后立刻把键加入集合,同一次运行内的"
+         "重复也会被挡住(不变量:每个毫秒键在整份文件生命周期内至多一次)";
+  EXPECT_EQ(w.suppressed_duplicate_count(), 1u);
+  const auto back = read_pos(p);
+  EXPECT_EQ(back.size(), 1u);
 }
 
 TEST(PosWriter, OutputIsReadableByReadPos) {

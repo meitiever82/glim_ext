@@ -109,6 +109,19 @@ private:
     const gnss_core::PosRecord r = to_pos_record(msg);
     const PosSourceResult res = core_.handle(r, steady_now_s());
 
+    // round 2 复盘的 bug A:与 res.event 正交的一次性标志——这次 handle()
+    // 紧跟着的 open() 在磁盘上原地截掉了一行没有换行结尾的半行(断电/崩溃
+    // 留下的)。这是真正丢了数据(半条记录),必须单独报一句,不能跟下面
+    // kSuppressedDuplicate 的"不是数据丢失"混在一起,也不需要节流——
+    // 每次 open() 至多为 true 一次,不会刷屏。
+    if (res.discarded_incomplete_line) {
+      RCLCPP_ERROR(node_->get_logger(),
+                   "%s: 打开 %s 时发现上一次运行结束在半行(应为断电/崩溃导致最后"
+                   "一行没有写完整换行符),已原地截掉这半行——这半条记录已经丢失"
+                   "(不是重复,不能靠去重找回)",
+                   name_.c_str(), res.path.c_str());
+    }
+
     switch (res.event) {
       case PosSourceEvent::kWritten:
       case PosSourceEvent::kDroppedRateLimit:
@@ -151,16 +164,20 @@ private:
         return;
 
       case PosSourceEvent::kSuppressedDuplicate:
-        // final-fix-wave 第 1 项:这条记录(以及可能更多)与输出文件里已有的
-        // 内容重叠,被静默去重、没有真正落盘——不是错误(bag 重放/进程
-        // 重启重新收到同一段数据/误起了第二个实例的正常现象),但必须报
-        // 一次汇总计数,否则操作人员完全没办法知道发生过这件事。跟
-        // kDroppedBadStamp 一样按累计计数 + THROTTLE,不为区间里的每一条
-        // 都打一行。
+        // final-fix-wave 第 1 项,round 2 复盘后改成精确成员判定:这条记录
+        // 渲染出的毫秒键已经在输出文件里,被静默去重、没有真正落盘——不是
+        // 错误(bag 重放/进程重启重新收到同一段数据/误起了第二个实例/同一
+        // 次运行内的重复,都是正常现象),但必须报一次汇总计数,否则操作
+        // 人员完全没办法知道发生过这件事。跟 kDroppedBadStamp 一样按累计
+        // 计数 + THROTTLE,不为区间里的每一条都打一行。
+        //
+        // 措辞不再说"stamp<=已写过的记录"——那是旧的一维分界线规则;现在
+        // 是精确成员判定,凡是被跳过的都真的是文件里已经原样存在的同一条
+        // 记录(同一个毫秒),"不是数据丢失"这句话因此是准确的。
         if (res.need_log) {
           RCLCPP_WARN_THROTTLE(node_->get_logger(), steady_clock_, 5000,
-                                "%s: %s 已经写过 stamp<=%.3f 的记录,这一条与既有内容"
-                                "重叠,已跳过不重复落盘(累计已跳过 %zu 条;通常是"
+                                "%s: %s 里已经有 stamp=%.3f(同一个毫秒)的记录,这一条"
+                                "是重复,已跳过不重复落盘(累计已跳过 %zu 条;通常是"
                                 "重放/重启接续同一份数据造成的,不是数据丢失)",
                                 name_.c_str(), res.path.c_str(), res.stamp,
                                 res.suppressed_duplicate_count);

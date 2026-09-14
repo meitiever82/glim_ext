@@ -31,11 +31,13 @@ enum class PosSourceEvent {
   kDroppedBadPath,    // pos_path_for 返回空串(防御性分支,理论上不会走到)
   kOpenFailed,        // 本次 open() 失败
   kWriteFailed,       // 本次 write() 失败
-  // final-fix-wave 第 1 项:这条记录的 stamp 落在文件里已有内容的范围内
-  // (bag 重放/进程重启重新收到同一段数据/误起了第二个实例),被
-  // gnss_core::PosWriter 静默去重、没有真正落盘——不是错误,按 need_log
-  // 节流报一次汇总计数(与 kDroppedBadStamp 同一个道理),而不是为区间里
-  // 的每一条都打一行。
+  // final-fix-wave 第 1 项,round 2 复盘后改成精确成员判定:这条记录渲染
+  // 出的毫秒键已经在文件里(bag 重放/进程重启重新收到同一段数据/误起了
+  // 第二个实例/同一次运行内的重复),被 gnss_core::PosWriter 静默去重、
+  // 没有真正落盘——不是错误(而且现在是精确判定,不会像旧的"<=文件末尾
+  // stamp"规则那样连带丢掉合法的补录数据),按 need_log 节流报一次汇总
+  // 计数(与 kDroppedBadStamp 同一个道理),而不是为区间里的每一条都打
+  // 一行。
   kSuppressedDuplicate,
 };
 
@@ -57,6 +59,15 @@ struct PosSourceResult {
   // final-fix-wave 第 1 项:因与文件里已有内容重叠而被去重的记录累计数
   // (自当前文件的 open() 会话以来),kSuppressedDuplicate 事件里用。
   std::size_t suppressed_duplicate_count = 0;
+  // round 2 复盘(final-fix-report.md 之后又发现的 bug A):这一次 handle()
+  // 调用是否恰好紧跟着一次成功的 gnss_core::PosWriter::open(),并且那次
+  // open() 在磁盘上原地截掉了一行没有换行结尾的半行(断电/崩溃留下的)。
+  // 这是真正丢了数据(半条记录),必须与 kSuppressedDuplicate(真正的重复,
+  // 不是丢失)分开报告——因此不是一个独立的 PosSourceEvent,而是搭在
+  // "紧跟着这次 open() 的那一条记录"的结果上的一个正交标志,不管那条记录
+  // 本身的事件是 kWritten/kWriteFailed/kSuppressedDuplicate 哪一种,调用方
+  // 都应该在它为 true 时额外报一次(每次 open() 至多一次)。
+  bool discarded_incomplete_line = false;
 };
 
 // 一路 = 一个 PosDecimator + 一个 PosWriter + 当前路径 + 失败锁存 + 沉默
@@ -130,10 +141,22 @@ public:
       error_logged_for_path_ = false;  // 新路径:上一路径的"只报一次"锁存不该延续到这里
     }
 
-    if (!writer_.is_open() && !writer_.open(current_path_)) {
-      const bool log_it = note_failure(wall_now_s);
-      return make_result(PosSourceEvent::kOpenFailed, log_it, r.stamp);
+    // round 2 复盘的 bug A:open() 打开一个已有文件时,如果最后一行因断电
+    // 没写完整(没有换行结尾),gnss_core::PosWriter::open() 会在磁盘上原地
+    // 截掉那一行,不再信任它——这确实丢了半条记录,必须报一次,不能跟
+    // kSuppressedDuplicate(真正的重复,不是丢失)混在一起节流成同一句话。
+    // 只在紧跟着这次 open() 调用之后才可能为真(discarded_incomplete_line()
+    // 这个标志在 PosWriter::open() 里每次都会重置),不会跨记录重复触发,
+    // 因此不需要额外的锁存/节流。
+    bool freshly_opened = false;
+    if (!writer_.is_open()) {
+      if (!writer_.open(current_path_)) {
+        const bool log_it = note_failure(wall_now_s);
+        return make_result(PosSourceEvent::kOpenFailed, log_it, r.stamp);
+      }
+      freshly_opened = true;
     }
+    const bool discarded_line = freshly_opened && writer_.discarded_incomplete_line();
 
     if (!writer_.write(r)) {
       // write() 失败(典型是磁盘写满导致 flush 失败)之后,底层 ofstream
@@ -143,16 +166,18 @@ public:
       // 记录会重新走 open() 路径,一旦磁盘空间恢复就能自动续上。
       writer_.close();
       const bool log_it = note_failure(wall_now_s);
-      return make_result(PosSourceEvent::kWriteFailed, log_it, r.stamp);
+      auto res = make_result(PosSourceEvent::kWriteFailed, log_it, r.stamp);
+      res.discarded_incomplete_line = discarded_line;
+      return res;
     }
 
     error_logged_for_path_ = false;  // 成功写入:清掉锁存,以后再失败会重新报一次
     last_activity_wall_s_ = wall_now_s;
 
     // final-fix-wave 第 1 项:writer_.write(r) 返回 true 并不一定真的落了
-    // 盘——r.stamp 落在文件里已有内容范围内时,gnss_core::PosWriter 会静默
-    // 去重。这不算失败(is_silent() 该照样把它当"活跃"),但操作人员必须
-    // 知道发生过重叠,否则重放/重启造成的重复行为会完全无声无息。按
+    // 盘——这条记录渲染出的毫秒键如果已经在文件里,gnss_core::PosWriter
+    // 会静默去重。这不算失败(is_silent() 该照样把它当"活跃"),但操作人员
+    // 必须知道发生过重复,否则重放/重启造成的重复行为会完全无声无息。按
     // kDroppedBadStamp 同样的节流方式(need_log 交给调用方),报一次汇总
     // 计数,而不是为区间里的每一条都打一行。
     if (writer_.last_write_was_suppressed()) {
@@ -162,9 +187,12 @@ public:
       res.path = current_path_;
       res.stamp = r.stamp;
       res.suppressed_duplicate_count = writer_.suppressed_duplicate_count();
+      res.discarded_incomplete_line = discarded_line;
       return res;
     }
-    return make_result(PosSourceEvent::kWritten, false, r.stamp);
+    auto res = make_result(PosSourceEvent::kWritten, false, r.stamp);
+    res.discarded_incomplete_line = discarded_line;
+    return res;
   }
 
   // 距离上一次成功写入(或者构造时刻,如果从未成功写过)已经过去了多久

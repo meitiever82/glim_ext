@@ -141,6 +141,38 @@ TEST(PosSourceWriter, ReopeningWithOverlappingRecordsReportsSuppressedDuplicateE
   w.close();
 }
 
+// round 2 复盘(final-fix-report.md 之后又发现的 bug A)引入的
+// discarded_incomplete_line:与 event 正交的一次性标志,验证它能透过
+// PosSourceWriter::handle() 传出来,而且只在紧跟 open() 的那一条记录上
+// 为真,不会跨记录重复触发。gnss_core::PosWriter 自己的截断逻辑在
+// test_pos_io.cpp 里单独覆盖;这里只验证接线没有把这个标志漏传或错传。
+TEST(PosSourceWriter, ReportsDiscardedIncompleteLineOnceRightAfterOpeningAFileWithAPowerCutTail) {
+  const std::string root = tmp_root("psw_discarded_incomplete");
+  const double stamp = 1789208625.0;
+  const std::string path = gnss_bringup::pos_path_for(root, "can", stamp);
+  ASSERT_FALSE(path.empty());
+  std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+  {
+    std::ofstream f(path);
+    f << gnss_core::pos_header(gnss_core::PosTimeSystem::GPST);
+    f << gnss_core::format_pos_record(at(stamp - 5.0), gnss_core::PosTimeSystem::GPST, 18);
+    f << "2026/09/12 10:23:34.000 44.5 90.2";  // 断电:没有换行结尾
+  }
+
+  PosSourceWriter w(root, "can", 1.0, gnss_core::PosTimeSystem::GPST, 18, /*wall_now_s=*/0.0);
+  auto r1 = w.handle(at(stamp), 0.0);
+  EXPECT_EQ(r1.event, PosSourceEvent::kWritten);
+  EXPECT_TRUE(r1.discarded_incomplete_line)
+      << "第一条记录紧跟着这次 open(),必须报一次半行被丢弃";
+
+  auto r2 = w.handle(at(stamp + 1.0), 0.0);
+  EXPECT_EQ(r2.event, PosSourceEvent::kWritten);
+  EXPECT_FALSE(r2.discarded_incomplete_line)
+      << "同一个文件里不应该跨记录重复触发——discarded_incomplete_line 只在"
+         "紧跟 open() 的那一条上为真";
+  w.close();
+}
+
 TEST(PosSourceWriter, SuppressedDuplicateStillCountsAsActivityForSilenceCheck) {
   // 去重不是错误、也不是沉默——这条路仍然在正常工作,只是这一条记录没有
   // 真正落盘,不应该被当成"卡住了"而报沉默告警。

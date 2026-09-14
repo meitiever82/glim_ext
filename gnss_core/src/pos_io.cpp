@@ -6,12 +6,65 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 
 namespace gnss_core {
 
 namespace {
+
+// t(UTC unix 秒,已经按需加过闰秒)→ 整秒 + 毫秒,四舍五入并处理进位。
+// format_pos_record 与 PosWriter 的去重键(record_time_key_ms)共用同一份
+// 取整逻辑——两处一旦出现哪怕最后一位的差异,"这一行在文件里占的那个
+// 毫秒"和"判断重复用的那个毫秒"就不再是同一个东西,去重会出现系统性错位。
+void split_seconds_ms(double t, std::time_t& whole_out, int& ms_out) {
+  double whole = std::floor(t);
+  int ms = static_cast<int>(std::lround((t - whole) * 1000.0));
+  if (ms >= 1000) { ms -= 1000; whole += 1.0; }
+  whole_out = static_cast<std::time_t>(whole);
+  ms_out = ms;
+}
+
+// 一条记录在给定时间系统/闰秒下,渲染进 .pos 里的那个毫秒级时刻——用作
+// PosWriter 的去重键(见 pos_io.hpp 类注释)。跟 format_pos_record 是
+// 同一套换算(经 split_seconds_ms 共用实现)。
+long long record_time_key_ms(const PosRecord& r, PosTimeSystem ts, int leap_seconds) {
+  double t = r.stamp;
+  if (ts == PosTimeSystem::GPST) t += static_cast<double>(leap_seconds);
+  std::time_t whole;
+  int ms;
+  split_seconds_ms(t, whole, ms);
+  return static_cast<long long>(whole) * 1000 + ms;
+}
+
+// bug A(final-fix-report.md 之后的复盘):断电导致文件最后一行没有写完整
+// (没有换行结尾)。原地截断到最后一个 '\n' 之后(找不到则截到空文件)。
+// 返回是否真的发生了截断;ec 非空表示截断尝试本身失败(此时文件未被
+// 改动,调用方不应该报告"丢弃了一行")。
+bool truncate_incomplete_trailing_line(const std::filesystem::path& fp, std::error_code& ec) {
+  ec.clear();
+  std::ifstream in(fp, std::ios::binary | std::ios::ate);
+  if (!in) {
+    ec = std::make_error_code(std::errc::io_error);
+    return false;
+  }
+  const std::streamoff size = in.tellg();
+  if (size <= 0) return false;
+  in.seekg(size - 1);
+  char last = 0;
+  in.get(last);
+  if (last == '\n') return false;   // 最后一行完整,不用截断
+
+  in.seekg(0);
+  const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  in.close();
+  const auto pos_nl = content.find_last_of('\n');
+  const std::uintmax_t new_size = (pos_nl == std::string::npos) ? 0 : static_cast<std::uintmax_t>(pos_nl + 1);
+  std::filesystem::resize_file(fp, new_size, ec);
+  return !ec;
+}
 
 // "YYYY/MM/DD" + "HH:MM:SS.sss" → 按 UTC 日历合成 unix 秒。
 // 用 timegm 而非 mktime:后者受本机 TZ 影响。
@@ -116,11 +169,10 @@ std::string pos_header(PosTimeSystem time_system) {
 std::string format_pos_record(const PosRecord& r, PosTimeSystem time_system, int leap_seconds) {
   double t = r.stamp;
   if (time_system == PosTimeSystem::GPST) t += static_cast<double>(leap_seconds);
-  // 拆成整秒 + 毫秒,毫秒四舍五入并处理进位
-  double whole = std::floor(t);
-  int ms = static_cast<int>(std::lround((t - whole) * 1000.0));
-  if (ms >= 1000) { ms -= 1000; whole += 1.0; }
-  const std::time_t tt = static_cast<std::time_t>(whole);
+  // 拆成整秒 + 毫秒(与 PosWriter 的去重键共用同一份取整/进位逻辑)
+  std::time_t tt;
+  int ms;
+  split_seconds_ms(t, tt, ms);
   std::tm tm{};
   gmtime_r(&tt, &tm);
   char buf[256];
@@ -155,6 +207,12 @@ bool PosWriter::open(const std::string& path) {
   if (!parent.empty()) {
     std::filesystem::create_directories(parent, ec);   // 忽略"已存在";其余失败交给后面的 open 判定
   }
+
+  existing_keys_.clear();
+  last_write_suppressed_ = false;
+  suppressed_duplicate_count_ = 0;
+  discarded_incomplete_line_ = false;
+
   // "新文件"指不存在或存在但长度为 0 —— 用这个判断是否需要写表头,
   // 因此进程重启接续一个已有非空文件时不会再写一遍表头。
   bool is_new = true;
@@ -163,22 +221,30 @@ bool PosWriter::open(const std::string& path) {
     const auto sz = std::filesystem::file_size(fp, size_ec);
     if (!size_ec) is_new = (sz == 0);
   }
-  // final-fix-wave 第 1 项:重新打开一个已存在且非空的文件之前,先确定
-  // 这个文件已经写到哪一秒——否则 write() 没有任何依据判断"这条记录是不是
-  // 已经在文件里了"。复用 read_pos()(不写第二个 .pos 解析器)解析已有
-  // 内容,取最后一条能被成功解析的记录的 stamp 作为分界线;读不出来(理论
-  // 上不该发生,防御性处理)就退化成没有去重保护,好过直接拒绝打开。
-  has_resume_cutoff_ = false;
-  resume_cutoff_ = 0.0;
-  last_write_suppressed_ = false;
-  suppressed_duplicate_count_ = 0;
+
+  // bug A:断电导致最后一行没有换行结尾——视为"这一行从未真正写完",原地
+  // 截掉(见 pos_io.hpp 类注释与 truncate_incomplete_trailing_line)。必须
+  // 在下面收集去重键之前做,否则半行本身或者(旧实现里)被它污染出来的
+  // 错误列会混进 existing_keys_。截完之后文件可能变空(唯一一行本来就是
+  // 残缺的),因此要重新判定一次 is_new。
+  if (!is_new) {
+    std::error_code trunc_ec;
+    if (truncate_incomplete_trailing_line(fp, trunc_ec)) {
+      discarded_incomplete_line_ = true;
+      std::error_code size_ec2;
+      const auto sz2 = std::filesystem::file_size(fp, size_ec2);
+      if (!size_ec2) is_new = (sz2 == 0);
+    }
+  }
+
+  // bug B/C:精确成员判定取代旧的"stamp <= 文件最后一条的 stamp"分界线
+  // (见 pos_io.hpp 类注释)。复用 read_pos()(不写第二个 .pos 解析器)
+  // 解析已有内容,对每一条都按当前 open() 使用的 ts_/leap_ 重新算出它在
+  // .pos 里占的那个毫秒键,塞进 existing_keys_。
   if (!is_new) {
     try {
       const auto existing = read_pos(path, PosReadOptions{leap_, ts_});
-      if (!existing.empty()) {
-        has_resume_cutoff_ = true;
-        resume_cutoff_ = existing.back().stamp;
-      }
+      for (const auto& rec : existing) existing_keys_.insert(record_time_key_ms(rec, ts_, leap_));
     } catch (const std::exception&) {
       // 文件已经确认存在(上面 file_size 没报错),这里失败极不寻常
       // (比如竞态下被删掉)——不让它阻止 open(),只是没有去重保护。
@@ -200,9 +266,11 @@ bool PosWriter::write(const PosRecord& r) {
     last_write_suppressed_ = false;
     return false;
   }
-  if (has_resume_cutoff_ && r.stamp <= resume_cutoff_) {
-    // 与文件里已有内容重叠(bag 重放/进程重启重新收到同一段数据/误起了
-    // 第二个实例)——静默跳过,不算失败:调用方据此报一次汇总计数。
+  const long long key = record_time_key_ms(r, ts_, leap_);
+  if (existing_keys_.count(key) != 0) {
+    // 这个毫秒键已经在文件里(可能来自之前的 open() 会话,也可能是本次
+    // 会话里刚写过)——精确判定为重复,静默跳过,不算失败:调用方据此
+    // 报一次汇总计数。
     last_write_suppressed_ = true;
     ++suppressed_duplicate_count_;
     return true;
@@ -210,7 +278,9 @@ bool PosWriter::write(const PosRecord& r) {
   last_write_suppressed_ = false;
   out_ << format_pos_record(r, ts_, leap_);
   out_.flush();
-  return static_cast<bool>(out_);
+  if (!out_) return false;   // 写失败:不把这个键记为"已存在",好让恢复后的重试能真正写出
+  existing_keys_.insert(key);
+  return true;
 }
 
 void PosWriter::close() {
