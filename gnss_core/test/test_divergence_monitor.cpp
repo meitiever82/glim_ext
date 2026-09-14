@@ -160,3 +160,39 @@ TEST(DivergenceMonitor, NonFiniteDivergenceIsIgnored) {
     EXPECT_EQ(m.window_size(), 1u);
   }
 }
+
+// round3a fix2(N1):fix1 的规则 3 让预热结束后、窗口被剪枝耗尽时掉回 rtkrcv 自报
+// 的回退 σ——生产环境里那通常只有几毫米,连正常的 0.02 m 偏差都会被判"超限",
+// 样本永远进不了窗口,since 永远清不掉,一次早已恢复的故障会被永远误报下去。
+// 本用例:0.5 m 的故障持续到 t=250(足够让窗口被剪枝耗尽),然后恢复到 0.02 m;
+// 断言恢复后 since 会清零,而不是继续误报到 t=600。
+TEST(DivergenceMonitor, RecoversAfterALongFaultInsteadOfLatching) {
+  DivergenceMonitor m(cfg_small());
+  for (int t = 0; t < 20; ++t) m.update(t, 0.02, 0.001);          // 攒出 0.02 m 的基线
+  for (int t = 20; t <= 250; ++t) {
+    const auto s = m.update(t, 0.5, 0.001);
+    ASSERT_TRUE(s.since.has_value()) << "t=" << t;
+    EXPECT_DOUBLE_EQ(*s.since, 20.0) << "t=" << t;
+  }
+  for (int t = 251; t <= 600; ++t) {
+    const auto s = m.update(t, 0.02, 0.001);
+    EXPECT_FALSE(s.since.has_value()) << "t=" << t << ":故障已恢复,不该继续误报";
+  }
+  const auto s = m.update(600.0, 0.02, 0.001);
+  EXPECT_FALSE(s.since.has_value());
+  EXPECT_TRUE(s.empirical);
+  EXPECT_GE(m.window_size(), 10u);
+  EXPECT_NEAR(s.threshold_m, 0.15, 1e-9);
+}
+
+// round3a fix2:窗口被剪枝掉到不够 min_samples,但配对间隔还远小于
+// divergence_window_s(不是真正的数据缺口)时,应该沿用上一次学到的经验基线,
+// 而不是掉回 rtkrcv 自报的回退 σ。
+TEST(DivergenceMonitor, ShortPairingGapKeepsTheLearnedBaseline) {
+  DivergenceMonitor m(cfg_small());
+  for (int t = 0; t < 20; ++t) m.update(t, 0.02, 0.001);   // 基线 0.05(floor)→ 阈值 0.15
+  const auto s = m.update(110.0, 0.02, 0.001);   // 窗口被剪到 9 个样本,但 110-19=91 < 100
+  EXPECT_FALSE(s.since.has_value());
+  EXPECT_TRUE(s.empirical);
+  EXPECT_NEAR(s.threshold_m, 0.15, 1e-9);
+}

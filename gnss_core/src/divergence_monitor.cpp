@@ -16,6 +16,17 @@ DivergenceState DivergenceMonitor::update(double t, std::optional<double> diverg
   // 用 <=(而非严格 <):恰好 window_s_ 秒前的样本已经不算"最近 window_s_ 秒内"。
   while (!window_.empty() && window_.front().first <= t - window_s_) window_.pop_front();
 
+  // fix2 规则 C:重新预热的判定挪到每一拍最前面(配对/未配对/非有限值都要跑),
+  // 只要与上一次真正配对上的时刻隔了一整个窗口,就说明中间是真正的数据缺口
+  // (而不是持续故障——故障或正常数据流期间每秒都有配对样本,gap 恒为一个
+  // tick,不会触发)。重新预热要把 held 的经验基线也清掉,否则马上又会被下面
+  // 的规则 B 捡回来,预热等于白做。幂等:即使连续多拍都满足这个条件也没问题。
+  if (last_paired_t_ && (t - *last_paired_t_) >= window_s_) {
+    warming_up_ = true;
+    baseline_sigma_.reset();
+    since_.reset();
+  }
+
   // 规则 5:非有限值(NaN/inf)一律当作没配上处理——不入窗口、不影响 since、
   // 也不更新 last_paired_t_(下面统一走 !divergence_m 分支)。
   if (divergence_m && !std::isfinite(*divergence_m)) divergence_m.reset();
@@ -23,22 +34,24 @@ DivergenceState DivergenceMonitor::update(double t, std::optional<double> diverg
   DivergenceState s;
   double sigma = 0.0;
   if (window_.size() >= min_samples_ && !window_.empty()) {
+    // 规则 A:窗口够 min_samples 时,σ 是已入窗样本的 RMS(带下限),同时把它
+    // 记成 baseline_sigma_——留着给窗口以后被剪枝耗尽时用(规则 B)。
     double sum_sq = 0.0;
     for (const auto& [ts, d] : window_) sum_sq += d * d;
     sigma = std::max(floor_m_, std::sqrt(sum_sq / static_cast<double>(window_.size())));
+    baseline_sigma_ = sigma;
+    s.empirical = true;
+  } else if (!warming_up_ && baseline_sigma_) {
+    // 规则 B(fix2,修 N1):预热已经结束、窗口却不够 min_samples(被剪枝耗尽)
+    // 时,沿用上一次学到的经验基线,而不是掉回 rtkrcv 自报的回退 σ——回退 σ
+    // 往往只有几毫米,连正常偏差都会被误判成"超限",样本永远进不了窗口,
+    // since 永远清不掉(fix1 之后发现的 N1)。
+    sigma = *baseline_sigma_;
     s.empirical = true;
   } else {
     sigma = std::max(1e-3, fallback_sigma_m);
   }
   s.threshold_m = sigma_mult_ * sigma;
-
-  // 规则 4:只有真正的数据缺口(两次配对样本时刻间隔 >= divergence_window_s)
-  // 才重新预热;持续故障期间每秒都有配对样本,不会触发。nullopt 的 tick 不算
-  // "配对上"、不更新 last_paired_t_。
-  if (divergence_m && last_paired_t_ && (t - *last_paired_t_) >= window_s_) {
-    warming_up_ = true;
-    since_.reset();
-  }
 
   if (!divergence_m) {
     since_.reset();
@@ -68,8 +81,10 @@ DivergenceState DivergenceMonitor::update(double t, std::optional<double> diverg
     window_.emplace_back(t, *divergence_m);
   } else {
     // 规则 3:预热期结束后——超限样本排除在窗口外、不重启计时;不超限则清零
-    // since 并入窗口。不论此刻阈值是经验的还是(窗口被剪枝耗尽后回落到的)
-    // 回退阈值都一样:一次持续的故障不能靠耗尽窗口把自己"学"成新基线。
+    // since 并入窗口。不论此刻阈值来自窗口 RMS 还是 held 的经验基线都一样:
+    // 一次持续的故障、或窗口被剪枝耗尽,都不能靠"学"出新基线来平息计时。
+    // 代价:预热结束后一次真正发生的 610/rtkrcv 偏移变化,会一直被判"超限",
+    // 直到偏移本身消失,或者出现一次数据缺口强制重新预热(规则 4)。
     if (*divergence_m > s.threshold_m) {
       if (!since_) since_ = t;
     } else {
