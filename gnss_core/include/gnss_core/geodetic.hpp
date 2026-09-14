@@ -17,4 +17,7 @@ private:
   std::unique_ptr<GeographicLib::LocalCartesian> impl_;
 };
 
+// 两点间 WGS-84 椭球测地线距离(m),只看水平位置。
+double geodesic_distance_m(double lat1, double lon1, double lat2, double lon2);
+
 }  // namespace gnss_core

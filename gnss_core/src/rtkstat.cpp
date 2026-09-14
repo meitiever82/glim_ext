@@ -66,9 +66,9 @@ bool parse_sat_line(const std::string& line, SatStat& out) {
   return true;
 }
 
-void StatEpochAccumulator::feed(const std::string& line) {
+bool StatEpochAccumulator::feed(const std::string& line) {
   SatStat s;
-  if (!parse_sat_line(line, s)) return;
+  if (!parse_sat_line(line, s)) return false;
 
   if (has_tow_ && s.tow != tow_) {
     // 新历元开始:把已完成的历元挪到 prev_,cur_ 清空。
@@ -80,9 +80,10 @@ void StatEpochAccumulator::feed(const std::string& line) {
   tow_ = s.tow;
   has_tow_ = true;
 
-  if (std::find(seen_.begin(), seen_.end(), s.sat) != seen_.end()) return;   // 第二个频点
+  if (std::find(seen_.begin(), seen_.end(), s.sat) != seen_.end()) return false;   // 第二个频点
   seen_.push_back(s.sat);
   cur_.push_back(std::move(s));
+  return true;
 }
 
 const std::vector<SatStat>& StatEpochAccumulator::epoch() const {

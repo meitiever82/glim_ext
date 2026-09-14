@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
+#include <utility>
 #include <vector>
 #include "gnss_core/geodetic.hpp"
+
+using gnss_core::geodesic_distance_m;
+using gnss_core::LlaToEnu;
 
 TEST(Geodetic, OriginIsZero) {
   gnss_core::LlaToEnu conv(44.5, 90.28, 617.0);
@@ -32,4 +36,19 @@ TEST(Geodetic, ForwardReverseRoundTrip) {
   EXPECT_NEAR(o.x(), 44.5, 1e-9);
   EXPECT_NEAR(o.y(), 90.28, 1e-9);
   EXPECT_NEAR(o.z(), 617.0, 1e-6);
+}
+
+TEST(GeodesicDistance, ZeroForIdenticalPoints) {
+  EXPECT_NEAR(geodesic_distance_m(44.5, 90.28, 44.5, 90.28), 0.0, 1e-9);
+}
+
+TEST(GeodesicDistance, MatchesLocalEnuHorizontalNormForShortBaselines) {
+  // 与既有 LlaToEnu(GeographicLib LocalCartesian)交叉验证:几米的基线上两者应在毫米内一致
+  const double lat0 = 44.5, lon0 = 90.28;
+  LlaToEnu enu(lat0, lon0, 0.0);
+  for (const auto& [dlat, dlon] : {std::pair{0.5 / 111000.0, 0.0}, std::pair{0.0, 1e-5},
+                                   std::pair{2e-5, -3e-5}}) {
+    const Eigen::Vector3d e = enu.forward(lat0 + dlat, lon0 + dlon, 0.0);
+    EXPECT_NEAR(geodesic_distance_m(lat0, lon0, lat0 + dlat, lon0 + dlon), e.head<2>().norm(), 1e-3);
+  }
 }

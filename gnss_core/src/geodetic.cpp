@@ -1,4 +1,5 @@
 #include "gnss_core/geodetic.hpp"
+#include <GeographicLib/Geodesic.hpp>
 #include <GeographicLib/LocalCartesian.hpp>
 
 namespace gnss_core {
@@ -18,6 +19,12 @@ Eigen::Vector3d LlaToEnu::reverse(const Eigen::Vector3d& enu) const {
   double lat, lon, alt;
   impl_->Reverse(enu.x(), enu.y(), enu.z(), lat, lon, alt);
   return {lat, lon, alt};
+}
+
+double geodesic_distance_m(double lat1, double lon1, double lat2, double lon2) {
+  double s12 = 0.0;
+  GeographicLib::Geodesic::WGS84().Inverse(lat1, lon1, lat2, lon2, s12);
+  return s12;
 }
 
 }  // namespace gnss_core

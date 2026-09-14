@@ -26,7 +26,9 @@ bool parse_sat_line(const std::string& line, SatStat& out);
 // 直到新历元收到第一颗星为止 —— 消费者因此不会在历元边界看到空列表闪一下。
 class StatEpochAccumulator {
 public:
-  void feed(const std::string& line);
+  // 解析成功且是该卫星在当前历元的第一个频点时返回 true(即真正被计入 epoch() 的那一行);
+  // 行解析失败,或是同一颗星的第二个及以后的频点,返回 false。
+  bool feed(const std::string& line);
   const std::vector<SatStat>& epoch() const;
   double epoch_tow() const { return tow_; }
   void reset();
