@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -204,6 +205,20 @@ TEST(DiagnosisEngine, CycleSlipsCountedOnArrivalTime) {
   corrections(e, 140.0);
   e.on_solution(140.0, fixed());
   EXPECT_FALSE(has_code(e.tick(140.0), "cycle_slip")) << "30 s 窗口过后不再计数";
+}
+
+TEST(DiagnosisEngine, DualFrequencySlipCountersDoNotAccumulateSpuriousSlips) {   // finding I1
+  auto e = make_engine();
+  for (int t = 100; t <= 140; ++t) {
+    corrections(e, static_cast<double>(t));
+    e.on_solution(static_cast<double>(t), fixed());
+    const double tow = 1000.0 + (t - 100);
+    e.on_stat_line(static_cast<double>(t), sat_line("G05", tow, 1, 60.0, 0.1, 45.0, 1, 1, 0));
+    e.on_stat_line(static_cast<double>(t), sat_line("G05", tow, 2, 60.0, 0.1, 45.0, 1, 0, 0));
+    EXPECT_FALSE(has_code(e.tick(t + 0.5), "cycle_slip"))
+        << "t=" << t << ":L1 的 slipc 从第二个历元起恒为 1,没有真实周跳;"
+        << "L2 是独立频点的独立计数器,不该被 SlipWindow 当成同一颗星的另一次观测";
+  }
 }
 
 TEST(DiagnosisEngine, SatsMinMetricOnlyWhenASolutionExists) {

@@ -29,6 +29,8 @@ struct TickResult {
   DivergenceState divergence;
 };
 
+// 所有方法的 t / now 参数都要求单调不减(调用方的时钟单调递增);不处理时间倒退——
+// 倒退会让新鲜度判断、DivergenceMonitor/EventBook 的迟滞计时等出现未定义的结果。
 class DiagnosisEngine {
 public:
   // cfg 非法时抛 std::invalid_argument

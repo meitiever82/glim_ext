@@ -59,8 +59,12 @@ void DiagnosisEngine::on_device_solution(double t, const SolutionSample& s) {
 void DiagnosisEngine::on_stat_line(double t, const std::string& line) {
   SatStat s;
   if (!parse_sat_line(line, s)) return;
-  stat_epoch_.feed(line);
-  slips_.feed(t, s.sat, s.slipc);   // 周跳窗口按到达时刻计,不用 $SAT 的 tow
+  const bool first = stat_epoch_.feed(line);
+  // RTKLIB 双频(pos1-frequency=l1+l2)每颗星每历元发两行 $SAT,各自带独立的 slipc;
+  // SlipWindow 按卫星号(不分频点)记基准值,喂入非首频的行会把两个频点的计数器当成
+  // 同一个在比较,差值几乎必然非零,导致 cycle_slip 永久误报。只在该行是本历元这颗星
+  // 的第一个频点时才喂 SlipWindow,与 rtk-monitor rtkstat.py 的做法一致。
+  if (first) slips_.feed(t, s.sat, s.slipc);   // 周跳窗口按到达时刻计,不用 $SAT 的 tow
   stat_t_ = t;
 }
 
@@ -102,7 +106,7 @@ TickResult DiagnosisEngine::tick(double now) {
     pos = LatLon{dev->lat, dev->lon};
   }
   std::map<std::string, double> metrics;
-  metrics["divergence_m"] = d.value_or(0.0);
+  metrics["divergence_m"] = out.divergence.divergence_m.value_or(0.0);
   if (sol) metrics["sats_min"] = static_cast<double>(sol->ns);   // 无解时不报,免得峰值被拉成 0
   metrics["corr_gap_s"] = corr_last_t_ ? now - *corr_last_t_ : 0.0;
   out.transitions = events_.update(now, out.result.verdicts, pos, metrics);

@@ -97,6 +97,17 @@ TEST(StatEpochAccumulator, ResetClearsEverything) {
   EXPECT_TRUE(acc.epoch().empty());
 }
 
+TEST(StatEpochAccumulator, FeedReportsOnlyTheFirstFrequencyOfEachSatellite) {
+  StatEpochAccumulator acc;
+  EXPECT_TRUE(acc.feed(sat_line("G05", 302400.0, 1, 42.5, -0.35, 44.0, 1, 0, 0)));
+  EXPECT_FALSE(acc.feed(sat_line("G05", 302400.0, 2, 42.5, -0.90, 38.0, 1, 0, 0)))
+      << "同一颗星的第二个频点";
+  EXPECT_TRUE(acc.feed(sat_line("G07", 302400.0, 1, 31.0, 0.12, 41.0, 1, 0, 0)));
+  EXPECT_FALSE(acc.feed("garbage")) << "非 $SAT 行";
+  EXPECT_TRUE(acc.feed(sat_line("G05", 302401.0, 1, 42.6, -0.30, 44.0, 1, 0, 0)))
+      << "下一个历元的第一个频点";
+}
+
 // ---------- SlipWindow ----------
 
 TEST(SlipWindow, FirstObservationOfSatelliteIsBaselineNotASlip) {
