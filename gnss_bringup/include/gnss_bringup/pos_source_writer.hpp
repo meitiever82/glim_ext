@@ -136,6 +136,32 @@ public:
     return (wall_now_s - last_activity_wall_s_) > timeout_s;
   }
 
+  // round 2 review 的另一个 Important:节点侧原来在 check_silence() 里用
+  // RCLCPP_WARN_THROTTLE(node_->get_logger(), steady_clock_, 5000, ...) 给
+  // 沉默告警节流——那个宏的节流状态是绑定在"调用它的源码行"上的一个进程内
+  // 共享 static,不是绑定在对象上的。pos_writer_node.cpp 里每一路
+  // WrittenSource::check_silence() 执行的是同一行代码,于是 N 路共享同一个
+  // 5 秒节流窗口:reviewer 用三路全部指向死话题、silence_timeout_s=2 复现,
+  // 运行 20 秒 → can 报 1 次、gpchc 报 3 次、rtkrcv 全程 0 次——第三路整场
+  // 不可见,恰恰是沉默检测想防住的那类故障("一个话题名写错/QoS 不匹配/
+  // 驱动没启动的源,唯一能发现它的办法是这个告警")。
+  //
+  // 把"现在是否应该打印沉默告警"做成每个实例自己的纯决策:先判定是否沉默
+  // (复用 is_silent()),再看距离这个实例自己上一次真正打印是否已经过了
+  // kMinReportIntervalS(与失败锁存用的是同一个 5 秒窗口、同一个
+  // wall_now_s 时钟——不用 node 时钟,理由见 note_failure() 的注释:
+  // use_sim_time=true 且没有 /clock 时节点时钟永远停在 0)。
+  bool should_warn_silence(double wall_now_s, double timeout_s) {
+    if (!is_silent(wall_now_s, timeout_s)) return false;
+    const bool cooled_down = !has_logged_silence_ever_ ||
+        (wall_now_s - last_silence_log_wall_s_) >= kMinReportIntervalS;
+    if (cooled_down) {
+      has_logged_silence_ever_ = true;
+      last_silence_log_wall_s_ = wall_now_s;
+    }
+    return cooled_down;
+  }
+
   // 必须在 node(以及它持有的 clock/logger)析构之前调用。
   void close() { writer_.close(); }
 
@@ -191,6 +217,11 @@ private:
 
   double last_activity_wall_s_ = 0.0;
   std::size_t bad_stamp_drop_count_ = 0;
+
+  // should_warn_silence() 的每实例节流状态——修复的核心就是这两个字段
+  // 不再是共享的 static。
+  bool has_logged_silence_ever_ = false;
+  double last_silence_log_wall_s_ = 0.0;
 };
 
 }  // namespace gnss_bringup

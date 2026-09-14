@@ -276,6 +276,49 @@ TEST(PosSourceWriter, DecimatedDropsDoNotCountAsActivityForSilenceCheck) {
 
 // ---------- write() 失败:强制关闭,下一条记录重试 open() ----------
 
+// ---------- 沉默告警节流:必须是每个实例自己的状态,不是共享的 ----------
+// 复现的缺陷:节点侧原来用 RCLCPP_WARN_THROTTLE 给沉默告警节流,那个宏的
+// 节流状态按"调用它的源码行"是进程内共享的 static——同一份代码被三个
+// WrittenSource 实例的 check_silence() 各自调用,却共享同一个 5 秒窗口。
+// 复现记录(reviewer):三路全部指向死话题,silence_timeout_s=2,运行 20
+// 秒 → can 报 1 次、gpchc 报 3 次、rtkrcv 全程 0 次——第三路整场不可见。
+// should_warn_silence() 把这个决策挪到 PosSourceWriter 内部、按实例持有
+// 状态,下面用两个独立实例证明它们不再互相挤占对方的节流窗口。
+
+TEST(PosSourceWriter, ShouldWarnSilenceReturnsFalseWhenNotSilentYet) {
+  PosSourceWriter w("/tmp/psw_silence_gate_unused", "can", 1.0,
+                     gnss_core::PosTimeSystem::GPST, 18, /*wall_now_s=*/0.0);
+  EXPECT_FALSE(w.should_warn_silence(1.0, /*timeout_s=*/2.0))
+      << "还没超过 timeout_s,不应该告警";
+}
+
+TEST(PosSourceWriter, ShouldWarnSilenceWarnsImmediatelyOnFirstTimeoutThenThrottles) {
+  PosSourceWriter w("/tmp/psw_silence_gate_throttle", "can", 1.0,
+                     gnss_core::PosTimeSystem::GPST, 18, /*wall_now_s=*/0.0);
+  EXPECT_TRUE(w.should_warn_silence(3.0, /*timeout_s=*/2.0)) << "第一次超时必须立刻报";
+  EXPECT_FALSE(w.should_warn_silence(3.5, 2.0)) << "0.5 秒后仍在 5 秒节流窗口内,不应重复打印";
+  EXPECT_FALSE(w.should_warn_silence(7.9, 2.0)) << "距上次打印 4.9 秒,还没到 5 秒";
+  EXPECT_TRUE(w.should_warn_silence(8.0, 2.0)) << "距上次打印恰好 5 秒,应该重新打印";
+}
+
+TEST(PosSourceWriter, IndependentInstancesDoNotShareTheSilenceThrottleWindow) {
+  // 这是对复现场景的直接回归:两个独立的源(等价于两个 WrittenSource),
+  // 一个先于另一个进入沉默状态并打印过一次;另一个哪怕紧跟着在同一个
+  // "全局 5 秒窗口"内也进入沉默,若节流状态是共享的 static,第二个源在
+  // 这一刻会被吞掉——should_warn_silence 是每个实例自己的状态,不会发生
+  // 这种事。
+  PosSourceWriter a("/tmp/psw_silence_gate_a", "gpchc", 1.0,
+                     gnss_core::PosTimeSystem::GPST, 18, /*wall_now_s=*/0.0);
+  PosSourceWriter b("/tmp/psw_silence_gate_b", "rtkrcv", 1.0,
+                     gnss_core::PosTimeSystem::GPST, 18, /*wall_now_s=*/0.0);
+
+  EXPECT_TRUE(a.should_warn_silence(3.0, 2.0)) << "源 a 第一次超时,必须报";
+  // 源 b 紧跟着(同一时刻)也第一次超时——如果节流窗口是共享的 static,
+  // 这里会被 a 刚才那次打印的窗口吞掉;应该独立报告。
+  EXPECT_TRUE(b.should_warn_silence(3.1, 2.0))
+      << "源 b 是独立实例,第一次超时也必须报,不能被源 a 的节流窗口吞掉";
+}
+
 TEST(PosSourceWriter, WriteFailureAfterSuccessfulOpenRetriesOpenNextTime) {
   // 用一个真实的、之后被搞坏权限的目录来复现"open 成功、write 失败"这个
   // 场景不方便在单测里做到确定性——这里改为验证一个等价但可确定复现的

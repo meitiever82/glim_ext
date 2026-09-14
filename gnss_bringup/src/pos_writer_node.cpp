@@ -153,12 +153,21 @@ private:
   }
 
   void check_silence() {
-    if (!core_.is_silent(steady_now_s(), silence_timeout_s_)) return;
-    RCLCPP_WARN_THROTTLE(node_->get_logger(), steady_clock_, 5000,
-                          "%s(topic=%s): 已经超过 %.1f 秒没有写出任何一条记录——"
-                          "检查话题名是否配对、驱动是否在跑;订阅固定是 reliable QoS,"
-                          "如果对端发布者是 best_effort,同样会表现为持续沉默",
-                          name_.c_str(), topic_.c_str(), silence_timeout_s_);
+    // round 2 review 后续:这里原来用 RCLCPP_WARN_THROTTLE(…, steady_clock_,
+    // 5000, …) 节流——那个宏的节流状态绑定在"这一行源码"上,是进程内共享
+    // 的 static,不是绑定在这个 WrittenSource 实例上的。本文件里每一路
+    // check_silence() 执行的都是同一行代码,于是 N 路共享同一个 5 秒窗口:
+    // 三路全部指向死话题、silence_timeout_s=2 复现时,20 秒内 can 报 1
+    // 次、gpchc 报 3 次、rtkrcv 全程 0 次——第三路整场不可见。改成调用
+    // core_.should_warn_silence(),把"是否应该现在打印"这个节流决策下放到
+    // PosSourceWriter 自己按实例持有的状态里(见该函数的注释),这里改用
+    // 普通的 RCLCPP_WARN 打印它返回 true 时的这一次。
+    if (!core_.should_warn_silence(steady_now_s(), silence_timeout_s_)) return;
+    RCLCPP_WARN(node_->get_logger(),
+                "%s(topic=%s): 已经超过 %.1f 秒没有写出任何一条记录——"
+                "检查话题名是否配对、驱动是否在跑;订阅固定是 reliable QoS,"
+                "如果对端发布者是 best_effort,同样会表现为持续沉默",
+                name_.c_str(), topic_.c_str(), silence_timeout_s_);
   }
 
   rclcpp::Node* node_;
