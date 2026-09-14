@@ -17,17 +17,47 @@ DiagnosisConfig cfg_small() {
 }
 }  // namespace
 
-TEST(DivergenceMonitor, FallsBackToSolverSigmaUntilTheWindowHasEnoughSamples) {
+// 窗口样本不足(还没有经验基线)时,独立解自报 σ 高于 5 cm 下限就由它决定阈值
+TEST(DivergenceMonitor, CurrentSolverSigmaAboveTheFloorSetsTheThresholdBeforeWarmUp) {
   DivergenceMonitor m(cfg_small());
-  const auto s = m.update(0.0, 0.02, std::hypot(0.011, 0.012));
+  const auto s = m.update(0.0, 0.2, 0.1);
   EXPECT_FALSE(s.empirical);
-  EXPECT_NEAR(s.threshold_m, 3.0 * std::hypot(0.011, 0.012), 1e-12);
-  EXPECT_FALSE(s.since.has_value());
+  EXPECT_NEAR(s.threshold_m, 3.0 * 0.1, 1e-12);
+  EXPECT_FALSE(s.since.has_value()) << "0.2 < 0.3,不算超限(只看下限的话阈值是 0.15,会误判超限)";
 }
 
-TEST(DivergenceMonitor, FallbackSigmaHasAMillimetreFloor) {
+// 既没有经验基线、也没有独立解(自报 σ 传 0)时,阈值就是 5 cm 下限
+TEST(DivergenceMonitor, WithoutBaseOrSolverSigmaTheThresholdIsTheFloor) {
   DivergenceMonitor m(cfg_small());
-  EXPECT_NEAR(m.update(0.0, std::nullopt, 0.0).threshold_m, 3.0 * 1e-3, 1e-12);
+  const auto s = m.update(0.0, std::nullopt, 0.0);
+  EXPECT_FALSE(s.empirical);
+  EXPECT_NEAR(s.threshold_m, 3.0 * 0.05, 1e-12);
+}
+
+// final fix F1:启动/重新预热阶段也有 5 cm 下限——rtkrcv 自报的毫米级 σ 不能把阈值压到
+// 几毫米,否则每次启动都会误报 device_divergence。
+TEST(DivergenceMonitor, FallbackUsesTheFiveCentimetreFloor) {
+  DivergenceMonitor m(cfg_small());
+  const auto s = m.update(0.0, 0.1, 0.001);
+  EXPECT_NEAR(s.threshold_m, 0.15, 1e-9);
+  EXPECT_FALSE(s.since.has_value()) << "0.1 < 0.15,不算超限";
+}
+
+// final fix F1:预热结束后,独立解自报 σ 变大(rtkrcv 掉到 FLOAT/SINGLE)依然要抬高阈值,
+// 不能一直按 FIXED 时学到的经验阈值判定。
+TEST(DivergenceMonitor, CurrentSolverSigmaRaisesTheThresholdEvenAfterWarmUp) {
+  DivergenceMonitor m(cfg_small());
+  for (int t = 0; t < 20; ++t) m.update(t, 0.02, 0.005);   // 经验基线 0.05(下限)→ 阈值 0.15
+  auto s = m.update(20.0, 0.3, 0.2);
+  EXPECT_NEAR(s.threshold_m, 0.6, 1e-9);
+  EXPECT_FALSE(s.since.has_value()) << "0.3 < 0.6,独立解自己只有 20 cm 精度,不算超限";
+
+  // t=20 的 0.3 m 样本在抬高后的阈值 0.6 下不算超限,所以按规则入了窗口;
+  // t=21 的窗口是 20 个 0.02 加 1 个 0.3,RMS = sqrt(0.098/21)。
+  s = m.update(21.0, 0.3, 0.005);
+  EXPECT_NEAR(s.threshold_m, 3.0 * std::sqrt(0.098 / 21.0), 1e-9);
+  ASSERT_TRUE(s.since.has_value());
+  EXPECT_DOUBLE_EQ(*s.since, 21.0);
 }
 
 TEST(DivergenceMonitor, UsesRmsOfTheWindowOnceFull) {
@@ -95,10 +125,11 @@ TEST(DivergenceMonitor, FallbackRegimeStillJudgesAndAdmitsSamples) {
 
 TEST(DivergenceMonitor, RegimeChangeRestartsTheClock) {
   DivergenceMonitor m(cfg_small());
-  for (int i = 0; i < 9; ++i) m.update(i, 0.1, 0.001);   // 9 个,均超回退阈值 0.003
-  m.update(9.0, 0.1, 0.001);                              // 第 10 个,窗口刚好填满,转入 empirical
-  const auto s = m.update(10.0, 1.0, 0.001);
+  for (int i = 0; i < 9; ++i) m.update(i, 0.2, 0.001);   // 9 个,均超预热期阈值 0.15(下限),t=0 起计时
+  m.update(9.0, 0.2, 0.001);                              // 第 10 个,窗口刚好填满,转入 empirical
+  const auto s = m.update(10.0, 1.0, 0.001);              // 经验 σ 0.2 → 阈值 0.6,1.0 超限
   EXPECT_TRUE(s.empirical);
+  EXPECT_NEAR(s.threshold_m, 0.6, 1e-9);
   ASSERT_TRUE(s.since.has_value());
   EXPECT_DOUBLE_EQ(*s.since, 10.0)
       << "由回退模式的旧计时切到 empirical 模式,应重新起算,不能沿用回退阶段的 0.0";
@@ -129,17 +160,18 @@ TEST(DivergenceMonitor, LongPairingGapRestartsWarmUp) {
   for (int t = 0; t < 20; ++t) m.update(t, 0.02, 0.001);
   m.update(200.0, std::nullopt, 0.001);   // 隧道/信号中断:200-19=181 >= window_s(100)
 
-  const auto s1 = m.update(250.0, 0.1, 0.001);   // 250-200 一段时间没配对了,重新预热
+  const auto s1 = m.update(250.0, 0.2, 0.001);   // 250-200 一段时间没配对了,重新预热
+  EXPECT_FALSE(s1.empirical) << "重新预热时 held 的经验基线已清掉";
   ASSERT_TRUE(s1.since.has_value());
   EXPECT_DOUBLE_EQ(*s1.since, 250.0);
   EXPECT_EQ(m.window_size(), 1u)
-      << "重新预热:按回退阈值 0.003 判定(0.1 超限),但样本仍要入窗口";
+      << "重新预热:按下限阈值 0.15 判定(0.2 超限),但样本仍要入窗口";
 
-  for (int t = 251; t <= 259; ++t) m.update(t, 0.1, 0.001);   // 窗口攒到 10(含 t=250 的那个)
-  const auto s2 = m.update(260.0, 0.1, 0.001);
+  for (int t = 251; t <= 259; ++t) m.update(t, 0.2, 0.001);   // 窗口攒到 10(含 t=250 的那个)
+  const auto s2 = m.update(260.0, 0.2, 0.001);
   EXPECT_TRUE(s2.empirical);
   EXPECT_FALSE(s2.since.has_value()) << "预热在这一拍开始时结束,重新起算计时";
-  EXPECT_NEAR(s2.threshold_m, 0.3, 1e-9);   // 基线 0.1 → 阈值 0.3
+  EXPECT_NEAR(s2.threshold_m, 0.6, 1e-9);   // 基线 0.2 → 阈值 0.6
 }
 
 TEST(DivergenceMonitor, NonFiniteDivergenceIsIgnored) {
@@ -190,9 +222,10 @@ TEST(DivergenceMonitor, RecoversAfterALongFaultInsteadOfLatching) {
 // 而不是掉回 rtkrcv 自报的回退 σ。
 TEST(DivergenceMonitor, ShortPairingGapKeepsTheLearnedBaseline) {
   DivergenceMonitor m(cfg_small());
-  for (int t = 0; t < 20; ++t) m.update(t, 0.02, 0.001);   // 基线 0.05(floor)→ 阈值 0.15
-  const auto s = m.update(110.0, 0.02, 0.001);   // 窗口被剪到 9 个样本,但 110-19=91 < 100
-  EXPECT_FALSE(s.since.has_value());
+  // 基线要高于 5 cm 下限,才能和"没有 held 基线、只剩下限"区分开
+  for (int t = 0; t < 20; ++t) m.update(t, 0.2, 0.001);   // 基线 0.2 → 阈值 0.6
+  const auto s = m.update(110.0, 0.5, 0.001);   // 窗口被剪到 9 个样本,但 110-19=91 < 100
+  EXPECT_FALSE(s.since.has_value()) << "0.5 < 0.6;若丢了 held 基线,阈值只剩 0.15,会误判超限";
   EXPECT_TRUE(s.empirical);
-  EXPECT_NEAR(s.threshold_m, 0.15, 1e-9);
+  EXPECT_NEAR(s.threshold_m, 0.6, 1e-9);
 }

@@ -57,8 +57,8 @@ struct DiagnosisConfig {
   double abs_ref_radius_m = 3.0;
   // 以下为本项目新增(rtk-monitor 没有)
   double divergence_window_s = 600.0;       // 经验 σ 的滑动窗口
-  int divergence_min_samples = 60;          // 样本不足时回退到 rtkrcv 自报 σ
-  double divergence_sigma_floor_m = 0.05;   // 经验 σ 下限,两路几乎重合时防误报
+  int divergence_min_samples = 60;          // 窗口样本够这么多才有经验基线(之前是预热期)
+  double divergence_sigma_floor_m = 0.05;   // 阈值 σ 下限,任何时候都生效,两路几乎重合时防误报
   double divergence_pair_max_dt_s = 2.0;    // 两路解到达时刻相差超过此值不配对
   double base_warmup_s = 600.0;             // 基站基线预热时长(取中位数)
 };
