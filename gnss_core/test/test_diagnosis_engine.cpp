@@ -144,6 +144,52 @@ TEST(DiagnosisEngine, DivergenceNeedsHoldAndItsClockResetsWhenPairingIsLost) {  
   EXPECT_DOUBLE_EQ(*r.divergence.since, 113.1);
 }
 
+// final fix F2:两路按历元时刻配对,不按到达时刻。车以 2 m/s 向北行驶,610 每 0.1 s 出一个
+// 历元、到达无延迟;rtkrcv 每秒一个历元、比 610 晚到 0.4 s。按到达时刻配对时,rtkrcv 的
+// 历元 t-0.4 会被拿去跟 610 的最新历元比,车速 × 时间差就成了 ~1 m 的"偏差"。
+TEST(DiagnosisEngine, PairsOnEpochTimeSoMotionIsNotDivergence) {
+  auto e = make_engine();
+  const auto lat_at = [](double epoch) { return 44.5 + (2.0 * (epoch - 100.0)) / 111132.0; };
+  int ticks = 0;
+  for (int k = 0; k <= 700; ++k) {   // t = 100.0 .. 170.0,步长 0.1 s(用整数步避免累积误差)
+    const double t = 100.0 + 0.1 * k;
+    SolutionSample dev = fixed(lat_at(t));
+    dev.epoch_t = t;
+    e.on_device_solution(t, dev);
+    if (k % 10 == 0) corrections(e, t);
+    if (k % 10 == 4) {
+      SolutionSample sol = fixed(lat_at(t - 0.4));
+      sol.epoch_t = t - 0.4;
+      e.on_solution(t, sol);
+    }
+    if (k % 10 == 5) {
+      const auto r = e.tick(t);
+      ++ticks;
+      EXPECT_FALSE(has_code(r, "device_divergence")) << "t=" << t;
+      ASSERT_TRUE(r.divergence.divergence_m.has_value()) << "t=" << t << ":同历元的两路必须配上";
+      EXPECT_LT(*r.divergence.divergence_m, 0.01) << "t=" << t;
+    }
+  }
+  EXPECT_EQ(ticks, 70);
+}
+
+// final fix F2:两路都带历元时刻、但最近的也差 >= 0.5 s 时不配对(也不退回按到达时刻配对)
+TEST(DiagnosisEngine, EpochTimesTooFarApartDoNotPair) {
+  auto e = make_engine();
+  corrections(e, 100.0);
+  SolutionSample dev = fixed(44.5 + 0.5 / 111000.0);
+  dev.epoch_t = 99.5;
+  e.on_device_solution(99.9, dev);
+  dev.epoch_t = 100.5;
+  e.on_device_solution(100.1, dev);
+  SolutionSample sol = fixed();
+  sol.epoch_t = 100.0;
+  e.on_solution(100.0, sol);
+  const auto r = e.tick(100.2);   // 到达时刻只差 0.1 s,按到达时刻本来会配上
+  EXPECT_FALSE(r.divergence.divergence_m.has_value());
+  EXPECT_FALSE(r.divergence.since.has_value());
+}
+
 TEST(DiagnosisEngine, BaseStationShiftFromRtcm1005) {
   DiagnosisConfig cfg;
   cfg.base_warmup_s = 10.0;

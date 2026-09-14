@@ -37,6 +37,10 @@ struct SolutionSample {
   double sdn = 0.0, sde = 0.0;   // m
   double age = 0.0;              // 差分龄期 s
   std::optional<double> ratio;   // AR ratio;源不提供时为空,ambiguity 规则不触发
+  // 该解的历元时刻(UTC unix 秒,不是到达时刻);3b 从 RtkFix.gnss_time(> 0 时)填入。
+  // 两路都带历元时刻时 device_divergence 按历元配对(见 divergence_epoch_max_dt_s),
+  // 否则退回按到达时刻配对(divergence_pair_max_dt_s)。
+  std::optional<double> epoch_t;
 };
 
 struct DiagnosisConfig {
@@ -59,7 +63,8 @@ struct DiagnosisConfig {
   double divergence_window_s = 600.0;       // 经验 σ 的滑动窗口
   int divergence_min_samples = 60;          // 窗口样本够这么多才有经验基线(之前是预热期)
   double divergence_sigma_floor_m = 0.05;   // 阈值 σ 下限,任何时候都生效,两路几乎重合时防误报
-  double divergence_pair_max_dt_s = 2.0;    // 两路解到达时刻相差超过此值不配对
+  double divergence_pair_max_dt_s = 2.0;    // 按到达时刻配对(任一路缺历元时刻)时,到达时刻相差 >= 此值不配对
+  double divergence_epoch_max_dt_s = 0.1;   // 按历元时刻配对时,最近的历元相差超过此值不配对
   double base_warmup_s = 600.0;             // 基站基线预热时长(取中位数)
 };
 

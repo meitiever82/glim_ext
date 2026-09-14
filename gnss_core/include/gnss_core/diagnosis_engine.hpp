@@ -4,8 +4,10 @@
 // gnss_diag_node)负责。语义对应 rtk-monitor main.py 的 _diagnosis_tick 与各 _on_* 回调。
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "gnss_core/base_station_monitor.hpp"
@@ -64,8 +66,10 @@ private:
   std::optional<double> base_offset_m_;
   std::optional<SolutionSample> sol_;
   std::optional<double> sol_t_;
-  std::optional<SolutionSample> dev_;
+  std::optional<SolutionSample> dev_;     // 最新一个 610 解:corr_age 回退与事件位置用
   std::optional<double> dev_t_;
+  // 最近 sol_stale_s 内到达的 610 解 (到达时刻, 解),按历元时刻配对时从中挑历元最近的
+  std::deque<std::pair<double, SolutionSample>> dev_buf_;
   std::optional<double> stat_t_;
 };
 

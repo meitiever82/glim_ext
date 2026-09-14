@@ -276,5 +276,6 @@ TEST(DiagnosisConfigValidation, RejectsNonsenseWithTheFieldName) {
   c.min_sats = -1;              expect_rejected(c, "min_sats");         c = {};
   c.low_el_deg = 91.0;          expect_rejected(c, "low_el_deg");       c = {};
   c.abs_ref_radius_m = 0.1;     expect_rejected(c, "abs_ref_radius_m"); c = {};   // 必须大于 abs_ref_max_m
-  c.divergence_min_samples = 1; expect_rejected(c, "divergence_min_samples");
+  c.divergence_min_samples = 1; expect_rejected(c, "divergence_min_samples"); c = {};
+  c.divergence_epoch_max_dt_s = 0.0; expect_rejected(c, "divergence_epoch_max_dt_s");
 }

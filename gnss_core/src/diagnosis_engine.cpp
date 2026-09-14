@@ -1,6 +1,7 @@
 #include "gnss_core/diagnosis_engine.hpp"
 
 #include <cmath>
+#include <limits>
 #include <map>
 #include <utility>
 
@@ -29,6 +30,10 @@ bool DiagnosisEngine::fresh(const std::optional<double>& t, double now) const {
   return t && now - *t < cfg_.sol_stale_s;
 }
 
+namespace {
+bool has_epoch(const SolutionSample& s) { return s.epoch_t && std::isfinite(*s.epoch_t); }
+}  // namespace
+
 std::vector<BaseUpdate> DiagnosisEngine::on_corrections(double t, const uint8_t* data, size_t len) {
   std::vector<BaseUpdate> out;
   if (len == 0) return out;
@@ -54,6 +59,9 @@ void DiagnosisEngine::on_solution(double t, const SolutionSample& s) {
 void DiagnosisEngine::on_device_solution(double t, const SolutionSample& s) {
   dev_ = s;
   dev_t_ = t;
+  // 在这里也剪一次(与 tick 里的规则相同,时间单调所以结果一致),tick 迟迟不来时缓冲也有界
+  while (!dev_buf_.empty() && !(t - dev_buf_.front().first < cfg_.sol_stale_s)) dev_buf_.pop_front();
+  dev_buf_.emplace_back(t, s);
 }
 
 void DiagnosisEngine::on_stat_line(double t, const std::string& line) {
@@ -85,9 +93,33 @@ TickResult DiagnosisEngine::tick(double now) {
   if (fresh(stat_t_, now)) in.sats = stat_epoch_.epoch();
   in.slip_count_30s = slips_.count(now);
 
+  // 两路配对(final fix F2):按到达时刻配对会把"车速 × 两路延迟差"当成偏差(1.5 m/s、
+  // rtkrcv 比 610 晚 0.4 s 就是 0.6 m),所以两路都带历元时刻时一律按历元配对。
+  while (!dev_buf_.empty() && !(now - dev_buf_.front().first < cfg_.sol_stale_s)) dev_buf_.pop_front();
   std::optional<double> d;
-  if (sol && dev && std::abs(*sol_t_ - *dev_t_) < cfg_.divergence_pair_max_dt_s) {
-    d = geodesic_distance_m(sol->lat, sol->lon, dev->lat, dev->lon);
+  if (sol) {
+    const SolutionSample* partner = nullptr;
+    bool epoch_pairing = false;
+    if (has_epoch(*sol)) {
+      // 1. 独立解有历元时刻、缓冲里至少一个 610 解也有:挑历元最近的那个,相差
+      //    <= divergence_epoch_max_dt_s 才配对;否则本拍不配对(不退回按到达时刻配对)。
+      double best_dt = std::numeric_limits<double>::infinity();
+      for (const auto& [arrival_t, s] : dev_buf_) {
+        if (!has_epoch(s)) continue;
+        epoch_pairing = true;
+        const double dt = std::abs(*s.epoch_t - *sol->epoch_t);
+        if (dt < best_dt) {
+          best_dt = dt;
+          partner = &s;
+        }
+      }
+      if (best_dt > cfg_.divergence_epoch_max_dt_s) partner = nullptr;
+    }
+    // 2. 任一路缺历元时刻:沿用按到达时刻配对(最新的新鲜 610 解)。
+    if (!epoch_pairing && dev && std::abs(*sol_t_ - *dev_t_) < cfg_.divergence_pair_max_dt_s) {
+      partner = &*dev;
+    }
+    if (partner) d = geodesic_distance_m(sol->lat, sol->lon, partner->lat, partner->lon);
   }
   TickResult out;
   out.divergence = divergence_.update(now, d, sol ? std::hypot(sol->sdn, sol->sde) : 0.0);
