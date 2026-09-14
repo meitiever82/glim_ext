@@ -1,43 +1,15 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
-#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
-#include <streambuf>
 #include <string>
 #include "gnss_core/pos_io.hpp"
 #include "gnss_core/pos_io_test_hooks.hpp"
+#include "failing_streambuf.hpp"
 using namespace gnss_core;
-
-namespace {
-// 前 fail_after 个字节正常供给(每次最多 16 字节,确保失败发生在扫描中途),
-// 之后 underflow() 抛 std::ios_base::failure——这正是 basic_filebuf 在真实
-// EIO 时的行为。std::getline 的 sentry 会吞掉这个异常、只置 badbit,不会
-// 重新抛出;被测函数必须自己检查 badbit。不经过任何代码内注入点。
-class FailingStreambuf : public std::streambuf {
-public:
-  FailingStreambuf(std::string data, std::size_t fail_after)
-      : data_(std::move(data)), fail_after_(std::min(fail_after, data_.size())) {}
-
-protected:
-  int_type underflow() override {
-    if (pos_ >= fail_after_) throw std::ios_base::failure("injected EIO");
-    const std::size_t n = std::min<std::size_t>(sizeof(buf_), fail_after_ - pos_);
-    std::copy(data_.data() + pos_, data_.data() + pos_ + n, buf_);
-    pos_ += n;
-    setg(buf_, buf_, buf_ + n);
-    return traits_type::to_int_type(buf_[0]);
-  }
-
-private:
-  std::string data_;
-  std::size_t fail_after_;
-  std::size_t pos_ = 0;
-  char buf_[16];
-};
-}  // namespace
+using gnss_core::test_fixtures::FailingStreambuf;
 
 namespace {
 std::string tmp_path(const char* name) {
