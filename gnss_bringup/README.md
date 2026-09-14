@@ -54,7 +54,7 @@ bash src/glim_ext/setup_workspace.sh
 cd RTKLIB-2.5.1
 # 只要命令行工具:关掉 Qt(系统 Qt6 缺 SerialPort 模块会让配置失败)。
 # 需要 GUI 时去掉最后一个 -D,改传 -DCMAKE_PREFIX_PATH=<带 SerialPort 的 Qt6 目录>。
-cmake --fresh -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+rm -rf build && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
   -DCMAKE_DISABLE_FIND_PACKAGE_QT=TRUE
 cmake --build build -j"$(nproc)"
 sudo cmake --install build
@@ -355,7 +355,8 @@ bash src/glim_ext/gnss_bringup/scripts/record_gnss.sh
 由回归用例持续守护(`test/test_rtkrcv_real_binary.cpp`,未装 rtkrcv 或 libfaketime 时自动跳过;
 `test/test_rtkrcv_node_process.cpp` 用替身二进制):
 
-- `rtkrcv_node` 能按 `PATH` 找到并常驻真实 rtkrcv(`-s -nc -r 2 -o <conf>`),节点 SIGINT 后正常退出
+- `rtkrcv_node` 按 `PATH` 解析 `binary`(用替身二进制验证),解析不到时拒绝启动且不写 conf
+- 真实 rtkrcv 以 `-s -nc -r 2 -o <conf>` 常驻,节点 SIGINT 后正常退出
 - conf 默认写入 `ant2-postype =rtcm`;缺了这一行时真实回放一条解都没有
 - 真实双站 RTCM3 回放(RTKLIB 自带 2005 年 GSI 两站 RINEX 转换而来,基线约 3.3 km):
   节点发布 `RtkFix`(约 100 条,质量为浮点或固定,经纬高与时间落在预期范围)并转发 `.stat`

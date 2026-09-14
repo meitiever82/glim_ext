@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -124,6 +125,13 @@ public:
 
     pid_ = ::fork();
     if (pid_ == 0) {
+      // 子进程第一件事:约定父进程(这里是发起 fork() 的 gtest 主线程)退出/
+      // 被杀时,内核给子进程发 SIGKILL——ctest 超时或测试二进制被 kill -9,
+      // node 和它拉起的 rtkrcv 不能继续跑着占用端口。必须放在 execve() 之前、
+      // 且是异步信号安全调用。PDEATHSIG 在“发起 fork 的线程”退出时触发,
+      // 这里就是 main 线程(NodeProcess 按简报要求在 rclcpp::init 之前构造),
+      // 符合预期。
+      ::prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
       const int fd = ::open(log_path_.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
       if (fd >= 0) {
         ::dup2(fd, STDOUT_FILENO);

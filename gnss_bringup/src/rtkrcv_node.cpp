@@ -163,6 +163,11 @@ public:
       start_stat_tailer();
     } catch (...) {
       stop_stat_tailer();
+      // 与析构函数保持同样的停止顺序:subscribe_uplink_streams() 等后续步骤
+      // 抛异常时,supervisor_/sol_stream_ 可能已经在跑,先停掉会回调进成员
+      // 的线程,再让下面的成员析构,避免用到已析构的对象。
+      if (supervisor_) supervisor_->stop();
+      if (sol_stream_) sol_stream_->stop();
       throw;
     }
   }
@@ -413,8 +418,13 @@ private:
 
   void log_child_exit(const ChildExitInfo& e) {
     if (e.spawn_failed) {
-      RCLCPP_ERROR(node_->get_logger(), "rtkrcv 无法启动:%s;%.1f s 后重试",
-                   e.detail.c_str(), e.next_delay_s);
+      if (!e.will_restart) {
+        RCLCPP_ERROR(node_->get_logger(), "rtkrcv 无法启动:%s(节点正在停止,不再重试)",
+                     e.detail.c_str());
+      } else {
+        RCLCPP_ERROR(node_->get_logger(), "rtkrcv 无法启动:%s;%.1f s 后重试",
+                     e.detail.c_str(), e.next_delay_s);
+      }
       return;
     }
     if (!e.will_restart) {
@@ -498,8 +508,10 @@ private:
             const bool idle = !connected && detail == "idle timeout";
             RCLCPP_INFO(node_->get_logger(), "sol stream: %s %s%s",
                         connected ? "connected" : "disconnected", detail.c_str(),
-                        idle ? "(rtkrcv 暂无解算输出,隧道内属正常;收到下一条解之前"
-                               "不再重复打印空闲重连)"
+                        idle ? "(rtkrcv 暂无解算输出:隧道内属正常;若在开阔天空下持续"
+                               "如此,检查 base_pos_type 所需的 RTCM 1005/1006、"
+                               "obs_format 与两路上行流。收到下一条解之前不再重复打印"
+                               "空闲重连)"
                              : "");
           } else {
             RCLCPP_DEBUG(node_->get_logger(), "sol stream: %s %s",

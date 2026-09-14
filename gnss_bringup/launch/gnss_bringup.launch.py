@@ -16,7 +16,8 @@ def generate_launch_description():
     params = PathJoinSubstitution([FindPackageShare("gnss_bringup"), "config", "gnss_bringup.yaml"])
     return LaunchDescription([
         DeclareLaunchArgument("params_file", default_value=params),
-        # RTKLIB 未装时(见 README 缺口登记)用 enable_rtkrcv:=false 只起桥
+        # RTKLIB 未装时(安装方法见 README「安装 RTKLIB-EX 2.5.1」,已验证/未验证的
+        # 覆盖范围见「已验证 / 未验证项」)用 enable_rtkrcv:=false 只起桥
         DeclareLaunchArgument("enable_rtkrcv", default_value="false"),
         # pos_writer 只依赖 gnss_msgs/RtkFix,不依赖 rtkrcv_node/RTKLIB 本身,
         # 默认随桥一起起来(与 enable_rtkrcv 相反,默认 true)——.pos 落盘是
