@@ -1,6 +1,6 @@
 # gnss_bringup
 
-两个 ROS2 节点,构成 GNSS 数据面的第一段:
+三个 ROS2 节点,构成 GNSS 数据面的第一段:
 
 - **`rtcm_bridge`**——把裸 TCP 字节流(平台差分、板卡原始观测)桥接到 ROS 话题
   (`gnss_msgs/RawStream`)。不做任何解析,支持连接(`listen=false`)或监听
@@ -8,6 +8,40 @@
 - **`rtkrcv_node`**——生成 `rtkrcv.conf`、监管 RTKLIB `rtkrcv` 子进程、把它的
   llh 解算流转成 `gnss_msgs/RtkFix` 发布、把 `$SAT` 状态行原样转发到 `~/stat`
   供后续诊断消费。
+- **`pos_writer`**——订阅 N 路 `gnss_msgs/RtkFix`,每路各自按 1 Hz 抽稀、按
+  UTC 自然日轮转,写成 RTKLIB 兼容的 `.pos` 文本摘要(见下面「`.pos` 输出」
+  一节)。
+
+全量原始流(两路裸流 + 各路 `RtkFix` + `~/stat`)的记录另见「rosbag2 录制」
+一节的 `scripts/record_gnss.sh`。
+
+## 构建(2026-09-12 更新:不再需要 source driver_ws)
+
+**新机器 / 新克隆,第一次 `colcon build` 之前必须先跑一次**:
+
+```bash
+bash src/glim_ext/setup_workspace.sh
+```
+
+这个脚本在 `glim_ws/src/` 下建三个符号链接:`gnss_core`、`gnss_bringup`
+(两者源码正本都在 `src/glim_ext/` 下,colcon 发现了 `glim_ext` 这个包之后不会
+再往它里面递归,所以这两个子包不建链接就永远不会被 colcon 看到),以及
+**`gnss_msgs`**(源码正本在 `driver_ws` 那边的 `finder_ros/drivers/gnss_msgs`,
+默认路径可用 `GNSS_MSGS_SRC` 环境变量覆盖)。三个链接建好之后,**构建
+`glim_ws` 不再需要先 `source driver_ws` 的 overlay**——`gnss_msgs` 的源码已经
+直接链接进本工作区,`colcon build` 会自己编出一份 `install/gnss_msgs`。
+
+> **这个选择的代价,必须显眼地写在这里**:`gnss_msgs` 因此会在两个独立的
+> workspace 里各编一份——`driver_ws` 那边为了 `gnss_chcnav`(即下文
+> `/gnss_cgi610/rtk_fix` 的发布者)也在编它自己的 `gnss_msgs`。这意味着
+> **改过任何 `.msg` 文件之后,`glim_ws` 和 `driver_ws` 两个 workspace 都必须
+> 重新构建**,不能只改一边——否则一边用新的消息结构发布、另一边还在用旧的
+> 消息结构订阅,而 **ROS2 Humble 在这种情况下的表现是 DDS 静默不匹配**:
+> 不报错、不警告、rqt/`ros2 topic info` 看起来一切正常,话题就是收不到任何
+> 数据,现场极难排查。轮 1 给 `RtkFix` 加 `gnss_time` 字段时就正好踩中过这个
+> 场景。**检查清单**:改了 `gnss_msgs/msg/*.msg` 之后,`glim_ws` 和
+> `driver_ws` 都要 `colcon build --packages-select gnss_msgs`(及其下游包)
+> 再重启相关节点,两边缺一不可。
 
 ## 快速开始
 
@@ -20,7 +54,9 @@ ros2 launch gnss_bringup gnss_bringup.launch.py
 `params_file:=<path>` 覆盖整份文件,或 `-p <name>:=<value>` 覆盖单个参数。
 
 `enable_rtkrcv:=false` 只起 `rtcm_bridge`(RTKLIB 未安装、或只想验证桥接这一段时用,
-见下面"不装 RTKLIB 也能跑起来"一节)。
+见下面"不装 RTKLIB 也能跑起来"一节)。`enable_pos_writer:=false` 关掉 `.pos`
+落盘(默认 `true`,与 `enable_rtkrcv` 相反——`pos_writer` 只依赖
+`gnss_msgs/RtkFix`,不依赖 RTKLIB 本身,默认随桥一起起来)。
 
 ## 部署要求(必读):`rtkrcv_node` 必须跑在 systemd + cgroup `KillMode` 下
 
@@ -80,6 +116,44 @@ TCP、不含 NTRIP(参考实现 rtk-monitor 全仓无 NTRIP);待确认的只是�
 | 3 | 板卡原始观测格式(`inpstr1-format`) | 格式错`rtkrcv` 解不出          | `rtcm3`(沿用 rtk-monitor 假定)      | 只改`config/gnss_bringup.yaml` 里 `rtkrcv_node.obs_format`                                       |
 | 4 | 平台差分格式(`inpstr2-format`)     | 同上                             | `rtcm3`                             | 只改`config/gnss_bringup.yaml` 里 `rtkrcv_node.corr_format`                                      |
 
+### 两路裸流:同一个消息类型,靠话题名区分,不是靠类型区分
+
+`rtcm_corrections`(平台差分)与 `raw_obs`(板卡原始观测)是两路**完全独立**的
+数据,但在 ROS 层面用的是**同一个消息类型** `gnss_msgs/RawStream`——`rtcm_bridge`
+本身不解析任何字节,只是把 TCP 字节流原样搬进 ROS 话题,所以两路消息在类型层面
+看起来一模一样。区分它们的**只有话题名**:
+
+- `/gnss/rtcm_corrections`——平台差分修正数据。
+- `/gnss/raw_obs`——板卡自己的原始观测数据。
+
+两路的实际编码格式(是不是 RTCM3、还是别的格式)不体现在 `RawStream` 类型里,
+而是由下游 `rtkrcv_node` 的两个参数分别声明:`corr_format` 对应
+`rtcm_corrections`,`obs_format` 对应 `raw_obs`(见上面现场待确认表的第 3、4
+项)。订阅这两个话题时,**不要指望消息内容本身能告诉你这是哪一路**——永远按
+话题名区分,`rtcm_bridge` 也永远不会把两路弄混(每一路在配置里各自绑定固定的
+`topic`)。
+
+### 只有原始观测、没有差分时怎么配
+
+如果现场只接上了板卡原始观测、平台差分还没到位,可以只起 `raw_obs` 这一路
+(已实测):
+
+```yaml
+rtcm_bridge:
+  ros__parameters:
+    streams: ["raw_obs"]
+    # 只保留 raw_obs 这一段配置,删掉 rtcm_corrections 那一段
+```
+
+这条链路是**通的**:`rtkrcv` 在没有差分修正的情况下依然会解算并输出结果,但
+**只能是单点解**(RTKLIB `Q=5` → `gnss_msgs/RtkFix` 里归一化成
+`QUALITY_SINGLE`)。约束模块(定位/建图侧消费 `RtkFix` 的模块,例如
+`config_rtk_odometry.json`/`config_rtk_global.json` 里的 GNSS 约束)默认的
+`min_quality` 会把 `QUALITY_SINGLE` 整体拒掉——**这是设计意图,不是故障**:
+链路能跑通、`RtkFix` 也在正常发布,只是不会产生任何 GNSS 约束。如果现场确实
+只有单点解能用、又想让约束生效,需要现场评估精度后主动调低对应约束模块的
+`min_quality`,而不是当成这里的 bug 来排查。
+
 ## 参数说明
 
 `config/gnss_bringup.yaml` 里的大部分参数名直接对应 RTKLIB 的 conf 键
@@ -106,6 +180,66 @@ TCP、不含 NTRIP(参考实现 rtk-monitor 全仓无 NTRIP);待确认的只是�
 
 完整参数表见 `config/gnss_bringup.yaml` 里的注释——文件本身就是文档,每个参数
 旁边都带着来源(哪个节点声明、默认值多少)。
+
+`pos_writer` 是独立进程,不会自动读取 `rtkrcv_node` 的任何参数,即使参数名字
+相同(比如 `leap_seconds`)也要在 `pos_writer` 自己的段里重复声明一遍——两边
+分别改动、忘了同步是这类"看起来一份配置、实际两份"参数最容易踩的坑。
+
+## `.pos` 输出:目录布局、轮转与沉默检测
+
+`pos_writer` 把每一路 `gnss_msgs/RtkFix` 按 1 Hz(`period_s`,spec §5.3)抽稀,
+写成 RTKLIB 兼容的 `.pos` 文本摘要,供人工检查或轻量级下游工具使用——它不是
+全量数据,全量原始流的记录见下面「rosbag2 录制」一节。
+
+**目录布局**:`<root>/YYYYMMDD/<source>.pos`。`<root>` 是 `pos_writer.root`
+参数(必须非空、必须可写),`<source>` 是 `pos_writer.sources` 里声明的每一路
+名字(如 `can`/`gpchc`/`rtkrcv`),`YYYYMMDD` 按 **UTC** 自然日、在 **UTC 零点**
+换文件——依据的是**每条记录自己的时间戳**(`gnss_time`,缺失时兜底用
+`header.stamp`),而不是节点启动时刻或墙钟当前时间。这个设计是有意的:**回放
+一份历史 bag 时,写出的 `.pos` 会落在数据本身发生的那个日期目录下**,而不是
+落在回放这个动作发生的今天。
+
+**时间戳合理性闸门**:一条记录如果两个时间字段(`gnss_time`/`header.stamp`)都
+缺失或异常(NaN/inf/接近 0/远超合理范围,合理范围是 2000-01-01 到 2100-01-01
+之间),会被**直接丢弃、不写入、不建目录**,并打印一条节流过的 WARN(不刷屏,
+附带累计丢弃计数),日志会区分具体原因(字段确实缺失,还是字段有值但不像真实
+的 GNSS 时刻)。这是刻意的设计:不这样做的话,坏时间戳会让数据静默落进一个
+`<root>/19700101/` 这种没人会想起来查的目录,比"丢弃并报警"更危险。
+
+**每路独立的沉默检测**:每一路都有一个独立于消息到达的 wall-clock 定时器——
+如果某一路持续 `silence_timeout_s` 秒(默认 10 秒)没有写出任何一条记录,会
+打印一次 WARN。排查时先检查:1)话题名是否与实际发布者匹配(`pos_writer` 订阅
+固定用 `<name>.topic` 参数指定的话题名,拼错/没配对就是持续沉默);2)订阅固定
+是 **reliable QoS**——如果对端发布者是 **best_effort**,`reliable` 订阅根本收不
+到任何消息,现象和"驱动没启动"完全一样,同样表现为持续沉默,容易被误判成
+"对端没在发布"。
+
+## rosbag2 录制:全量原始流
+
+`.pos` 是给人看的 1 Hz 摘要,**全量原始数据的记录与回放直接交给 rosbag2 承担**
+(spec §5.2)——四路数据(两路 `RawStream` 裸流、各路 `RtkFix`、`rtkrcv_node` 的
+`~/stat`)全部上了总线之后,不需要额外的自定义落盘逻辑。
+
+```bash
+source install/setup.bash
+bash src/glim_ext/gnss_bringup/scripts/record_gnss.sh
+```
+
+默认录制:`/gnss/rtcm_corrections`、`/gnss/raw_obs`、`/gnss_cgi610/rtk_fix`、
+`/gnss_cgi610/rtk_fix_gpchc`、`/rtkrcv_node/rtk_fix`、`/rtkrcv_node/stat`
+六路话题,输出到 `$HOME/gnss_bags/gnss_<时间戳>/`(按 `--max-bag-duration` 分卷,
+默认 86400 秒即一天一卷——注意这是"从录制进程启动那一刻起满 N 秒就切卷",不是
+像 `.pos` 那样按 UTC 自然日对齐,两者是不同的机制)。启动时会先检查每个话题是否
+已经在总线上,**不存在只警告、不阻止启动**——录制一个当前还没有发布者的话题是
+合法的,链路上各个节点完全可能按不同顺序、先后起来。输出根目录、话题清单、
+分卷时长、存储后端均可用环境变量覆盖,默认值和用法写在脚本顶部的注释里
+(`GNSS_BAG_ROOT`/`GNSS_BAG_TOPICS`/`GNSS_BAG_MAX_DURATION_S`/`GNSS_BAG_STORAGE`)。
+
+**缺口(spec A6,留给轮 3,这里只记录不实现)**:**rosbag2 本身没有按保留天数
+或磁盘水位自动清理旧 bag 的能力**——这个脚本只管"怎么录",不管"录多了怎么删"。
+长期运行的部署必须由运维自行监控 `GNSS_BAG_ROOT` 所在磁盘的占用,并用外部定时
+任务(cron/systemd timer 之类)手动清理超期的 bag,否则磁盘会被写满。旧 `.pos`
+文件的 gzip 压缩同样不在本轮范围内(见文末「遗留」)。
 
 ## 未验证项
 

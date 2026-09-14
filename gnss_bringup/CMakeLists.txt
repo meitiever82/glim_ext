@@ -112,5 +112,11 @@ endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 
+# record_gnss.sh:rosbag2 录制脚本(spec §5.2),装到 lib/${PROJECT_NAME}
+# 而不是 share,好让 `ros2 run gnss_bringup record_gnss.sh` 可以像
+# rtcm_bridge/rtkrcv_node/pos_writer 一样直接按包名+文件名找到它
+# (`ros2 run` 只在 lib/<package> 下查找可执行文件)。
+install(PROGRAMS scripts/record_gnss.sh DESTINATION lib/${PROJECT_NAME})
+
 ament_export_targets(gnss_bringup-targets HAS_LIBRARY_TARGET)
 ament_package()

@@ -97,3 +97,40 @@ rtkrcv_node:
 
     # 轮询 run_dir 下最新 .stat 文件、发现新增字节并转发的间隔。
     stat_poll_interval_s: 0.2
+
+pos_writer:
+  ros__parameters:
+    # .pos 落盘的根目录,实际文件路径是 "<root>/YYYYMMDD/<source>.pos"
+    # (YYYYMMDD 按 time_system 换算到 UTC 的自然日,午夜零点换文件,与
+    # 下面 rosbag2 分卷的边界是两套不同的机制——见 README「rosbag2 录制」
+    # 一节)。现场部署前请确认这个路径所在磁盘有足够空间且可写。
+    root: "/data/gnss/pos"
+    # 每一路各自独立抽稀、独立轮转、独立写文件;一路失败(打不开/写不进)
+    # 不影响其它路(pos_writer_node.cpp 的设计要求)。这里默认接入三路:
+    # 两路来自 gnss_cgi610(driver_ws 里的 gnss_chcnav 节点,两种协议/接口各
+    # 出一路 RtkFix),一路来自本包自己的 rtkrcv_node。gnss_cgi610 不在本仓
+    # 构建范围内,若现场没有这个节点,对应的两路只会持续"沉默"(见下面
+    # silence_timeout_s 的告警),不会导致 pos_writer 本身启动失败。
+    sources: ["can", "gpchc", "rtkrcv"]
+    # 1 Hz 抽稀周期(spec §5.3)。落盘的是"每 period_s 秒取一条"的摘要,不是
+    # 全量流——全量原始数据由下面的 rosbag2 录制脚本另外负责。
+    period_s: 1.0
+    # 写出到 .pos 文件里的时间列用的时间系统,只接受 "GPST" 或 "UTC"
+    # (拼错/大小写不对会在启动时报错拒绝,不会被悄悄当成默认值——见
+    # pos_writer_params.hpp 里 parse_pos_time_system 的注释)。
+    time_system: "GPST"
+    # GPST-UTC 闰秒偏移,与上面 rtkrcv_node.leap_seconds 同一个值、同样需要
+    # 在 IERS 宣布新闰秒后手动更新;这里单独声明是因为 pos_writer 是独立
+    # 进程,不会自动读取 rtkrcv_node 的参数。
+    leap_seconds: 18
+    # 每一路持续这么多秒没有写出任何一条记录就报警一次(节流,不刷屏)——
+    # 独立于消息到达的 wall-clock 定时检查,能发现"订阅了错话题/QoS 不匹配/
+    # 对端没启动"这类永远不会触发回调的沉默源。默认 10 秒,比 period_s 的
+    # 常见取值(1 秒)宽松一个数量级,不会对正常的 1 Hz 抖动误报。
+    silence_timeout_s: 10.0
+    # 每一路的订阅话题;pos_writer 固定用 reliable QoS 订阅(与 rtkrcv_node
+    # 发布 ~/rtk_fix 用的 QoS 一致),如果对端发布者是 best_effort,同样会
+    # 表现为持续沉默——见上面 silence_timeout_s 的告警文案。
+    can:    { topic: "/gnss_cgi610/rtk_fix" }
+    gpchc:  { topic: "/gnss_cgi610/rtk_fix_gpchc" }
+    rtkrcv: { topic: "/rtkrcv_node/rtk_fix" }
