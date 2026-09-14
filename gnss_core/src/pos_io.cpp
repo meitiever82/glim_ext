@@ -1,4 +1,5 @@
 #include "gnss_core/pos_io.hpp"
+#include "gnss_core/pos_io_test_hooks.hpp"
 #include "gnss_core/rtkstat.hpp"   // parse_llh_solution 在此实现:与 .pos 数据行是同一套列解析
 
 #include <cmath>
@@ -39,31 +40,87 @@ long long record_time_key_ms(const PosRecord& r, PosTimeSystem ts, int leap_seco
   return static_cast<long long>(whole) * 1000 + ms;
 }
 
-// bug A(final-fix-report.md 之后的复盘):断电导致文件最后一行没有写完整
-// (没有换行结尾)。原地截断到最后一个 '\n' 之后(找不到则截到空文件)。
-// 返回是否真的发生了截断;ec 非空表示截断尝试本身失败(此时文件未被
-// 改动,调用方不应该报告"丢弃了一行")。
-bool truncate_incomplete_trailing_line(const std::filesystem::path& fp, std::error_code& ec) {
-  ec.clear();
-  std::ifstream in(fp, std::ios::binary | std::ios::ate);
-  if (!in) {
-    ec = std::make_error_code(std::errc::io_error);
-    return false;
-  }
-  const std::streamoff size = in.tellg();
-  if (size <= 0) return false;
-  in.seekg(size - 1);
+// round 2 review 的 BLOCKING 1/2(final-fix-report.md 之后又发现的问题):
+// 这个函数原来只看"读到的最后一个字节是不是 '\n'",完全没检查那次读取
+// 本身有没有成功——一次瞬时 I/O 错误(EIO)会让 in.get() 失败、last 保持
+// 默认值 0,0 != '\n',于是被误判成"最后一行不完整",接着拿一份实际上
+// 没读到的 content 去算截断点。reviewer 用 LD_PRELOAD 在真实二进制上复现:
+// 一次瞬时 EIO 让 1000 行的文件被截到 1 字节,表头和全部数据行都没了。
+// 另一半(BLOCKING 2):文件只有写权限、没有读权限时(比如 chmod 200),
+// 旧代码里"读失败"和"不需要截断"被同一个 false 返回值混在一起,调用方
+// 分不清,于是当成"不需要截断"继续往下 append,把新记录粘连到还没写完的
+// 半行上——跟完全没做这个截断修复时一模一样的 bug A 又回来了。
+//
+// 现在返回一个三态结果:任何一步(读最后一个字节、读整份内容、真正
+// resize_file)失败,都归为 kFailed——调用方必须把它当成 open() 本身失败
+// (返回 false,不截断、不 append、不抛),绝不能猜"大概不需要截断"就
+// 继续往下走。
+enum class TrailingLineOutcome {
+  kNoTruncationNeeded,  // 文件为空,或者最后一行本来就完整,不用动
+  kTruncated,           // 确认最后一行不完整,已经成功原地截掉
+  kFailed,              // 检查/截断过程本身失败——调用方必须让 open() 直接失败
+};
+
+// 仅供 test_pos_io.cpp 通过 pos_io_test_hooks.hpp 注入;生产环境恒为
+// nullptr,open() 里只多一次判空,不影响任何逐条记录的热路径。
+gnss_core::testing::TrailingLineReadFailureInjector g_trailing_line_read_failure_injector = nullptr;
+
+bool inject_read_failure(const char* step) {
+  return g_trailing_line_read_failure_injector != nullptr && g_trailing_line_read_failure_injector(step);
+}
+
+// 一次截断在“最后一行没写完整”这个前提下,理论上能去掉的字节数不会超过
+// 一行的最坏长度——format_pos_record 的列宽是固定的(日期时间 24 字节 +
+// 13 个定宽数值列),正常情况下远小于这个上限。用一个宽松的常数而不是
+// 精确算出的行宽,一是格式将来略微调整时不用跟着改这里,二是作为纵深
+// 防御:即便"读到的字节数恰好等于文件大小"这个校验也被蒙混过去(比如
+// 某种读错误凑巧返回了等长但错误的数据),截断量一旦远超"一行"的量级,
+// 就说明拿到的 content 根本不可信,拒绝截断远比截掉不该截的东西安全。
+constexpr std::uintmax_t kMaxPlausibleIncompleteLineBytes = 4096;
+
+TrailingLineOutcome truncate_incomplete_trailing_line(const std::filesystem::path& fp) {
+  std::error_code size_ec;
+  const auto file_size = std::filesystem::file_size(fp, size_ec);
+  if (size_ec) return TrailingLineOutcome::kFailed;
+  if (file_size == 0) return TrailingLineOutcome::kNoTruncationNeeded;
+
+  std::ifstream in(fp, std::ios::binary);
+  if (!in) return TrailingLineOutcome::kFailed;   // 比如没有读权限(BLOCKING 2 的 chmod 200 场景)
+
+  in.seekg(static_cast<std::streamoff>(file_size) - 1);
   char last = 0;
   in.get(last);
-  if (last == '\n') return false;   // 最后一行完整,不用截断
+  // 这一步失败(EIO/短读)绝不能被当成"读到了 0",必须立刻当成失败处理——
+  // 这正是 BLOCKING 1 复现命中的那一行。
+  if (!in || inject_read_failure("last_byte")) return TrailingLineOutcome::kFailed;
+  if (last == '\n') return TrailingLineOutcome::kNoTruncationNeeded;   // 最后一行完整,不用截断
 
+  in.clear();
   in.seekg(0);
+  if (!in) return TrailingLineOutcome::kFailed;
   const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const bool stream_had_io_error = in.bad();
   in.close();
+  // 第二道防线,比单看流状态更可靠:istreambuf_iterator 读到 EOF 不会
+  // 设置 failbit,一次真正的中途 I/O 错误未必会体现在流状态上——但读到的
+  // 字节数一定会跟文件大小对不上。两者任一为真都不可信。
+  if (stream_had_io_error || content.size() != static_cast<std::uintmax_t>(file_size) ||
+      inject_read_failure("full_content")) {
+    return TrailingLineOutcome::kFailed;
+  }
+
   const auto pos_nl = content.find_last_of('\n');
+  const std::uintmax_t old_size = static_cast<std::uintmax_t>(file_size);
   const std::uintmax_t new_size = (pos_nl == std::string::npos) ? 0 : static_cast<std::uintmax_t>(pos_nl + 1);
-  std::filesystem::resize_file(fp, new_size, ec);
-  return !ec;
+  if (old_size - new_size > kMaxPlausibleIncompleteLineBytes) {
+    // 算出来的截断量比一整行还大得多——content 不可信,拒绝截断。
+    return TrailingLineOutcome::kFailed;
+  }
+
+  std::error_code trunc_ec;
+  std::filesystem::resize_file(fp, new_size, trunc_ec);
+  if (trunc_ec) return TrailingLineOutcome::kFailed;   // 截断本身失败(比如没有写权限)
+  return TrailingLineOutcome::kTruncated;
 }
 
 // "YYYY/MM/DD" + "HH:MM:SS.sss" → 按 UTC 日历合成 unix 秒。
@@ -87,6 +144,12 @@ bool parse_date_time(const std::string& date, const std::string& time, double& o
 }
 
 }  // namespace
+
+namespace testing {
+void set_trailing_line_read_failure_injector(TrailingLineReadFailureInjector injector) {
+  g_trailing_line_read_failure_injector = injector;
+}
+}  // namespace testing
 
 bool PosDecimator::accept(const PosRecord& r) {
   const long long bin = static_cast<long long>(std::floor(r.stamp / period_));
@@ -226,14 +289,26 @@ bool PosWriter::open(const std::string& path) {
   // 截掉(见 pos_io.hpp 类注释与 truncate_incomplete_trailing_line)。必须
   // 在下面收集去重键之前做,否则半行本身或者(旧实现里)被它污染出来的
   // 错误列会混进 existing_keys_。截完之后文件可能变空(唯一一行本来就是
-  // 残缺的),因此要重新判定一次 is_new。
+  // 残缺的),因此要重新判定一次 is_new——这也是唯一一处"截断后文件变空"
+  // 的地方,漏掉会在下一次 open() 里产出一个没有表头的文件。
+  //
+  // round 2 review 的 BLOCKING 1/2:这一步(读最后一个字节/读整份内容/
+  // 真正 resize_file)只要失败,就必须让 open() 直接失败,绝不能猜"大概
+  // 不需要截断"就继续往下 append——那样会把新记录粘连到还没写完的半行上,
+  // 跟完全没做这个修复时一样。
   if (!is_new) {
-    std::error_code trunc_ec;
-    if (truncate_incomplete_trailing_line(fp, trunc_ec)) {
-      discarded_incomplete_line_ = true;
-      std::error_code size_ec2;
-      const auto sz2 = std::filesystem::file_size(fp, size_ec2);
-      if (!size_ec2) is_new = (sz2 == 0);
+    switch (truncate_incomplete_trailing_line(fp)) {
+      case TrailingLineOutcome::kFailed:
+        return false;
+      case TrailingLineOutcome::kTruncated: {
+        discarded_incomplete_line_ = true;
+        std::error_code size_ec2;
+        const auto sz2 = std::filesystem::file_size(fp, size_ec2);
+        if (!size_ec2) is_new = (sz2 == 0);
+        break;
+      }
+      case TrailingLineOutcome::kNoTruncationNeeded:
+        break;
     }
   }
 

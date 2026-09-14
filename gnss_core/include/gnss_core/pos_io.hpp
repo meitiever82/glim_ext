@@ -95,6 +95,16 @@ std::string format_pos_record(const PosRecord& r, PosTimeSystem time_system, int
 // 这半行一起在 read_pos 里读成一整行错误数据。
 // 注意:两个写者同时打开同一个文件本来就是不支持的误配置——这里的截断
 // 可能会切掉另一个写者尚未写完的那一行,不额外做互斥保护。
+//
+// round 2 review 的 BLOCKING 1/2:判断"最后一行是否完整"本身需要读文件
+// (至少一次、必要时两次),这个读**可能失败**(瞬时 I/O 错误、没有读
+// 权限……)。这一步失败绝不能被当成"读到了正常字节"或者"不需要截断"去
+// 蒙混过关——那样要么会拿一份读坏的内容去算截断点(可能把整个文件截没,
+// 已经复现过),要么会假装不需要截断、直接往下 append,把新记录粘连到
+// 还没写完的半行上(等于让 bug A 复发)。因此:检查/截断过程中的任何失败
+// (读失败、截断本身失败)都会让这次 open() **直接返回 false**——不截断、
+// 不新建 out_、不 append、不抛——调用方按普通的"打开失败"处理,文件在
+// 磁盘上原样不动。
 class PosWriter {
 public:
   PosWriter() = default;
@@ -103,7 +113,9 @@ public:
   PosWriter(const PosWriter&) = delete;
   PosWriter& operator=(const PosWriter&) = delete;
 
-  // 打开(追加模式)。父目录不存在时创建。失败返回 false,不抛。
+  // 打开(追加模式)。父目录不存在时创建。失败返回 false,不抛——包括
+  // 打开一个已有文件时,检查/截断其不完整的末行这一步本身失败的情况
+  // (见上面的类注释);这些情况下文件在磁盘上不会被改动。
   bool open(const std::string& path);
   // 追加一条并 flush —— 崩溃安全的代价是每条一次 flush,1 Hz 下可忽略。
   // 这条记录渲染出的毫秒键如果已经在文件里(见类注释),会被静默去重

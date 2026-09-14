@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
+#include <sys/stat.h>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include "gnss_core/pos_io.hpp"
+#include "gnss_core/pos_io_test_hooks.hpp"
 using namespace gnss_core;
 
 namespace {
@@ -646,4 +648,219 @@ TEST(PosWriter, EachRecordIsFlushedSoACrashKeepsWhatWasWritten) {
   // 不 close,直接从另一个句柄读 —— 没 flush 的话读不到数据行
   const auto back = read_pos(p);
   EXPECT_EQ(back.size(), 1u) << "每条写完必须 flush,否则崩溃会丢掉整个缓冲";
+}
+
+// ---------- round 2 review BLOCKING 1/2:检查/截断不完整末行这一步本身
+// 失败时,open() 必须直接失败,绝不能猜"大概不需要截断"就继续 append ----------
+// reviewer 用 LD_PRELOAD 在真实 pos_writer 二进制上注入了一次瞬时 EIO,
+// 复现出"1000 行的文件被截到 1 字节,表头和全部数据行都没了"——旧代码里
+// in.get() 读最后一个字节失败时,失败被当成"读到了 0",0 != '\n',于是被
+// 误判成"最后一行不完整"再往下走。LD_PRELOAD shim 在 gtest 里很难做到
+// 确定性,这里用 pos_io_test_hooks.hpp 提供的注入点复现同一条代码路径。
+
+namespace {
+std::string read_raw(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+}  // namespace
+
+TEST(PosWriter, InjectedFailureReadingTheLastByteLeavesFileUntouchedAndOpenFails) {
+  const std::string p = tmp_path("pw_inject_lastbyte.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  {
+    std::ofstream f(p);
+    f << pos_header(PosTimeSystem::GPST);
+    f << format_pos_record(a, PosTimeSystem::GPST, 18);   // 完整的一行,末尾有换行符
+  }
+  const std::string original = read_raw(p);
+
+  gnss_core::testing::set_trailing_line_read_failure_injector(
+      [](const char* step) { return std::string(step) == "last_byte"; });
+  PosWriter w;
+  const bool opened = w.open(p);
+  gnss_core::testing::set_trailing_line_read_failure_injector(nullptr);   // 立刻恢复,不污染后面的用例
+
+  EXPECT_FALSE(opened)
+      << "读最后一个字节失败时必须让 open() 直接失败,而不是把失败的读"
+         "当成“最后一行不完整”去做一次基于错误数据的截断";
+  EXPECT_EQ(read_raw(p), original) << "读失败之后文件必须一字节都没被动过";
+}
+
+TEST(PosWriter, InjectedFailureReadingTheFullContentLeavesFileUntouchedAndOpenFails) {
+  const std::string p = tmp_path("pw_inject_fullcontent.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  {
+    std::ofstream f(p);
+    f << pos_header(PosTimeSystem::GPST);
+    f << format_pos_record(a, PosTimeSystem::GPST, 18);
+    f << "2026/09/03 10:23:46.000 44.5 90.2";   // 没有换行结尾,真的需要走到"读整份内容"这一步
+  }
+  const std::string original = read_raw(p);
+
+  gnss_core::testing::set_trailing_line_read_failure_injector(
+      [](const char* step) { return std::string(step) == "full_content"; });
+  PosWriter w;
+  const bool opened = w.open(p);
+  gnss_core::testing::set_trailing_line_read_failure_injector(nullptr);
+
+  EXPECT_FALSE(opened)
+      << "把整份文件读进内存这一步失败时同样必须让 open() 失败——reviewer 的"
+         "复现里,这一步读出的 content 只有极少字节,find_last_of('\\n') 会"
+         "算出一个几乎清空整个文件的错误截断点";
+  EXPECT_EQ(read_raw(p), original)
+      << "读失败之后文件必须一字节都没被动过(不完整的最后一行也不能被截掉)";
+}
+
+TEST(PosWriter, TruncationFailureLeavesFileUntouchedAndOpenFails) {
+  // BLOCKING 2 的原始复现:文件只给 owner 写权限(chmod 200),读不了、
+  // 也就没法先判断最后一行是不是完整——旧代码把"判断失败"和"不需要截断"
+  // 混在一起,于是当成后者继续往下 append,把新记录粘连到还没写完的半行
+  // 上,bug A 又回来了。
+  const std::string p = tmp_path("pw_truncate_denied.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  {
+    std::ofstream f(p);
+    f << pos_header(PosTimeSystem::GPST);
+    f << format_pos_record(a, PosTimeSystem::GPST, 18);
+    f << "2026/09/03 10:23:46.000 44.5 90.2";   // 没有换行结尾
+  }
+  const std::string original = read_raw(p);
+
+  ASSERT_EQ(::chmod(p.c_str(), 0200), 0)
+      << "测试前置条件:只给 owner 写权限——读不了,也就没法判断最后一行是否完整";
+
+  PosWriter w;
+  const bool opened = w.open(p);
+  ::chmod(p.c_str(), 0644);   // 恢复权限,方便下面校验内容、也方便临时文件之后被正常清理
+
+  EXPECT_FALSE(opened)
+      << "判断/截断这一步失败时 open() 必须直接失败,不能假装“不需要截断”"
+         "就继续往下 append";
+  EXPECT_EQ(read_raw(p), original) << "打不开去读/截断时,文件必须一字节都没被动过";
+}
+
+TEST(PosWriter, ResizeFileFailureLeavesFileUntouchedAndOpenFails) {
+  // 与上一个用例不同:这里要单独覆盖"读完全能成功、只是真正 resize_file
+  // 这一步本身失败"的分支——chmod 200 会在更早的 ifstream 打开这一步就
+  // 失败,不会走到 resize_file。chmod 444(只读、没有写权限)则相反:读
+  // 完全没问题,但 POSIX 的 truncate() 要求对文件有写权限,会在这里失败。
+  const std::string p = tmp_path("pw_truncate_readonly.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  {
+    std::ofstream f(p);
+    f << pos_header(PosTimeSystem::GPST);
+    f << format_pos_record(a, PosTimeSystem::GPST, 18);
+    f << "2026/09/03 10:23:46.000 44.5 90.2";   // 没有换行结尾,确实需要走到 resize_file
+  }
+  const std::string original = read_raw(p);
+
+  ASSERT_EQ(::chmod(p.c_str(), 0444), 0) << "测试前置条件:只读,没有写权限——能读完,但 truncate() 会被拒绝";
+
+  PosWriter w;
+  const bool opened = w.open(p);
+  ::chmod(p.c_str(), 0644);   // 恢复权限,方便下面校验内容、也方便临时文件之后被正常清理
+
+  EXPECT_FALSE(opened)
+      << "resize_file() 本身失败(没有写权限)时 open() 必须直接失败";
+  EXPECT_EQ(read_raw(p), original) << "resize_file 失败时文件必须一字节都没被动过";
+}
+
+// ---------- round 2 review:三个当前没有测试守住的 mutant ----------
+
+// (a) 如果 open() 收集去重键时把时间系统写死成 GPST,UTC 的 PosWriter
+// 重启/补录之后就再也认不出文件里已经有哪些记录——此前没有任何一个
+// PosWriter 用例用 UTC 构造过。
+
+TEST(PosWriter, RestartResendIsSuppressedWhenTimeSystemIsUtc) {
+  const std::string p = tmp_path("pw_utc_restart.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  { PosWriter w(PosTimeSystem::UTC, 18); ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(a)); }
+
+  PosWriter w(PosTimeSystem::UTC, 18);
+  ASSERT_TRUE(w.open(p));
+  EXPECT_TRUE(w.write(a));
+  EXPECT_TRUE(w.last_write_was_suppressed())
+      << "mutant:如果去重键的时间系统被写死成 GPST,UTC 的 PosWriter 重启后"
+         "就认不出文件里已经有这条记录了";
+  EXPECT_EQ(w.suppressed_duplicate_count(), 1u);
+}
+
+TEST(PosWriter, BackfillIsWrittenWhenTimeSystemIsUtc) {
+  const std::string p = tmp_path("pw_utc_backfill.pos");
+  ::remove(p.c_str());
+  const PosRecord later = sample_record();
+  { PosWriter w(PosTimeSystem::UTC, 18); ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(later)); }
+
+  PosRecord earlier = later;
+  earlier.stamp -= 7200.0;
+  PosWriter w(PosTimeSystem::UTC, 18);
+  ASSERT_TRUE(w.open(p));
+  EXPECT_TRUE(w.write(earlier));
+  EXPECT_FALSE(w.last_write_was_suppressed());
+  const auto back = read_pos(p);
+  ASSERT_EQ(back.size(), 2u);
+}
+
+// (b) 如果 open() 收集去重键时(或者 read_pos 本身)把闰秒写死成 18,
+// 非 18 闰秒的会话重启后同样认不出已有记录——用一个明显不是 18 的值
+// (37,当前真实的 GPS-UTC 闰秒数)覆盖。
+
+TEST(PosWriter, RestartResendIsSuppressedWithNonDefaultLeapSeconds) {
+  const std::string p = tmp_path("pw_leap37_restart.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  { PosWriter w(PosTimeSystem::GPST, 37); ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(a)); }
+
+  PosWriter w(PosTimeSystem::GPST, 37);
+  ASSERT_TRUE(w.open(p));
+  EXPECT_TRUE(w.write(a));
+  EXPECT_TRUE(w.last_write_was_suppressed())
+      << "mutant:如果去重键计算(或者 open() 传给 read_pos 的 leap_seconds)"
+         "被写死成 18,非 18 闰秒的会话重启后就认不出已有记录";
+  EXPECT_EQ(w.suppressed_duplicate_count(), 1u);
+}
+
+// (c) is_new 必须在"截断到 0 字节"之后被重新判定——否则唯一一行本来就
+// 残缺、截完文件变空时,open() 会漏写表头,产出一个没有表头、下游工具
+// 认不出时间系统的文件。用"连表头第一行都没写完整"这个更极端的场景来钉住:
+// 这一行本身就是要被截掉的对象,截完之后整个文件必须变回"全新文件"那样
+// 重新写出完整表头。
+
+TEST(PosWriter, TruncationInsideTheFirstHeaderLineStillProducesACleanHeaderOnReopen) {
+  const std::string p = tmp_path("pw_truncate_header.pos");
+  ::remove(p.c_str());
+  const std::string full_header = pos_header(PosTimeSystem::GPST);
+  const std::string first_line = full_header.substr(0, full_header.find('\n'));
+  ASSERT_GT(first_line.size(), 3u);
+  const std::string cut = first_line.substr(0, first_line.size() - 3);   // 连第一行本身都没写完整
+  { std::ofstream f(p); f << cut; }   // 没有换行结尾,文件里唯一的内容也是残缺的
+
+  const PosRecord a = sample_record();
+  PosWriter w;
+  ASSERT_TRUE(w.open(p));
+  EXPECT_TRUE(w.discarded_incomplete_line());
+  ASSERT_TRUE(w.write(a));
+  w.close();
+
+  std::ifstream in(p);
+  std::string line;
+  int header_lines = 0, data_lines = 0;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line[0] == '%') ++header_lines;
+    else if (!line.empty()) ++data_lines;
+  }
+  EXPECT_EQ(header_lines, 3)
+      << "截断到 0 字节之后必须重新判定成“新文件”,完整重写表头——不能因为"
+         "“截断前文件非空”就跳过,否则会产出一个没有表头的文件";
+  EXPECT_EQ(data_lines, 1);
+
+  const auto back = read_pos(p);
+  ASSERT_EQ(back.size(), 1u);
+  EXPECT_NEAR(back[0].stamp, a.stamp, 1e-3);
 }
