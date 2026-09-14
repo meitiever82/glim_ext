@@ -88,9 +88,10 @@ struct DiagnosisInput {
 };
 
 struct DiagnosisResult {
-  // 全部命中的结论,按优先级排序;最后一条总是状态(no_solution / not_fixed / rtk_fixed),
-  // 例外:no_data 命中时只有这一条。
+  // 全部命中的结论,按规则优先级排序(优先级最高的在前);状态结论(no_solution / not_fixed /
+  // rtk_fixed)总是追加在最后。例外:no_data 命中时只有这一条。
   std::vector<Verdict> verdicts;
+  // 第一条(优先级最高的)结论;没有任何故障命中时就是追加在最后的那条状态结论
   const Verdict& status() const { return verdicts.front(); }
 };
 

@@ -15,6 +15,9 @@ struct LatLon {
 };
 
 enum class EventKind { Open, Close };
+// Recovered:该规则码连续 close_hysteresis_s 没有命中。这既包括故障真正恢复,也包括规则变得
+// 无法判定(输入过期,比如独立解断流后 device_divergence / abs_ref_shift 不再能算)——
+// 事件书不区分这两种情况。Shutdown:停机时由 close_all 关闭。
 enum class CloseReason { Recovered, Shutdown };
 const char* close_reason_name(CloseReason reason);
 

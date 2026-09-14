@@ -1,5 +1,6 @@
 #pragma once
-// 诊断落盘格式(spec §5.3 目录布局、D2 events.log、D3 base.pos)与崩溃安全的逐行追加写。
+// 诊断落盘格式(spec §5.3 目录布局、D2 events.log、D3 base.pos)与逐行追加写:
+// 进程崩溃安全（每行 flush；不 fsync，掉电可能丢最后几行或留下尾部垃圾）。
 #include <fstream>
 #include <string>
 
