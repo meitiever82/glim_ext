@@ -32,6 +32,14 @@ target_include_directories(gnss_core PUBLIC
 )
 target_link_libraries(gnss_core PUBLIC Eigen3::Eigen gtsam ${GeographicLib_LIBRARIES})
 
+# round 3 review:pos_io_test_hooks.hpp 的注入点(用来在 test_pos_io.cpp 里
+# 确定性地模拟读/截断失败,替代 LD_PRELOAD)只应该在跑测试的构建里存在——
+# 一个测试用的钩子函数不该出现在正式发布的 libgnss_core.so 导出符号表里。
+# pos_io.cpp 用同名宏把这段实现整体包在 #ifdef 里;BUILD_TESTING=OFF 的
+# 构建里这段代码完全不会被编译进去,符号自然也就不存在。
+target_compile_definitions(gnss_core PRIVATE
+  $<$<BOOL:${BUILD_TESTING}>:GNSS_CORE_WITH_TEST_HOOKS>)
+
 # --- 离线工具(Task 12) ---
 add_executable(calibrate_sigma_scale tools/calibrate_sigma_scale.cpp)
 target_link_libraries(calibrate_sigma_scale gnss_core)
@@ -49,7 +57,15 @@ install(TARGETS estimate_lever_arm DESTINATION lib/${PROJECT_NAME})
 install(PROGRAMS tools/pos_to_rtkfix_bag.py tools/run_injection_suite.sh tools/traj_rmse.py
         DESTINATION lib/${PROJECT_NAME})
 
-install(DIRECTORY include/ DESTINATION include)
+# round 3 review:pos_io_test_hooks.hpp 是一个测试专用的注入点,不该跟着
+# 一辆车用的库一起被装进 include/ 给下游消费者看到——非测试构建里整体
+# 排除;BUILD_TESTING=ON 时(测试要 #include 它)才单独装回去,与上面
+# target_compile_definitions 的 GNSS_CORE_WITH_TEST_HOOKS 用同一个开关。
+install(DIRECTORY include/ DESTINATION include
+        PATTERN "pos_io_test_hooks.hpp" EXCLUDE)
+if(BUILD_TESTING)
+  install(FILES include/gnss_core/pos_io_test_hooks.hpp DESTINATION include/gnss_core)
+endif()
 install(TARGETS gnss_core EXPORT gnss_core-targets
   LIBRARY DESTINATION lib ARCHIVE DESTINATION lib RUNTIME DESTINATION bin)
 

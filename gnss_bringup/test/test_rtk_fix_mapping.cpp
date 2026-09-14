@@ -70,6 +70,89 @@ TEST(RtkFixMapping, HeadingIsAlwaysInvalidForSingleAntennaSolution) {
   EXPECT_FALSE(m.heading_valid);
 }
 
+// ---------- to_pos_record(RtkFix → PosRecord,反向映射) ----------
+
+namespace {
+gnss_msgs::msg::RtkFix fix_sample() {
+  gnss_msgs::msg::RtkFix m;
+  m.gnss_time = 1789045801.0;
+  m.quality = gnss_msgs::msg::RtkFix::QUALITY_FIXED;
+  m.latitude = 44.50123456; m.longitude = 90.28765432; m.altitude = 617.123;
+  m.sigma_enu[0] = 0.022;   // E
+  m.sigma_enu[1] = 0.011;   // N
+  m.sigma_enu[2] = 0.033;   // U
+  m.diff_age = 0.8f; m.sats_used = 38;
+  return m;
+}
+}  // namespace
+
+TEST(ToPosRecord, SigmaIsReorderedFromEnuBackToNeu) {
+  const auto r = to_pos_record(fix_sample());
+  EXPECT_DOUBLE_EQ(r.sdne(0), 0.011) << "sdn 应取 sigma_enu[1](N)";
+  EXPECT_DOUBLE_EQ(r.sdne(1), 0.022) << "sde 应取 sigma_enu[0](E)";
+  EXPECT_DOUBLE_EQ(r.sdne(2), 0.033) << "sdu 应取 sigma_enu[2](U)";
+}
+
+TEST(ToPosRecord, NormalizedQualityMapsBackToRtklibQ) {
+  auto m = fix_sample();
+  m.quality = gnss_msgs::msg::RtkFix::QUALITY_FIXED;  EXPECT_EQ(to_pos_record(m).q, 1);
+  m.quality = gnss_msgs::msg::RtkFix::QUALITY_FLOAT;  EXPECT_EQ(to_pos_record(m).q, 2);
+  m.quality = gnss_msgs::msg::RtkFix::QUALITY_DGPS;   EXPECT_EQ(to_pos_record(m).q, 4);
+  m.quality = gnss_msgs::msg::RtkFix::QUALITY_SINGLE; EXPECT_EQ(to_pos_record(m).q, 5);
+  m.quality = gnss_msgs::msg::RtkFix::QUALITY_NONE;   EXPECT_EQ(to_pos_record(m).q, 0);
+}
+
+TEST(ToPosRecord, RoundTripsThroughToRtkFix) {
+  // 两个方向必须互逆 —— 这是防止某一侧悄悄改了顺序的最强约束
+  const auto original = fix_sample();
+  const auto back = to_rtk_fix(to_pos_record(original));
+  EXPECT_NEAR(back.latitude, original.latitude, 1e-9);
+  EXPECT_NEAR(back.longitude, original.longitude, 1e-9);
+  EXPECT_NEAR(back.altitude, original.altitude, 1e-9);
+  EXPECT_EQ(back.quality, original.quality);
+  EXPECT_EQ(back.sats_used, original.sats_used);
+  EXPECT_DOUBLE_EQ(back.sigma_enu[0], original.sigma_enu[0]);
+  EXPECT_DOUBLE_EQ(back.sigma_enu[1], original.sigma_enu[1]);
+  EXPECT_DOUBLE_EQ(back.sigma_enu[2], original.sigma_enu[2]);
+  EXPECT_NEAR(back.diff_age, original.diff_age, 1e-6);
+}
+
+TEST(ToPosRecord, UsesGnssTimeAsTheEpochWhenPresent) {
+  const auto r = to_pos_record(fix_sample());
+  EXPECT_DOUBLE_EQ(r.stamp, 1789045801.0);
+}
+
+TEST(ToPosRecord, PositionAndAgeAndSatsAreCopied) {
+  const auto r = to_pos_record(fix_sample());
+  EXPECT_NEAR(r.lat, 44.50123456, 1e-9);
+  EXPECT_NEAR(r.lon, 90.28765432, 1e-9);
+  EXPECT_NEAR(r.height, 617.123, 1e-9);
+  EXPECT_NEAR(r.age, 0.8, 1e-6);
+  EXPECT_EQ(r.ns, 38);
+}
+
+TEST(ToPosRecord, RatioHasNoCounterpartInRtkFixSoItIsZero) {
+  // RtkFix 不携带 AR ratio(rtkrcv .pos 里有,过 RtkFix 中转会丢失)——
+  // 这是消息定义的既有取舍,不在本任务修改范围,这里只确认丢失的方式是
+  // "写 0",而不是残留上一次调用的垃圾值或者未初始化。
+  const auto r = to_pos_record(fix_sample());
+  EXPECT_DOUBLE_EQ(r.ratio, 0.0);
+}
+
+TEST(ToPosRecord, ZeroGnssTimeFallsBackToHeaderStampNotEpoch) {
+  // 决定:gnss_time==0 表示"源不提供该字段"(RtkFix.msg 字段注释)。如果
+  // 原样写进 PosRecord.stamp,之后按日期滚动 .pos 文件的任务会把这条记录
+  // 归到 1970-01-01 那个目录——几乎必然是错的。header.stamp 是接收/发布
+  // 时刻,虽然不是解算历元本身,但足够代表"大致现在",用它兜底选对日期
+  // 目录,好过让 1970 纪元零点流进 stamp。
+  auto m = fix_sample();
+  m.gnss_time = 0.0;
+  m.header.stamp.sec = 1789045000;
+  m.header.stamp.nanosec = 500000000u;
+  const auto r = to_pos_record(m);
+  EXPECT_DOUBLE_EQ(r.stamp, 1789045000.5);
+}
+
 // ---------- LineSplitter ----------
 // TcpStream 交付任意切分的字节块,不保证按行到达;这里覆盖“行被切在两个块
 // 中间”这个最容易导致静默丢数据/脏数据的场景(brief 明确点名的坑)。

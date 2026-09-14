@@ -20,6 +20,7 @@ add_library(gnss_bringup_io SHARED
   src/local_reserver.cpp
   src/rtkrcv_conf.cpp
   src/process_supervisor.cpp
+  src/port_probe.cpp
 )
 target_include_directories(gnss_bringup_io PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -39,6 +40,11 @@ add_executable(rtkrcv_node src/rtkrcv_node.cpp)
 target_link_libraries(rtkrcv_node gnss_bringup_io gnss_core::gnss_core)
 ament_target_dependencies(rtkrcv_node rclcpp gnss_msgs)
 install(TARGETS rtkrcv_node DESTINATION lib/${PROJECT_NAME})
+
+add_executable(pos_writer src/pos_writer_node.cpp)
+target_link_libraries(pos_writer gnss_bringup_io gnss_core::gnss_core)
+ament_target_dependencies(pos_writer rclcpp gnss_msgs)
+install(TARGETS pos_writer DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -73,9 +79,44 @@ if(BUILD_TESTING)
   target_link_libraries(test_rtk_fix_mapping gnss_core::gnss_core)
   target_include_directories(test_rtk_fix_mapping PRIVATE include)
   ament_target_dependencies(test_rtk_fix_mapping gnss_msgs)
+
+  # port_probe 用 LocalReserver 自己起一个监听来验证探测结果,和进程监管
+  # 无关,单独成文件(task-1-brief.md 的要求)。
+  ament_add_gtest(test_port_probe test/test_port_probe.cpp)
+  target_link_libraries(test_port_probe gnss_bringup_io)
+
+  # pos_rotation.hpp 是纯函数(按天轮转的目录/文件路径决策),不碰 ROS 节点
+  # 或真实文件系统,和 rtk_fix_mapping.hpp 里的 plan_stat_tail 同样的处理
+  # 方式,单独可测。
+  ament_add_gtest(test_pos_rotation test/test_pos_rotation.cpp)
+  target_include_directories(test_pos_rotation PRIVATE include)
+
+  # pos_writer_params.hpp 是纯函数(time_system/leap_seconds/record 时间戳
+  # 合理性的校验),不碰 ROS 节点,pos_writer_node.cpp 自己的可独立测试的
+  # 部分,和 rtcm_bridge_params.hpp/test_rtcm_bridge_params 同样的处理方式。
+  # 头文件里用到 gnss_core::PosTimeSystem,需要链接 gnss_core 取得头文件的
+  # include 路径(与 test_rtk_fix_mapping 同样的道理)。
+  ament_add_gtest(test_pos_writer_params test/test_pos_writer_params.cpp)
+  target_link_libraries(test_pos_writer_params gnss_core::gnss_core)
+  target_include_directories(test_pos_writer_params PRIVATE include)
+
+  # round 2 review 的 Important 4:pos_writer_node.cpp 里"一路 .pos 输出"的
+  # 状态机(PosDecimator+PosWriter+当前路径+失败锁存+沉默检测)抽成
+  # PosSourceWriter,不碰任何 ROS 类型,可以完全脱离节点单测——两个此前能
+  # 骗过全部 142 个测试的变异(轮转依据换成"现在"、失败锁存改坏)现在都会
+  # 被这里的用例直接抓到。
+  ament_add_gtest(test_pos_source_writer test/test_pos_source_writer.cpp)
+  target_link_libraries(test_pos_source_writer gnss_core::gnss_core)
+  target_include_directories(test_pos_source_writer PRIVATE include)
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+
+# record_gnss.sh:rosbag2 录制脚本(spec §5.2),装到 lib/${PROJECT_NAME}
+# 而不是 share,好让 `ros2 run gnss_bringup record_gnss.sh` 可以像
+# rtcm_bridge/rtkrcv_node/pos_writer 一样直接按包名+文件名找到它
+# (`ros2 run` 只在 lib/<package> 下查找可执行文件)。
+install(PROGRAMS scripts/record_gnss.sh DESTINATION lib/${PROJECT_NAME})
 
 ament_export_targets(gnss_bringup-targets HAS_LIBRARY_TARGET)
 ament_package()
