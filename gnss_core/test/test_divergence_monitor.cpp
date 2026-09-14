@@ -108,9 +108,9 @@ TEST(DivergenceMonitor, OldSamplesAgeOutOfTheWindow) {
   EXPECT_EQ(m.window_size(), 0u);
 }
 
-// 控制者裁定(round3a 修正):样本不足、还在用回退 σ 判定时,依然要照 design
-// decision 2 对回退阈值做判定(而不是像 empirical 模式那样把超限样本排除在
-// 窗口外)——否则 Task 7 的"5 s 内 0.5 m 偏差、样本不足 60 个也要报"用例过不了。
+// 控制者裁定(round3a 修正):预热期(样本不足、没有经验基线)依然要按本拍阈值
+// (final fix F1 起是 5 cm 下限与当前自报 σ 取大)做判定,且超限样本照样入窗口(而不是
+// 像 empirical 模式那样把超限样本排除在窗口外)——否则 Task 7 的"5 s 内 0.5 m 偏差、样本不足 60 个也要报"用例过不了。
 TEST(DivergenceMonitor, FallbackRegimeStillJudgesAndAdmitsSamples) {
   DivergenceMonitor m(cfg_small());
   const auto s1 = m.update(0.0, 0.5, std::hypot(0.011, 0.012));
@@ -120,7 +120,7 @@ TEST(DivergenceMonitor, FallbackRegimeStillJudgesAndAdmitsSamples) {
   const auto s2 = m.update(5.0, 0.5, std::hypot(0.011, 0.012));
   ASSERT_TRUE(s2.since.has_value());
   EXPECT_DOUBLE_EQ(*s2.since, 0.0) << "持续超限时起始时刻保持";
-  EXPECT_EQ(m.window_size(), 2u) << "回退阶段超限样本也要入窗口,否则经验基线永远建立不起来";
+  EXPECT_EQ(m.window_size(), 2u) << "预热期超限样本也要入窗口,否则经验基线永远建立不起来";
 }
 
 TEST(DivergenceMonitor, RegimeChangeRestartsTheClock) {
@@ -154,7 +154,7 @@ TEST(DivergenceMonitor, LongDivergenceIsNotAbsorbedWhenTheWindowStarves) {
 
 // round3a fix1:只有真正的数据缺口(配对样本间隔 >= divergence_window_s)才应该
 // 重新预热;一次真正的数据缺口之后,重新预热期间依然按 design decision 2 判定
-// (回退阈值),直到窗口重新攒够样本才转回经验模式。
+// (没有经验基线,阈值 = 5 cm 下限与当前自报 σ 取大),直到窗口重新攒够样本才转回经验模式。
 TEST(DivergenceMonitor, LongPairingGapRestartsWarmUp) {
   DivergenceMonitor m(cfg_small());
   for (int t = 0; t < 20; ++t) m.update(t, 0.02, 0.001);
@@ -219,7 +219,7 @@ TEST(DivergenceMonitor, RecoversAfterALongFaultInsteadOfLatching) {
 
 // round3a fix2:窗口被剪枝掉到不够 min_samples,但配对间隔还远小于
 // divergence_window_s(不是真正的数据缺口)时,应该沿用上一次学到的经验基线,
-// 而不是掉回 rtkrcv 自报的回退 σ。
+// 而不是只剩 5 cm 下限 / 当前自报 σ。
 TEST(DivergenceMonitor, ShortPairingGapKeepsTheLearnedBaseline) {
   DivergenceMonitor m(cfg_small());
   // 基线要高于 5 cm 下限,才能和"没有 held 基线、只剩下限"区分开
