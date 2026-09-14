@@ -118,6 +118,16 @@ if(BUILD_TESTING)
   # sol 流状态日志去重闸门:纯逻辑,不碰 ROS
   ament_add_gtest(test_sol_stream_log_gate test/test_sol_stream_log_gate.cpp)
   target_include_directories(test_sol_stream_log_gate PRIVATE include)
+
+  # 节点级测试:把 rtkrcv_node 可执行文件当子进程起,配 fake_rtkrcv.sh。
+  # 用 gtest 而不是 launch_testing:开发机的 pytest 9.1.1 与 Humble 的
+  # launch_testing 插件不兼容。
+  ament_add_gtest(test_rtkrcv_node_process test/test_rtkrcv_node_process.cpp TIMEOUT 180)
+  target_include_directories(test_rtkrcv_node_process PRIVATE include test)
+  add_dependencies(test_rtkrcv_node_process rtkrcv_node)
+  target_compile_definitions(test_rtkrcv_node_process PRIVATE
+    RTKRCV_NODE_PATH="$<TARGET_FILE:rtkrcv_node>"
+    FAKE_RTKRCV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test/fake_rtkrcv.sh")
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
