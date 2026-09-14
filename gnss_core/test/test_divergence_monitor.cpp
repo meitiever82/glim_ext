@@ -76,3 +76,29 @@ TEST(DivergenceMonitor, OldSamplesAgeOutOfTheWindow) {
   EXPECT_FALSE(s.empirical);
   EXPECT_EQ(m.window_size(), 0u);
 }
+
+// 控制者裁定(round3a 修正):样本不足、还在用回退 σ 判定时,依然要照 design
+// decision 2 对回退阈值做判定(而不是像 empirical 模式那样把超限样本排除在
+// 窗口外)——否则 Task 7 的"5 s 内 0.5 m 偏差、样本不足 60 个也要报"用例过不了。
+TEST(DivergenceMonitor, FallbackRegimeStillJudgesAndAdmitsSamples) {
+  DivergenceMonitor m(cfg_small());
+  const auto s1 = m.update(0.0, 0.5, std::hypot(0.011, 0.012));
+  ASSERT_TRUE(s1.since.has_value());
+  EXPECT_DOUBLE_EQ(*s1.since, 0.0);
+  EXPECT_EQ(m.window_size(), 1u);
+  const auto s2 = m.update(5.0, 0.5, std::hypot(0.011, 0.012));
+  ASSERT_TRUE(s2.since.has_value());
+  EXPECT_DOUBLE_EQ(*s2.since, 0.0) << "持续超限时起始时刻保持";
+  EXPECT_EQ(m.window_size(), 2u) << "回退阶段超限样本也要入窗口,否则经验基线永远建立不起来";
+}
+
+TEST(DivergenceMonitor, RegimeChangeRestartsTheClock) {
+  DivergenceMonitor m(cfg_small());
+  for (int i = 0; i < 9; ++i) m.update(i, 0.1, 0.001);   // 9 个,均超回退阈值 0.003
+  m.update(9.0, 0.1, 0.001);                              // 第 10 个,窗口刚好填满,转入 empirical
+  const auto s = m.update(10.0, 1.0, 0.001);
+  EXPECT_TRUE(s.empirical);
+  ASSERT_TRUE(s.since.has_value());
+  EXPECT_DOUBLE_EQ(*s.since, 10.0)
+      << "由回退模式的旧计时切到 empirical 模式,应重新起算,不能沿用回退阶段的 0.0";
+}

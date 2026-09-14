@@ -28,16 +28,28 @@ DivergenceState DivergenceMonitor::update(double t, std::optional<double> diverg
   }
   s.threshold_m = sigma_mult_ * sigma;
 
+  // 回退/经验两种模式的阈值含义不同(前者是 rtkrcv 自报 σ,后者是窗口 RMS),
+  // 模式切换的瞬间不能借用上一种模式攒下的"持续超限"计时——否则经验模式下的
+  // 一次真正超限会被误判成"早就超限了"(计时起点仍是旧模式下攒的时刻),
+  // 而不是拥有自己的起始时刻。
+  if (s.empirical != prev_empirical_) since_.reset();
+  prev_empirical_ = s.empirical;
+
   if (!divergence_m) {
     since_.reset();
     return s;
   }
   s.divergence_m = divergence_m;
-  // 排除超限样本只在已有经验基线(empirical)时才有意义:窗口样本不足、还在
-  // 用回退 σ 的阶段,若也按同一(此时可能很小、不具代表性的)回退阈值排除样本,
-  // 窗口会在 610 自报 σ 偏小时永远填不满,经验基线永远建立不起来。
-  if (s.empirical && *divergence_m > s.threshold_m) {
-    if (!since_) since_ = t;   // 超限样本不入窗口:不让偏差段拉高自己的阈值
+
+  if (*divergence_m > s.threshold_m) {
+    if (!since_) since_ = t;   // 超限:起算或保持
+    // design decision 2:样本不足、用回退 σ 判定时仍然判定,不是不判定——但
+    // 为了能攒起经验基线,回退阶段的样本无论是否超限都要入窗口,否则 610
+    // 自报 σ 偏小("自信地错")时,真实偏差会一直被判"超限"而永远进不了
+    // 窗口,经验基线永远建立不起来。代价:预热期里若真的发生过一次偏差,
+    // 会被计入第一份经验基线。经验阶段沿用原规则:超限样本排除在窗口外,
+    // 不让偏差段拉高自己的阈值。
+    if (!s.empirical) window_.emplace_back(t, *divergence_m);
   } else {
     since_.reset();
     window_.emplace_back(t, *divergence_m);
