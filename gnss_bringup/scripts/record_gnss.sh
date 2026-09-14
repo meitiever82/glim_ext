@@ -13,11 +13,13 @@
 #                         子目录作为这次录制的 -o 输出路径。
 #                         默认: "$HOME/gnss_bags"
 #   GNSS_BAG_TOPICS       要录制的话题清单,空格分隔的一个字符串(话题名本身
-#                         不含空格,可以安全地按空格切分)。默认覆盖 spec §5.2
-#                         的四路:两路裸流(rtcm_bridge 转发,类型都是
+#                         不含空格,可以安全地按空格切分)。
+#                         默认录制六个话题:两路裸流(rtcm_bridge 转发,类型都是
 #                         gnss_msgs/RawStream,靠话题名区分,见 README)、
-#                         三路 RtkFix(两路来自 gnss_cgi610,一路来自本包的
-#                         rtkrcv_node)、以及 rtkrcv_node 转发的 $SAT 状态行。
+#                         三路 RtkFix(/gnss_cgi610/rtk_fix;/gnss_cgi610/rtk_fix_gpchc
+#                         目前仓库里没有任何发布者,留在清单里是为了现场协议确认后
+#                         不必改脚本;/rtkrcv_node/rtk_fix)、以及 rtkrcv_node 转发的
+#                         $SAT 状态行。
 #                         默认:
 #                           /gnss/rtcm_corrections /gnss/raw_obs
 #                           /gnss_cgi610/rtk_fix /gnss_cgi610/rtk_fix_gpchc

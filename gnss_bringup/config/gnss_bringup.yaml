@@ -136,9 +136,10 @@ pos_writer:
     # 现场需要接入 rtkrcv 这一路时:先 `-p enable_rtkrcv:=true`(或在覆盖
     # 文件里打开它)启动 rtkrcv_node,再把这里改成
     # `sources: ["can", "rtkrcv"]`;如果 gnss_cgi610 驱动确实会发布
-    # gpchc 这一路(现场协议确认之后),再加上 "gpchc"。下面 can/gpchc/
-    # rtkrcv 三行 topic 映射都保留在配置里,按需把对应的名字加进 sources
-    # 即可,不需要另外声明。
+    # gpchc 这一路(现场协议确认之后),再加上 "gpchc"。注意下面只有 can 的
+    # topic 映射是生效的,gpchc/rtkrcv 两行是注释:把名字加进 sources 时必须
+    # 同时取消对应那一行的注释——否则 <name>.topic 会回落到默认值
+    # "/gnss/<name>",那个话题没有任何发布者,现象只是一条沉默告警。
     sources: ["can"]
     # 1 Hz 抽稀周期(spec §5.3)。落盘的是"每 period_s 秒取一条"的摘要,不是
     # 全量流——全量原始数据由下面的 rosbag2 录制脚本另外负责。

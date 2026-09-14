@@ -331,7 +331,12 @@ bash src/glim_ext/gnss_bringup/scripts/record_gnss.sh
 `/gnss_cgi610/rtk_fix_gpchc`、`/rtkrcv_node/rtk_fix`、`/rtkrcv_node/stat`
 六路话题,输出到 `$HOME/gnss_bags/gnss_<时间戳>/`(按 `--max-bag-duration` 分卷,
 默认 86400 秒即一天一卷——注意这是"从录制进程启动那一刻起满 N 秒就切卷",不是
-像 `.pos` 那样按 UTC 自然日对齐,两者是不同的机制)。启动时会先检查每个话题是否
+像 `.pos` 那样按 UTC 自然日对齐,两者是不同的机制)。
+
+其中 `/gnss_cgi610/rtk_fix_gpchc` 目前没有任何发布者(驱动是否发布 gpchc 这一路待现场协议确认),
+录到的 bag 里这个话题为空是正常的。
+
+启动时会先检查每个话题是否
 已经在总线上,**不存在只警告、不阻止启动**——录制一个当前还没有发布者的话题是
 合法的,链路上各个节点完全可能按不同顺序、先后起来。输出根目录、话题清单、
 分卷时长、存储后端均可用环境变量覆盖,默认值和用法写在脚本顶部的注释里
@@ -345,16 +350,23 @@ bash src/glim_ext/gnss_bringup/scripts/record_gnss.sh
 
 ## 已验证 / 未验证项
 
-2026-09-14 在开发机上用 **RTKLIB-EX 2.5.1** 验证过。回归用例是 `test/test_rtkrcv_real_binary.cpp`
-(未装 rtkrcv 或 libfaketime 时自动跳过)与 `test/test_rtkrcv_node_process.cpp`:
+2026-09-14 在开发机上用 **RTKLIB-EX 2.5.1** 验证过。
 
-- 生成的 conf 键全部被 2.5.1 识别并生效(用 rtkrcv 控制台 `option` 逐项核对过)
-- `-s -nc -r 2 -o <conf>` 能无终端常驻,SIGTERM 下正常退出
-- 两路上行按字节原样送达(corrections → `inpstr2`,raw_obs → `inpstr1`),节点连得上 `sol_port`,
-  `.stat` 文件名为 `rtkrcv_%Y%m%d%h%M.stat`
+由回归用例持续守护(`test/test_rtkrcv_real_binary.cpp`,未装 rtkrcv 或 libfaketime 时自动跳过;
+`test/test_rtkrcv_node_process.cpp` 用替身二进制):
+
+- `rtkrcv_node` 能按 `PATH` 找到并常驻真实 rtkrcv(`-s -nc -r 2 -o <conf>`),节点 SIGINT 后正常退出
+- conf 默认写入 `ant2-postype =rtcm`;缺了这一行时真实回放一条解都没有
 - 真实双站 RTCM3 回放(RTKLIB 自带 2005 年 GSI 两站 RINEX 转换而来,基线约 3.3 km):
-  `RtkFix` 与 rtkrcv 原始解算行逐字段一致(经纬高、质量、NEU→ENU 标准差、卫星数、龄期),
-  `pos_writer` 按 UTC 日轮转写出 `.pos`
+  节点发布 `RtkFix`(约 100 条,质量为浮点或固定,经纬高与时间落在预期范围)并转发 `.stat`
+
+只在 2026-09-14 手工核对过、没有用例守护:
+
+- 生成的 conf 键全部被 2.5.1 识别并生效(用 rtkrcv 控制台 `option` 逐项核对)
+- 两路上行按字节原样送达(corrections → `inpstr2`,raw_obs → `inpstr1`),
+  `.stat` 文件名为 `rtkrcv_%Y%m%d%h%M.stat`
+- `RtkFix` 与 rtkrcv 原始解算行逐字段一致(经纬高、质量、NEU→ENU 标准差、卫星数、龄期)
+- `pos_writer` 订阅 `rtkrcv_node` 的输出、按 UTC 日轮转写出 `.pos`,行内容与原始解算行一致
 
 仍未验证:
 
