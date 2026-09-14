@@ -43,6 +43,27 @@ bash src/glim_ext/setup_workspace.sh
 > `driver_ws` 都要 `colcon build --packages-select gnss_msgs`(及其下游包)
 > 再重启相关节点,两边缺一不可。
 
+## 安装 RTKLIB-EX 2.5.1(`rtkrcv`)
+
+`rtkrcv_node` 需要 **RTKLIB-EX 2.5.1**(rtklibexplorer 维护,原 demo5)。
+**不要用 `apt install rtklib`**:Ubuntu 22.04 源里是 Takasu 原版 2.4.3 b34,不认 `-nc`,
+遇到就打印用法并以 0 退出,节点会陷入崩溃循环。
+
+```bash
+# 源码:https://github.com/rtklibexplorer/RTKLIB/releases/tag/v2.5.1
+cd RTKLIB-2.5.1
+# 只要命令行工具:关掉 Qt(系统 Qt6 缺 SerialPort 模块会让配置失败)。
+# 需要 GUI 时去掉最后一个 -D,改传 -DCMAKE_PREFIX_PATH=<带 SerialPort 的 Qt6 目录>。
+cmake --fresh -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_QT=TRUE
+cmake --build build -j"$(nproc)"
+sudo cmake --install build
+sudo ldconfig        # 必须:librtklib.so 装在 /usr/local/lib,不刷新缓存 rtkrcv 起不来
+rtkrcv --version     # 应输出:rtkrcv RTKLIB EX 2.5.1
+```
+
+`binary` 参数默认 `rtkrcv`,节点按 `PATH` 查找;找不到时节点启动即失败,日志里带着当时的 `PATH`。
+
 ## 快速开始
 
 ```bash
@@ -194,6 +215,12 @@ rtcm_bridge:
 写错一个参数名不会报错,只是那个设置根本没生效——所以下面两组容易被漏掉的参数
 专门说明一下:
 
+- **`base_pos_type`(默认 `rtcm`)**——基准站坐标来源,对应 conf 的 `ant2-postype`。
+  `rtcm` 要求平台差分流带 RTCM 1005/1006;没有时改成 `single`(基准站单点解,精度差)。
+  **这一项不写时 rtkrcv 默认坐标 0,0,0,RTK 一条解都不输出**。`bds_ar_mode`/`glo_ar_mode`
+  是北斗/GLONASS 模糊度固定开关,默认值与 RTKLIB-EX 2.5.1 一致,现场按固定率调整。
+  所有枚举参数在节点启动时按 RTKLIB-EX 2.5.1 的取值表校验,写错直接拒绝启动——
+  rtkrcv 自己遇到非法取值只会悄悄回落到默认值继续跑。
 - **`leap_seconds`(默认 18)**——GPST 与 UTC 之间的闰秒偏移量。这个值不是常量,
   IERS 每次宣布插入新闰秒后都需要手动更新;`rtkrcv_node` 用它把解算历元
   (GPST)换算成 UTC。

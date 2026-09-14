@@ -114,6 +114,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pos_source_writer test/test_pos_source_writer.cpp)
   target_link_libraries(test_pos_source_writer gnss_core::gnss_core)
   target_include_directories(test_pos_source_writer PRIVATE include)
+
+  # sol 流状态日志去重闸门:纯逻辑,不碰 ROS
+  ament_add_gtest(test_sol_stream_log_gate test/test_sol_stream_log_gate.cpp)
+  target_include_directories(test_sol_stream_log_gate PRIVATE include)
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
