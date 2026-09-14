@@ -21,6 +21,7 @@ add_library(gnss_bringup_io SHARED
   src/rtkrcv_conf.cpp
   src/process_supervisor.cpp
   src/port_probe.cpp
+  src/executable_lookup.cpp
 )
 target_include_directories(gnss_bringup_io PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -72,6 +73,11 @@ if(BUILD_TESTING)
   target_link_libraries(test_process_supervisor gnss_bringup_io)
   target_compile_definitions(test_process_supervisor PRIVATE
     FAKE_RTKRCV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test/fake_rtkrcv.sh")
+
+  # resolve_executable:ProcessSupervisor 在父进程里按 PATH 解析 binary(execv
+  # 不查 PATH,子进程又已 chdir 到 run_dir,裸名字 "rtkrcv" 以前永远起不来)。
+  ament_add_gtest(test_executable_lookup test/test_executable_lookup.cpp)
+  target_link_libraries(test_executable_lookup gnss_bringup_io)
 
   # rtk_fix_mapping.hpp 是纯函数(不碰 ROS 节点),含 LineSplitter 这个供
   # rtkrcv_node 按行切分 TcpStream 字节流用的纯逻辑,单独可测。

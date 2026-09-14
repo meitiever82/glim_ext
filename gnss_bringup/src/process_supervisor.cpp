@@ -12,6 +12,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+
+#include "gnss_bringup/executable_lookup.hpp"
 
 namespace gnss_bringup {
 
@@ -244,6 +247,28 @@ void ProcessSupervisor::run() {
   const long max_fd = ::sysconf(_SC_OPEN_MAX);
 
   while (running_.load()) {
+    // 每轮重新解析:binary 可能是在节点起来之后才装上的。解析放在父进程里做——
+    // execv() 不查 PATH,而子进程在 exec 之前已经 chdir(cwd)。解析不到就不 fork
+    // (以前会 fork 出一个注定 _exit(127) 的子进程,从外面看和"rtkrcv 自己崩了"
+    // 一模一样),按崩溃循环退避并如实报告原因。
+    const std::string exe = resolve_executable(cfg_.binary, ::getenv("PATH"));
+    if (exe.empty()) {
+      start_failure_count_.fetch_add(1);
+      const double prev = current_delay_.load();
+      current_delay_.store(prev <= 0.0 ? base_delay : std::min(prev * 2.0, max_delay));
+      if (cfg_.on_exit) {
+        ChildExitInfo info;
+        info.spawn_failed = true;
+        info.detail = "binary=" + cfg_.binary + " 在 PATH 中找不到或不可执行";
+        info.next_delay_s = current_delay_.load();
+        info.will_restart = running_.load();
+        cfg_.on_exit(info);
+      }
+      if (!running_.load()) break;
+      interruptible_wait(current_delay_.load());
+      continue;
+    }
+
     // review round 3 的 Important:子进程在把信号处置重置成 SIG_DFL 之前
     // (下面的 setsid() 到 sigaction 循环这段窗口),携带的仍然是从父进程
     // 这个线程继承来的信号处置——Task 7 的父进程是 rclcpp 节点,rclcpp
@@ -379,7 +404,7 @@ void ProcessSupervisor::run() {
                       // 一遍父进程的 atexit/全局对象析构。
       }
 
-      ::execv(cfg_.binary.c_str(), argv.data());
+      ::execv(exe.c_str(), argv.data());
       // execv 只有失败才会返回(二进制不存在/没有执行权限等)。同样用
       // _exit 而不是 exit,并且退出码固定用 127(约定俗成的"命令不存在/
       // 不可执行"),父进程会把这次短命当成崩溃循环处理并退避,不会崩溃
@@ -391,6 +416,7 @@ void ProcessSupervisor::run() {
     last_spawned_pid_.store(pid);
     child_pid_.store(pid);
     spawn_count_.fetch_add(1);
+    if (cfg_.on_spawn) cfg_.on_spawn(pid, exe);
     const auto t0 = std::chrono::steady_clock::now();
 
     // review round 1 的 Critical:fork() 成功到上面 child_pid_.store(pid)
@@ -424,9 +450,10 @@ void ProcessSupervisor::run() {
     // waitpid() 本身就是一个没有轮询唤醒描述符的阻塞点,违反了这个包里
     // "每个阻塞点都要 poll 唤醒描述符"的既定规则。
     int status = 0;
+    bool reaped = false;
     for (;;) {
       const pid_t w = ::waitpid(pid, &status, WNOHANG);
-      if (w == pid) break;
+      if (w == pid) { reaped = true; break; }
       if (w < 0) {
         if (errno == EINTR) continue;
         break;  // 理论上不会走到(比如 ECHILD):当作已经结束处理,避免线程卡死
@@ -484,6 +511,24 @@ void ProcessSupervisor::run() {
     } else {
       // 活得够久,说明这次不是崩溃循环,重启间隔复位成正常值。
       current_delay_.store(base_delay);
+    }
+
+    if (cfg_.on_exit) {
+      ChildExitInfo info;
+      info.pid = pid;
+      if (reaped) {
+        if (WIFEXITED(status)) {
+          info.exited = true;
+          info.exit_code = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+          info.signaled = true;
+          info.signal = WTERMSIG(status);
+        }
+      }
+      info.lifetime_s = lifetime_s;
+      info.next_delay_s = current_delay_.load();
+      info.will_restart = running_.load();
+      cfg_.on_exit(info);
     }
 
     if (!running_.load()) break;  // stop() 正在等这次退出收尾,不再重启
