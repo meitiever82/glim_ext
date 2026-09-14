@@ -1,18 +1,9 @@
 #include <gtest/gtest.h>
 #include <string>
 #include "gnss_core/rtkstat.hpp"
+#include "diag_test_fixtures.hpp"
 using namespace gnss_core;
-
-namespace {
-// RTKLIB 列序:$SAT,week,tow,sat,frq,az,el,resp,resc,vsat,snr,fix,slip,lock,outc,slipc,rejc
-std::string sat_line(const char* sat, double tow, int frq, double el, double resp,
-                     double snr, int vsat, int slipc, int rejc) {
-  return "$SAT," + std::to_string(2380) + "," + std::to_string(tow) + "," + sat + "," +
-         std::to_string(frq) + ",123.4," + std::to_string(el) + "," + std::to_string(resp) +
-         ",0.001," + std::to_string(vsat) + "," + std::to_string(snr) + ",1,0,100,0," +
-         std::to_string(slipc) + "," + std::to_string(rejc);
-}
-}  // namespace
+using gnss_core::test_fixtures::sat_line;
 
 // ---------- parse_sat_line ----------
 
