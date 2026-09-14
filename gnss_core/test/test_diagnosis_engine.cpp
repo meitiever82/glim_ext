@@ -81,10 +81,11 @@ TEST(DiagnosisEngine, CorrectionsGapOpensCorrOutage) {   // 移植 test_epochs_a
 
 TEST(DiagnosisEngine, AnyCorrectionBytesCountAsLinkAlive) {
   auto e = make_engine();
+  corrections(e, 90.0);   // 真实 1005 帧先立一次链路时刻
   e.on_solution(100.0, fixed());
   const std::vector<uint8_t> garbage = {0x01, 0x02, 0x03};
   EXPECT_TRUE(e.on_corrections(100.0, garbage.data(), garbage.size()).empty());
-  EXPECT_FALSE(has_code(e.tick(102.0), "corr_outage"));
+  EXPECT_FALSE(has_code(e.tick(102.0), "corr_outage")) << "垃圾字节也要刷新 corr_last_t_,gap 应为 2s 而非 12s";
 }
 
 TEST(DiagnosisEngine, StaleSolutionDegradesToNoSolution) {   // 移植 test_stale_solution_degrades_to_no_solution
@@ -129,6 +130,7 @@ TEST(DiagnosisEngine, DivergenceNeedsHoldAndItsClockResetsWhenPairingIsLost) {  
     corrections(e, t);
     e.on_device_solution(t, fixed(far_lat));
     last = e.tick(t + 0.1);
+    if (i == 8) EXPECT_FALSE(last.divergence.since.has_value()) << "两路到达时刻相差 2 s,不再配对";
   }
   EXPECT_FALSE(last.divergence.since.has_value());
 
