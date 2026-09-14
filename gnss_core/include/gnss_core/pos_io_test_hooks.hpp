@@ -55,6 +55,10 @@ namespace gnss_core::testing {
 //   "read_pos_scan" —— read_pos() 内部 std::getline 循环的每一次迭代
 //                      (真实失败方式是安静地把流设成 badbit,不抛异常;
 //                      round 3 review 第三次纠正的对象)
+//   "read_pos_premature_eof" —— 模拟"read() 提前返回 0"(FUSE/NFS 或文件
+//                      被并发截断):循环正常结束、流上不设 badbit,只能靠
+//                      "扫描消费的字节数 != 文件大小"识别(round 2 hardening
+//                      Task 1)
 // 返回 true 表示"在这一步注入一次失败"。调用方必须把它当成真实的失败
 // 处理:不截断、不继续、把失败原样报给 PosWriter::open() 的调用方(返回
 // false)或者从 read_pos() 抛出来,且磁盘上的文件不能有任何变化。

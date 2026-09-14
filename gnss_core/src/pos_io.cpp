@@ -5,6 +5,7 @@
 #include "gnss_core/rtkstat.hpp"   // parse_llh_solution 在此实现:与 .pos 数据行是同一套列解析
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -117,10 +118,18 @@ bool injected_resize_failure() {
 bool injected_read_pos_scan_failure() {
   return g_trailing_line_read_failure_injector != nullptr && g_trailing_line_read_failure_injector("read_pos_scan");
 }
+
+// 模拟"read() 提前返回 0":读循环正常结束、流上没有任何错误位——FUSE/NFS
+// 或文件被并发截断时真实发生的就是这种情况,只能靠字节数识别。
+bool injected_read_pos_premature_eof() {
+  return g_trailing_line_read_failure_injector != nullptr &&
+         g_trailing_line_read_failure_injector("read_pos_premature_eof");
+}
 #else
 inline void throw_if_injected(const char*) {}   // 非测试构建:这段代码整体不存在,调用处优化成空操作
 inline bool injected_resize_failure() { return false; }
 inline bool injected_read_pos_scan_failure() { return false; }
+inline bool injected_read_pos_premature_eof() { return false; }
 #endif
 
 // 一次截断在“最后一行没写完整”这个前提下,理论上能去掉的字节数不会超过
@@ -281,19 +290,47 @@ Quality q_to_quality(int q) {
   }
 }
 
-std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& opt) {
-  std::ifstream in(path);
-  if (!in) throw std::runtime_error("read_pos: cannot open " + path);
-
+namespace {
+// round 3 review 的第三次纠正:下面的循环只在 getline 因为正常 EOF 结束
+// (设置 eofbit,但不设置 badbit)时才应该被信任为"读完了整份文件"。真实
+// I/O 错误发生时,getline 内部的 istream::sentry 会把流设成 badbit、循环
+// 因为流状态不再"好"而提前结束——但**不会抛异常**(exceptions() 掩码默认
+// 是 goodbit),因此不检查这里就会安静地把"读到故障发生前"当成"读到了
+// 全部内容",返回一份不完整的 vector 却不报任何错。这里统一按 read_pos()
+// 已有的"打不开文件"同一个错误约定(std::runtime_error)报出来——调用方
+// (PosWriter::open() 的 try/catch,以及离线工具
+// calibrate_sigma_scale/estimate_lever_arm 只要补上 try/catch)不用再猜
+// "这份结果到底完不完整"。
+//
+// round 2 hardening(Task 1)又发现同一类问题的另一种表现:FUSE/NFS 上
+// read() 可能在真实文件末尾之前返回 0(或者文件被并发截断),这种情况下
+// getline 循环会"正常"结束——不设 badbit,上面这条检查完全看不出来。
+// PosWriter::open() 用这个函数收集去重键时,唯一能识别出这种情况的办法
+// 是自己知道截断之后文件应有的字节数,拿它跟这次扫描实际消费的字节数
+// (bytes_consumed 非空时在这里累加)比对——因此这个内部版本额外提供了
+// bytes_consumed 这个输出参数,只供 PosWriter::open() 使用;read_pos()
+// 的两个公开入口都不关心这个字节数,传 nullptr。
+std::vector<PosRecord> read_pos_stream(std::istream& in, const std::string& what,
+                                        const PosReadOptions& opt, std::uint64_t* bytes_consumed) {
   PosTimeSystem ts = opt.default_time_system;
   std::vector<PosRecord> out;
   std::string line;
   while (std::getline(in, line)) {
+    // 每一行被 getline 消费掉的字节数:行内容本身 + 分隔符 '\n'——除非这是
+    // 文件末尾最后一行且没有换行结尾(此时 getline 靠 eofbit 而不是找到
+    // '\n' 结束,不应该多算这一个字节)。
+    if (bytes_consumed) *bytes_consumed += line.size() + (in.eof() ? 0u : 1u);
     if (injected_read_pos_scan_failure()) {
       // 测试注入(仅 BUILD_TESTING):见上面 injected_read_pos_scan_failure
       // 的注释——直接把流设成 badbit,不抛异常,精确复现真实 I/O 错误在
       // getline 这里的失败方式。
       in.setstate(std::ios::badbit);
+      break;
+    }
+    if (injected_read_pos_premature_eof()) {
+      // 测试注入(仅 BUILD_TESTING):模拟"read() 提前返回 0"——循环像
+      // 正常 EOF 一样结束、不设 badbit,只有 bytes_consumed 对不上文件
+      // 大小能识别出来。
       break;
     }
     if (line.empty()) continue;
@@ -318,20 +355,21 @@ std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& o
     PosRecord r;
     if (parse_llh_solution(line, r, line_opt)) out.push_back(r);
   }
-  // round 3 review 的第三次纠正:上面的循环只在 getline 因为正常 EOF
-  // 结束(设置 eofbit,但不设置 badbit)时才应该被信任为"读完了整份
-  // 文件"。真实 I/O 错误发生时,getline 内部的 istream::sentry 会把流
-  // 设成 badbit、循环因为流状态不再"好"而提前结束——但**不会抛异常**
-  // (exceptions() 掩码默认是 goodbit),因此不检查这里就会安静地把
-  // "读到故障发生前"当成"读到了全部内容",返回一份不完整的 vector 却不
-  // 报任何错。这里统一按 read_pos() 已有的"打不开文件"同一个错误约定
-  // (std::runtime_error)报出来——调用方(PosWriter::open() 的
-  // try/catch,以及离线工具 calibrate_sigma_scale/estimate_lever_arm 只要
-  // 补上 try/catch)不用再猜"这份结果到底完不完整"。
   if (in.bad()) {
-    throw std::runtime_error("read_pos: I/O error while reading " + path);
+    throw std::runtime_error("read_pos: I/O error while reading " + what);
   }
   return out;
+}
+}  // namespace
+
+std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& opt) {
+  std::ifstream in(path);
+  if (!in) throw std::runtime_error("read_pos: cannot open " + path);
+  return read_pos_stream(in, path, opt, nullptr);
+}
+
+std::vector<PosRecord> read_pos(std::istream& in, const PosReadOptions& opt) {
+  return read_pos_stream(in, "<stream>", opt, nullptr);
 }
 
 std::string pos_header(PosTimeSystem time_system) {
@@ -396,10 +434,16 @@ bool PosWriter::open(const std::string& path) {
   // "新文件"指不存在或存在但长度为 0 —— 用这个判断是否需要写表头,
   // 因此进程重启接续一个已有非空文件时不会再写一遍表头。
   bool is_new = true;
+  // 截断之后文件应有的字节数;去重扫描必须恰好消费这么多字节(Task 1:
+  // FUSE/NFS 上 read() 可能在真实文件末尾之前返回 0,或者文件被并发截断,
+  // 这两种情况下 read_pos_stream 的 getline 循环都会"正常"结束、不设
+  // badbit——唯一能识破的办法就是拿实际消费的字节数跟这里记下的文件大小
+  // 比对)。
+  std::uintmax_t expected_size = 0;
   {
     std::error_code size_ec;
     const auto sz = std::filesystem::file_size(fp, size_ec);
-    if (!size_ec) is_new = (sz == 0);
+    if (!size_ec) { is_new = (sz == 0); expected_size = sz; }
   }
 
   // bug A:断电导致最后一行没有换行结尾——视为"这一行从未真正写完",原地
@@ -421,7 +465,7 @@ bool PosWriter::open(const std::string& path) {
         discarded_incomplete_line_ = true;
         std::error_code size_ec2;
         const auto sz2 = std::filesystem::file_size(fp, size_ec2);
-        if (!size_ec2) is_new = (sz2 == 0);
+        if (!size_ec2) { is_new = (sz2 == 0); expected_size = sz2; }
         break;
       }
       case TrailingLineOutcome::kNoTruncationNeeded:
@@ -452,9 +496,27 @@ bool PosWriter::open(const std::string& path) {
   // 那种绕开 sentry、无条件抛异常的失败方式不是同一回事)。真正的修复在
   // read_pos() 自己身上(见其实现里 in.bad() 之后 throw 的那一段)——
   // read_pos() 现在会对这种情况真的抛出来,这里的 catch 才有意义接住它。
+  //
+  // Task 1(round 2 hardening):上面这条规则接住的是"读到一半真的撞上
+  // I/O 错误"(badbit)。还有一种更隐蔽的失败方式接不住——FUSE/NFS 上
+  // read() 可能在真实文件末尾之前返回 0,或者文件被并发截断,这两种情况
+  // 下 getline 循环都会"正常"结束(不设 badbit),read_pos() 会以为自己
+  // 读完了整份文件,安静地返回一份不完整的结果(评审实测:500 行只读到
+  // 230 行,open() 照样返回 true,已经写过的时间戳被再次追加)。这里不再
+  // 借道 read_pos(path, ...)(它不知道文件真实大小,没法做这个校验),
+  // 改成直接调用 read_pos_stream 并统计实际消费的字节数,跟 open() 一开始
+  // (必要时截断之后重新)记下的 expected_size 比对——不相等说明这次扫描
+  // 提前停止了,existing_keys_ 不完整,必须按同一条"读失败就让 open() 直接
+  // 失败"的规则处理。
   if (!is_new) {
     try {
-      const auto existing = read_pos(path, PosReadOptions{leap_, ts_});
+      std::ifstream in(path);
+      if (!in) return false;
+      std::uint64_t consumed = 0;
+      const auto existing = read_pos_stream(in, path, PosReadOptions{leap_, ts_}, &consumed);
+      // 读循环"正常"结束却没读完整个文件:read() 提前返回 0(FUSE/NFS)或文件
+      // 被并发截断。键集合不完整,继续打开会让重复记录落盘——fail closed。
+      if (consumed != expected_size) return false;
       for (const auto& rec : existing) existing_keys_.insert(record_time_key_ms(rec, ts_, leap_));
     } catch (const std::exception&) {
       return false;

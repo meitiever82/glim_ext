@@ -1,12 +1,43 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <streambuf>
 #include <string>
 #include "gnss_core/pos_io.hpp"
 #include "gnss_core/pos_io_test_hooks.hpp"
 using namespace gnss_core;
+
+namespace {
+// 前 fail_after 个字节正常供给(每次最多 16 字节,确保失败发生在扫描中途),
+// 之后 underflow() 抛 std::ios_base::failure——这正是 basic_filebuf 在真实
+// EIO 时的行为。std::getline 的 sentry 会吞掉这个异常、只置 badbit,不会
+// 重新抛出;被测函数必须自己检查 badbit。不经过任何代码内注入点。
+class FailingStreambuf : public std::streambuf {
+public:
+  FailingStreambuf(std::string data, std::size_t fail_after)
+      : data_(std::move(data)), fail_after_(std::min(fail_after, data_.size())) {}
+
+protected:
+  int_type underflow() override {
+    if (pos_ >= fail_after_) throw std::ios_base::failure("injected EIO");
+    const std::size_t n = std::min<std::size_t>(sizeof(buf_), fail_after_ - pos_);
+    std::copy(data_.data() + pos_, data_.data() + pos_ + n, buf_);
+    pos_ += n;
+    setg(buf_, buf_, buf_ + n);
+    return traits_type::to_int_type(buf_[0]);
+  }
+
+private:
+  std::string data_;
+  std::size_t fail_after_;
+  std::size_t pos_ = 0;
+  char buf_[16];
+};
+}  // namespace
 
 namespace {
 std::string tmp_path(const char* name) {
@@ -982,4 +1013,69 @@ TEST(PosWriter, InjectedReadPosScanFailureDuringDedupScanLeavesFileUntouchedAndO
          "时,open() 必须直接失败——不能像旧代码那样只收集到故障之前的那"
          "几条键、照样返回 true,那样下一条本该重复的记录就不会被去重";
   EXPECT_EQ(read_raw(p), original) << "去重键收集失败时文件必须一字节都没被动过";
+}
+
+// ---------- Task 1(round 2 hardening):去重扫描遇到"提前 EOF" ----------
+// 去重扫描遇到"提前 EOF"(FUSE/NFS 上 read() 在真实文件末尾之前返回 0、或文件
+// 被并发截断):getline 循环正常结束,流上没有 badbit,read_pos 看起来成功返回了
+// 一份不完整的结果。open() 必须靠"扫描消费的字节数 != 文件大小"识别出来并失败,
+// 否则 existing_keys_ 不完整,后面本该被去重的记录会重复追加。
+TEST(PosWriter, PrematureEofDuringDedupScanLeavesFileUntouchedAndOpenFails) {
+  const std::string p = tmp_path("pw_inject_premature_eof.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  PosRecord b = a; b.stamp += 1.0;
+  PosRecord c = a; c.stamp += 2.0;
+  {
+    PosWriter w;
+    ASSERT_TRUE(w.open(p));
+    ASSERT_TRUE(w.write(a));
+    ASSERT_TRUE(w.write(b));
+    ASSERT_TRUE(w.write(c));
+  }
+  const std::string original = read_raw(p);
+
+  gnss_core::testing::set_trailing_line_read_failure_injector(
+      [](const char* step) { return std::string(step) == "read_pos_premature_eof"; });
+  PosWriter w;
+  const bool opened = w.open(p);
+  gnss_core::testing::set_trailing_line_read_failure_injector(nullptr);
+
+  EXPECT_FALSE(opened) << "去重扫描只读到一部分就\"正常\"结束时,open() 必须失败";
+  EXPECT_EQ(read_raw(p), original) << "失败时文件必须一字节都没被动过";
+  ::remove(p.c_str());
+}
+
+// 同一个文件、不注入任何故障时必须照常打开——证明字节数校验不会误伤健康文件
+// (表头 + 记录每行都以 '\n' 结尾,消费字节数必须恰好等于文件大小)。
+TEST(PosWriter, DedupScanByteCountMatchesAHealthyFileExactly) {
+  const std::string p = tmp_path("pw_bytecount_healthy.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  {
+    PosWriter w;
+    ASSERT_TRUE(w.open(p));
+    ASSERT_TRUE(w.write(a));
+  }
+  PosWriter w;
+  EXPECT_TRUE(w.open(p));
+  EXPECT_TRUE(w.write(a));
+  EXPECT_TRUE(w.last_write_was_suppressed()) << "健康文件重开后去重必须照常生效";
+  w.close();
+  ::remove(p.c_str());
+}
+
+TEST(PosIo, ReadPosFromStreamThrowsWhenTheStreambufFailsMidScan) {
+  std::string content = pos_header(PosTimeSystem::GPST);
+  PosRecord r = sample_record();
+  for (int i = 0; i < 5; ++i) {
+    content += format_pos_record(r, PosTimeSystem::GPST, 18);
+    r.stamp += 1.0;
+  }
+  FailingStreambuf buf(content, content.size() / 2);
+  std::istream in(&buf);
+  EXPECT_THROW(read_pos(in), std::runtime_error);
+
+  std::istringstream healthy(content);
+  EXPECT_EQ(read_pos(healthy).size(), 5u) << "同样的内容不出错时必须完整读出";
 }

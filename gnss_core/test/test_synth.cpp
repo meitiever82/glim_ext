@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
+#include <streambuf>
 
 #include "gnss_core/geodetic.hpp"
 #include "gnss_core/pos_io.hpp"
@@ -12,6 +15,34 @@
 
 using namespace gnss_core;
 using gnss_core::test_fixtures::straight_then_turn;
+
+namespace {
+// 前 fail_after 个字节正常供给(每次最多 16 字节,确保失败发生在扫描中途),
+// 之后 underflow() 抛 std::ios_base::failure——这正是 basic_filebuf 在真实
+// EIO 时的行为。std::getline 的 sentry 会吞掉这个异常、只置 badbit,不会
+// 重新抛出;被测函数必须自己检查 badbit。不经过任何代码内注入点。
+class FailingStreambuf : public std::streambuf {
+public:
+  FailingStreambuf(std::string data, std::size_t fail_after)
+      : data_(std::move(data)), fail_after_(std::min(fail_after, data_.size())) {}
+
+protected:
+  int_type underflow() override {
+    if (pos_ >= fail_after_) throw std::ios_base::failure("injected EIO");
+    const std::size_t n = std::min<std::size_t>(sizeof(buf_), fail_after_ - pos_);
+    std::copy(data_.data() + pos_, data_.data() + pos_ + n, buf_);
+    pos_ += n;
+    setg(buf_, buf_, buf_ + n);
+    return traits_type::to_int_type(buf_[0]);
+  }
+
+private:
+  std::string data_;
+  std::size_t fail_after_;
+  std::size_t pos_ = 0;
+  char buf_[16];
+};
+}  // namespace
 
 TEST(Synth, ZeroNoiseZeroLeverReproducesTrajectory) {
   SynthConfig cfg;
@@ -189,4 +220,17 @@ TEST(Synth, SampleToPosRecordRoundTrip) {
     EXPECT_EQ(b.sats_used, s.sats_used);
     EXPECT_DOUBLE_EQ(b.gnss_time, s.stamp);
   }
+}
+
+TEST(Synth, ReadGlimTrajFromStreamThrowsWhenTheStreambufFailsMidScan) {
+  std::string content = "# timestamp tx ty tz qx qy qz qw\n";
+  for (int i = 0; i < 20; ++i) content += std::to_string(100 + i) + " 1 2 3 0 0 0 1\n";
+  FailingStreambuf buf(content, content.size() / 2);
+  std::istream in(&buf);
+  EXPECT_THROW(read_glim_traj(in), std::runtime_error)
+      << "读到一半 I/O 出错时不能把前一半轨迹当成全部返回——"
+         "estimate_lever_arm 会拿半条轨迹算出一个看起来正常的杆臂";
+
+  std::istringstream healthy(content);
+  EXPECT_EQ(read_glim_traj(healthy).size(), 20u);
 }
