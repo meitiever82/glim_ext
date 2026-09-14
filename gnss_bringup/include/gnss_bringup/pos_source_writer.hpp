@@ -31,6 +31,12 @@ enum class PosSourceEvent {
   kDroppedBadPath,    // pos_path_for 返回空串(防御性分支,理论上不会走到)
   kOpenFailed,        // 本次 open() 失败
   kWriteFailed,       // 本次 write() 失败
+  // final-fix-wave 第 1 项:这条记录的 stamp 落在文件里已有内容的范围内
+  // (bag 重放/进程重启重新收到同一段数据/误起了第二个实例),被
+  // gnss_core::PosWriter 静默去重、没有真正落盘——不是错误,按 need_log
+  // 节流报一次汇总计数(与 kDroppedBadStamp 同一个道理),而不是为区间里
+  // 的每一条都打一行。
+  kSuppressedDuplicate,
 };
 
 struct PosSourceResult {
@@ -48,6 +54,9 @@ struct PosSourceResult {
   // 报一个"到目前为止一共丢了多少条"的计数,而不是让操作人员完全无法知道
   // 丢了多少数据(round 2 review 的 Minor)。
   std::size_t bad_stamp_drop_count = 0;
+  // final-fix-wave 第 1 项:因与文件里已有内容重叠而被去重的记录累计数
+  // (自当前文件的 open() 会话以来),kSuppressedDuplicate 事件里用。
+  std::size_t suppressed_duplicate_count = 0;
 };
 
 // 一路 = 一个 PosDecimator + 一个 PosWriter + 当前路径 + 失败锁存 + 沉默
@@ -61,7 +70,8 @@ public:
         name_(std::move(name)),
         decimator_(period_s),
         writer_(time_system, leap_seconds),
-        last_activity_wall_s_(wall_now_s) {}
+        last_activity_wall_s_(wall_now_s),
+        last_message_wall_s_(wall_now_s) {}
 
   PosSourceWriter(const PosSourceWriter&) = delete;
   PosSourceWriter& operator=(const PosSourceWriter&) = delete;
@@ -77,6 +87,19 @@ public:
   // 绝不用于轮转决策——轮转只看 r.stamp,这正是 Important 4 mutation 1
   // (把轮转依据换成"现在")要挡住的那类回归。
   PosSourceResult handle(const gnss_core::PosRecord& r, double wall_now_s) {
+    // final-fix-wave 第 4 项:记录"这一路确实被调用过一次"的时刻,与下面
+    // last_activity_wall_s_(只在真正成功写出一条记录时才刷新)分开维护。
+    // 目的是把 is_silent() 报的"沉默"进一步区分成两种截然不同的故障:
+    //   1) 从来没被调用过(话题名不对/QoS 不匹配/驱动没启动)——
+    //      has_recent_message() 也会是 false;
+    //   2) 消息一直在到达,只是没能成功写出(root 指向的路径打不开/写不进,
+    //      典型是目录不存在又建不出来、磁盘满、权限不足)——
+    //      has_recent_message() 是 true,但 is_silent() 依然会判定为沉默。
+    // 不区分这两者是 review 发现的原缺陷:默认 root 不存在时,节点先打印
+    // 一次"打开失败"的 ERROR,之后每 5 秒只会重复"检查话题名/QoS/驱动"这个
+    // 完全文不对题的 WARN——消息其实一直在到达。
+    last_message_wall_s_ = wall_now_s;
+
     const StampSanity sanity = classify_utc_stamp(r.stamp);
     if (sanity != StampSanity::kOk) {
       ++bad_stamp_drop_count_;
@@ -125,6 +148,22 @@ public:
 
     error_logged_for_path_ = false;  // 成功写入:清掉锁存,以后再失败会重新报一次
     last_activity_wall_s_ = wall_now_s;
+
+    // final-fix-wave 第 1 项:writer_.write(r) 返回 true 并不一定真的落了
+    // 盘——r.stamp 落在文件里已有内容范围内时,gnss_core::PosWriter 会静默
+    // 去重。这不算失败(is_silent() 该照样把它当"活跃"),但操作人员必须
+    // 知道发生过重叠,否则重放/重启造成的重复行为会完全无声无息。按
+    // kDroppedBadStamp 同样的节流方式(need_log 交给调用方),报一次汇总
+    // 计数,而不是为区间里的每一条都打一行。
+    if (writer_.last_write_was_suppressed()) {
+      PosSourceResult res;
+      res.event = PosSourceEvent::kSuppressedDuplicate;
+      res.need_log = true;
+      res.path = current_path_;
+      res.stamp = r.stamp;
+      res.suppressed_duplicate_count = writer_.suppressed_duplicate_count();
+      return res;
+    }
     return make_result(PosSourceEvent::kWritten, false, r.stamp);
   }
 
@@ -134,6 +173,17 @@ public:
   // 唯一能发现它的办法是一个不依赖消息到达的独立时钟检查。
   bool is_silent(double wall_now_s, double timeout_s) const {
     return (wall_now_s - last_activity_wall_s_) > timeout_s;
+  }
+
+  // final-fix-wave 第 4 项:distinguishes "从没收到过消息" 与 "消息一直在
+  // 到达但没能成功写出" 这两种沉默诱因——过去 timeout_s 秒内 handle() 是不
+  // 是至少被调用过一次(不管这次调用的结果是写成功、被抽稀丢弃、时间戳不
+  // 合理、还是 open()/write() 失败)。调用方应该在 is_silent() 为真时,拿
+  // 这个方法的结果决定报哪一种告警文案:true→"检查 root/输出路径是不是能
+  // 打开、有没有权限/空间";false→"检查话题名/QoS/驱动"——原来两者共用同一
+  // 句文案,root 打不开时会误导操作人员去查一个其实完全正常的话题链路。
+  bool has_recent_message(double wall_now_s, double timeout_s) const {
+    return (wall_now_s - last_message_wall_s_) <= timeout_s;
   }
 
   // round 2 review 的另一个 Important:节点侧原来在 check_silence() 里用
@@ -216,6 +266,9 @@ private:
   double last_failure_log_wall_s_ = 0.0;
 
   double last_activity_wall_s_ = 0.0;
+  // final-fix-wave 第 4 项:与 last_activity_wall_s_ 分开维护——这个只要
+  // handle() 被调用就刷新,不要求写入成功。见 has_recent_message() 的注释。
+  double last_message_wall_s_ = 0.0;
   std::size_t bad_stamp_drop_count_ = 0;
 
   // should_warn_silence() 的每实例节流状态——修复的核心就是这两个字段

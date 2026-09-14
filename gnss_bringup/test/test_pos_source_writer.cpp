@@ -107,6 +107,56 @@ TEST(PosSourceWriter, DecimatesToOneHz) {
   w.close();
 }
 
+// ---------- final-fix-wave 第 1 项:重放/重启接续同一个文件的去重经过
+// PosSourceWriter 这一层能被观察到 ----------
+// gnss_core::PosWriter 自己的去重逻辑在 test_pos_io.cpp 里单独覆盖;这里
+// 只验证 PosSourceWriter 把"这条记录被去重了"翻译成一个操作员能看到的
+// kSuppressedDuplicate 事件,而不是把它和普通的 kWritten 混在一起报不出来。
+
+TEST(PosSourceWriter, ReopeningWithOverlappingRecordsReportsSuppressedDuplicateEvent) {
+  const std::string root = tmp_root("psw_suppressed_dup");
+  const double base = 1789208625.0;
+  {
+    PosSourceWriter w(root, "can", 1.0, gnss_core::PosTimeSystem::GPST, 18, 0.0);
+    ASSERT_EQ(w.handle(at(base), 0.0).event, PosSourceEvent::kWritten);
+    ASSERT_EQ(w.handle(at(base + 1.0), 0.0).event, PosSourceEvent::kWritten);
+    w.close();
+  }
+  // 重开(等价于进程重启),原样重放同一段数据。
+  PosSourceWriter w(root, "can", 1.0, gnss_core::PosTimeSystem::GPST, 18, /*wall_now_s=*/0.0);
+  auto r1 = w.handle(at(base), /*wall_now_s=*/1.0);
+  EXPECT_EQ(r1.event, PosSourceEvent::kSuppressedDuplicate);
+  EXPECT_TRUE(r1.need_log);
+  EXPECT_EQ(r1.suppressed_duplicate_count, 1u);
+
+  auto r2 = w.handle(at(base + 1.0), /*wall_now_s=*/2.0);
+  EXPECT_EQ(r2.event, PosSourceEvent::kSuppressedDuplicate);
+  EXPECT_EQ(r2.suppressed_duplicate_count, 2u)
+      << "累计计数,供操作人员知道这一段重叠一共跳过了多少条";
+
+  // 重放结束、真正的新数据到来:必须正常写入,不再被当成重复。
+  auto r3 = w.handle(at(base + 2.0), /*wall_now_s=*/3.0);
+  EXPECT_EQ(r3.event, PosSourceEvent::kWritten);
+
+  w.close();
+}
+
+TEST(PosSourceWriter, SuppressedDuplicateStillCountsAsActivityForSilenceCheck) {
+  // 去重不是错误、也不是沉默——这条路仍然在正常工作,只是这一条记录没有
+  // 真正落盘,不应该被当成"卡住了"而报沉默告警。
+  const std::string root = tmp_root("psw_suppressed_dup_activity");
+  const double base = 1789208625.0;
+  {
+    PosSourceWriter w(root, "can", 1.0, gnss_core::PosTimeSystem::GPST, 18, 0.0);
+    ASSERT_EQ(w.handle(at(base), 0.0).event, PosSourceEvent::kWritten);
+    w.close();
+  }
+  PosSourceWriter w(root, "can", 1.0, gnss_core::PosTimeSystem::GPST, 18, /*wall_now_s=*/0.0);
+  ASSERT_EQ(w.handle(at(base), /*wall_now_s=*/1000.0).event, PosSourceEvent::kSuppressedDuplicate);
+  EXPECT_FALSE(w.is_silent(1005.0, 10.0)) << "去重也是一次正常的处理,应当刷新活跃时间";
+  w.close();
+}
+
 // ---------- Important 4 (b): 失败锁存——同一路径只报一次,路径变化重新武装 ----------
 // 这是评审用来证明覆盖缺口的第二个变异:把锁存逻辑改坏(比如永远
 // need_log=true)同样能让 142 个既有测试全绿。
@@ -274,6 +324,40 @@ TEST(PosSourceWriter, DecimatedDropsDoNotCountAsActivityForSilenceCheck) {
   w.close();
 }
 
+// ---------- final-fix-wave 第 4 项:区分"没收到过消息"与"消息在到达但
+// 没能写出" ----------
+// 复现的缺陷:默认 root 不存在时,节点先打印一次 open 失败的 ERROR,之后
+// 每 5 秒只会重复"检查话题名是否配对、驱动是否在跑"这句完全文不对题的
+// WARN——消息其实一直在到达,只是写不进去。has_recent_message() 把"handle()
+// 被调用过"这件事和"is_silent() 判定的沉默"分开,让调用方能选对告警文案。
+
+TEST(PosSourceWriter, HasRecentMessageIsFalseWhenHandleHasNeverBeenCalled) {
+  PosSourceWriter w("/tmp/psw_msg_never", "can", 1.0, gnss_core::PosTimeSystem::GPST, 18,
+                     /*wall_now_s=*/1000.0);
+  EXPECT_FALSE(w.has_recent_message(1011.0, 10.0))
+      << "构造之后从未调用过 handle(),不该算收到过消息";
+}
+
+TEST(PosSourceWriter, HasRecentMessageIsTrueEvenWhenTheWriteFails) {
+  // kUnwritableRoot 保证 open() 必然失败——handle() 依然被调用了,消息确实
+  // 到达过,只是没能写出。这正是需要跟"从没收到过消息"区分开的那种情形。
+  PosSourceWriter w(kUnwritableRoot, "can", 1.0, gnss_core::PosTimeSystem::GPST, 18, 0.0);
+  ASSERT_EQ(w.handle(at(1789208625.0), /*wall_now_s=*/5.0).event, PosSourceEvent::kOpenFailed);
+  EXPECT_TRUE(w.has_recent_message(10.0, 10.0))
+      << "5 秒前刚被调用过一次(即使写入失败),还没到超时";
+  EXPECT_TRUE(w.is_silent(11.0, 10.0))
+      << "从没有成功写出过任何记录的角度看(构造时刻=0),is_silent() 依然应该"
+         "判定为沉默——has_recent_message() 是一个独立的信号,不改变 is_silent() 本身";
+  EXPECT_FALSE(w.has_recent_message(20.0, 10.0)) << "距上一次调用已经超过 timeout_s";
+}
+
+TEST(PosSourceWriter, HasRecentMessageStaysTrueAcrossRepeatedFailedWrites) {
+  PosSourceWriter w(kUnwritableRoot, "can", 1.0, gnss_core::PosTimeSystem::GPST, 18, 0.0);
+  ASSERT_EQ(w.handle(at(1789208625.0), 0.0).event, PosSourceEvent::kOpenFailed);
+  ASSERT_EQ(w.handle(at(1789208629.0), 9.0).event, PosSourceEvent::kOpenFailed);
+  EXPECT_TRUE(w.has_recent_message(10.0, 10.0)) << "9 秒前刚刚又被调用过一次";
+}
+
 // ---------- write() 失败:强制关闭,下一条记录重试 open() ----------
 
 // ---------- 沉默告警节流:必须是每个实例自己的状态,不是共享的 ----------
@@ -320,27 +404,75 @@ TEST(PosSourceWriter, IndependentInstancesDoNotShareTheSilenceThrottleWindow) {
 }
 
 TEST(PosSourceWriter, WriteFailureAfterSuccessfulOpenRetriesOpenNextTime) {
-  // 用一个真实的、之后被搞坏权限的目录来复现"open 成功、write 失败"这个
-  // 场景不方便在单测里做到确定性——这里改为验证一个等价但可确定复现的
-  // 属性：文件被删除/替换成一个目录（同名冲突）之后，之前已经打开的
-  // std::ofstream 继续 write() 不会崩，出问题时事件是 kWriteFailed 而不是
-  // 被悄悄吞掉。
+  // final-fix-wave 第 5 项:原来这个用例把 .pos 文件路径替换成一个同名
+  // 目录来制造失败——但 open() 对着一个目录本身就会失败,断言看到的是
+  // kOpenFailed,从来没有真正走到 write() 失败那条分支。证据:把
+  // pos_source_writer.hpp 里 kWriteFailed 分支的 writer_.close() 删掉,
+  // 这个用例照样绿(它压根没走到那一行)。
+  //
+  // 用 /dev/full——Linux 上任何写入都会返回 ENOSPC 的字符设备——的符号
+  // 链接顶替 .pos 文件本身:std::ofstream::open() 对着字符设备能成功打开
+  // (is_open()==true),但紧接着的 flush() 必然失败,流从此进入 fail 状态
+  // 但仍然 is_open()==true——这正是"open 成功、write 失败"在单测里能确定
+  // 复现的写法(reviewer 确认可行)。
   const std::string root = tmp_root("psw_write_fail");
+  const double stamp = 1789208625.0;
+  const std::string path = gnss_bringup::pos_path_for(root, "can", stamp);
+  ASSERT_FALSE(path.empty());
+  std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+  std::filesystem::create_symlink("/dev/full", path);
+
   PosSourceWriter w(root, "can", 1.0, gnss_core::PosTimeSystem::GPST, 18, 0.0);
-  ASSERT_EQ(w.handle(at(1789208625.0), 0.0).event, PosSourceEvent::kWritten);
+  auto r1 = w.handle(at(stamp), 0.0);
+  ASSERT_EQ(r1.event, PosSourceEvent::kWriteFailed)
+      << "open() 对着 /dev/full 会成功,表头/数据的 flush() 才失败";
+  EXPECT_TRUE(r1.need_log) << "第一次失败必须报";
 
-  const std::string path = w.current_path();
-  w.close();  // 主动关掉,模拟"底层流已经不可用"
-  // 把文件路径本身替换成一个目录——is_open() 现在是 false（我们刚 close()
-  // 过），所以下一条记录会走 open() 分支，而 open() 对着一个同名目录必然
-  // 失败，这与"磁盘满/权限不足"是同一类"打开失败"，用来验证失败事件仍然
-  // 被正确地报告，而不是被 close() 之后的状态搞乱。
+  // mutation-check(手动验证,不是这个用例自动做的):把 pos_source_writer.hpp
+  // 里 kWriteFailed 分支的 writer_.close() 删掉之后,is_open() 会一直是
+  // true,下一条记录不会重新走 open() 分支,而是对着同一个已经 fail 的流
+  // 再调一次 write()——结果不变,仍然是 kWriteFailed,但原因从"重新 open
+  // 一个字符设备后 flush 失败"变成了"对一个已经 fail 的流调用不会抛异常
+  // 的 write()",两者外部表现一样,因此不能只看事件类型;下一条断言换一天
+  // (触发轮转 close+reopen)来间接验证 close() 确实发生了:如果没有
+  // close(),current_path_ 不会变,轮转判断 should_rotate() 仍然会因为
+  // 路径不同而重新走 open(),所以这条断言本身对是否删掉 close() 不敏感——
+  // 真正的 mutation 判据见下面 WriteFailureClosesTheStreamSoNextRecordReopens。
+  auto r2 = w.handle(at(stamp + 1.0), 0.0);
+  EXPECT_EQ(r2.event, PosSourceEvent::kWriteFailed);
+  EXPECT_FALSE(r2.need_log) << "同一路径连续失败,不应重复打印";
+
   std::filesystem::remove(path);
-  std::filesystem::create_directory(path);
+}
 
-  auto r = w.handle(at(1789208626.0), 0.0);
-  EXPECT_EQ(r.event, PosSourceEvent::kOpenFailed);
-  EXPECT_TRUE(r.need_log);
+// mutation-check 的真正判据:write() 失败之后如果不主动 close(),
+// is_open() 会一直是 true,下一条记录会跳过 open() 分支、直接对着坏掉的
+// 流再调一次 write()——由于 std::ofstream 对一个已经 fail 的流重复
+// operator<</flush() 是安全的空操作,行为和"重新 open 之后再失败"从外部
+// 看不出区别,只有当"reopen 之后确实可能成功"的场景才能把两者区分开:
+// 换成一个可写的真实路径之后,如果 close() 被删掉,is_open() 依旧是
+// true,PosSourceWriter 永远不会再尝试 open() 这个新路径,行为会一直卡在
+// kWriteFailed;有 close() 的话,下一条记录会重新 open() 并成功写入。
+TEST(PosSourceWriter, WriteFailureClosesTheStreamSoALaterFixIsPickedUpAgain) {
+  const std::string root = tmp_root("psw_write_fail_recovers");
+  const double stamp = 1789208625.0;
+  const std::string path = gnss_bringup::pos_path_for(root, "can", stamp);
+  ASSERT_FALSE(path.empty());
+  std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+  std::filesystem::create_symlink("/dev/full", path);
 
-  std::filesystem::remove_all(path);
+  PosSourceWriter w(root, "can", 1.0, gnss_core::PosTimeSystem::GPST, 18, 0.0);
+  ASSERT_EQ(w.handle(at(stamp), 0.0).event, PosSourceEvent::kWriteFailed);
+
+  // "修好"这个路径:去掉坏掉的符号链接,换成一个真正可写的普通文件位置。
+  std::filesystem::remove(path);
+
+  auto r = w.handle(at(stamp + 1.0), /*wall_now_s=*/100.0);  // 足够的真实时间间隔,避开锁存节流
+  EXPECT_EQ(r.event, PosSourceEvent::kWritten)
+      << "write() 失败必须 close() 掉坏掉的流,下一条记录才会重新走 open() 分支——"
+         "如果 close() 被删掉,is_open() 一直是 true,这里会一直卡在 kWriteFailed,"
+         "永远不会发现路径已经修好";
+
+  w.close();
+  std::filesystem::remove(path);
 }

@@ -281,12 +281,138 @@ TEST(PosWriter, ReopeningAnExistingFileAppendsWithoutRewritingTheHeader) {
   const std::string p = tmp_path("pw_append.pos");
   ::remove(p.c_str());
   { PosWriter w; ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(sample_record())); }
-  { PosWriter w; ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(sample_record())); }
+  // final-fix-wave 第 1 项之后:重开一个已有非空文件会以文件里最后一条
+  // 记录的 stamp 作为去重分界线,<=分界线的记录会被静默跳过——这里第二次
+  // 写入的 stamp 特意晚于第一次,是为了单独验证"重开不重写表头"这一件事,
+  // 不与去重逻辑混在一起(去重本身在下面几个 PosWriter.Reopening* 用例里
+  // 单独覆盖)。
+  PosRecord second = sample_record();
+  second.stamp += 5.0;
+  { PosWriter w; ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(second)); }
   std::ifstream in(p);
   std::string line; int header_lines = 0, data_lines = 0;
   while (std::getline(in, line)) { if (!line.empty() && line[0] == '%') ++header_lines; else if (!line.empty()) ++data_lines; }
   EXPECT_EQ(data_lines, 2);
   EXPECT_EQ(header_lines, 3) << "重开不得再写一遍表头";
+}
+
+// ---------- final-fix-wave 第 1 项:重启/重放接续同一个文件时的去重 ----------
+// 复现的缺陷:pos_writer 对着 can 数据跑 3 秒、SIGTERM、重启、原样重放同一段
+// 数据 → can.pos 变成 …03,04,05,03,04,05。calibrate_sigma_scale 把每一行都
+// 当成独立量测两两配对,被重放的这段因此被静默双倍加权。
+
+TEST(PosWriter, FreshFileNeverSuppressesAnything) {
+  const std::string p = tmp_path("pw_resume_fresh.pos");
+  ::remove(p.c_str());
+  PosWriter w;
+  ASSERT_TRUE(w.open(p));
+  EXPECT_EQ(w.suppressed_duplicate_count(), 0u);
+  ASSERT_TRUE(w.write(sample_record()));
+  EXPECT_FALSE(w.last_write_was_suppressed());
+  EXPECT_EQ(w.suppressed_duplicate_count(), 0u)
+      << "全新文件不存在任何“已有内容”,不应该有任何去重发生";
+}
+
+TEST(PosWriter, ReopeningWithLaterRecordsAppendsThemNormally) {
+  const std::string p = tmp_path("pw_resume_later.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  { PosWriter w; ASSERT_TRUE(w.open(p)); ASSERT_TRUE(w.write(a)); }
+
+  PosRecord b = a;
+  b.stamp += 10.0;   // 晚于文件里已有的最后一条——真正的新数据
+  {
+    PosWriter w;
+    ASSERT_TRUE(w.open(p));
+    EXPECT_TRUE(w.write(b));
+    EXPECT_FALSE(w.last_write_was_suppressed());
+    EXPECT_EQ(w.suppressed_duplicate_count(), 0u);
+  }
+  const auto back = read_pos(p);
+  ASSERT_EQ(back.size(), 2u);
+  EXPECT_NEAR(back[1].stamp, b.stamp, 1e-3);
+}
+
+TEST(PosWriter, ReopeningWithOverlappingRecordsSuppressesThemAndReportsTheCount) {
+  const std::string p = tmp_path("pw_resume_overlap.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  PosRecord b = a; b.stamp += 1.0;
+  PosRecord c = a; c.stamp += 2.0;
+  { PosWriter w; ASSERT_TRUE(w.open(p));
+    ASSERT_TRUE(w.write(a)); ASSERT_TRUE(w.write(b)); ASSERT_TRUE(w.write(c)); }
+
+  {
+    // 原样重放 a/b/c:三条全部 <= 文件里最后一条(c)的 stamp。
+    PosWriter w;
+    ASSERT_TRUE(w.open(p));
+    EXPECT_TRUE(w.write(a));
+    EXPECT_TRUE(w.last_write_was_suppressed());
+    EXPECT_TRUE(w.write(b));
+    EXPECT_TRUE(w.write(c));
+    EXPECT_TRUE(w.last_write_was_suppressed())
+        << "等于分界线本身(“至多”而不是“严格小于”)也应该算重叠";
+    EXPECT_EQ(w.suppressed_duplicate_count(), 3u)
+        << "三条全部重叠,用一个汇总计数报告,而不是各自单独报";
+  }
+  const auto back = read_pos(p);
+  EXPECT_EQ(back.size(), 3u) << "重放的三条一条也不应该落盘,文件内容不变";
+}
+
+TEST(PosWriter, ReopeningWithAMixOfOverlappingAndNewRecordsOnlyAppendsTheNewOnes) {
+  const std::string p = tmp_path("pw_resume_mix.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  PosRecord b = a; b.stamp += 1.0;
+  PosRecord c = a; c.stamp += 2.0;   // 文件里最后一条,续写分界线
+  { PosWriter w; ASSERT_TRUE(w.open(p));
+    ASSERT_TRUE(w.write(a)); ASSERT_TRUE(w.write(b)); ASSERT_TRUE(w.write(c)); }
+
+  PosRecord d = a; d.stamp += 3.0;   // 晚于分界线,真正的新数据
+  {
+    PosWriter w;
+    ASSERT_TRUE(w.open(p));
+    EXPECT_TRUE(w.write(b));  // 重叠,去重
+    EXPECT_TRUE(w.write(c));  // 等于分界线本身,去重
+    EXPECT_TRUE(w.write(d));  // 新数据,应当落盘
+    EXPECT_FALSE(w.last_write_was_suppressed());
+    EXPECT_EQ(w.suppressed_duplicate_count(), 2u);
+  }
+  const auto back = read_pos(p);
+  ASSERT_EQ(back.size(), 4u);
+  EXPECT_NEAR(back[3].stamp, d.stamp, 1e-3);
+}
+
+TEST(PosWriter, PartiallyWrittenLastRowFromAPowerCutDoesNotBreakTheResumeCutoff) {
+  // 模拟断电:文件最后一行只写了一部分列(不足 10 列,没有换行结尾)。
+  // parse_llh_solution 本身就会跳过列数不足的行,分界线因此自然落在它之前
+  // 最后一条完整记录上——残缺行既不影响分界线的确定,也不会被就地修复。
+  const std::string p = tmp_path("pw_resume_partial.pos");
+  ::remove(p.c_str());
+  const PosRecord a = sample_record();
+  {
+    std::ofstream f(p);
+    f << pos_header(PosTimeSystem::GPST);
+    f << format_pos_record(a, PosTimeSystem::GPST, 18);
+    f << "2026/09/03 10:23:46.000 44.5 90.2";  // 断电:后面的列全部缺失
+  }
+
+  PosRecord overlap = a;                 // <= 分界线(a.stamp),应当被去重
+  PosRecord next = a; next.stamp += 1.0;  // 晚于分界线,应当落盘
+
+  PosWriter w;
+  ASSERT_TRUE(w.open(p));
+  EXPECT_TRUE(w.write(overlap));
+  EXPECT_TRUE(w.last_write_was_suppressed())
+      << "分界线必须是最后一条完整记录(a),不能被半行污染成别的值";
+  EXPECT_TRUE(w.write(next));
+  EXPECT_FALSE(w.last_write_was_suppressed());
+  EXPECT_EQ(w.suppressed_duplicate_count(), 1u);
+
+  std::ifstream in(p);
+  const std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  EXPECT_NE(all.find("2026/09/03 10:23:46.000 44.5 90.2"), std::string::npos)
+      << "残缺行原样保留,不做就地修复";
 }
 
 TEST(PosWriter, OutputIsReadableByReadPos) {

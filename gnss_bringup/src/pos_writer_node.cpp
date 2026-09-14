@@ -149,6 +149,23 @@ private:
                        name_.c_str(), res.path.c_str());
         }
         return;
+
+      case PosSourceEvent::kSuppressedDuplicate:
+        // final-fix-wave 第 1 项:这条记录(以及可能更多)与输出文件里已有的
+        // 内容重叠,被静默去重、没有真正落盘——不是错误(bag 重放/进程
+        // 重启重新收到同一段数据/误起了第二个实例的正常现象),但必须报
+        // 一次汇总计数,否则操作人员完全没办法知道发生过这件事。跟
+        // kDroppedBadStamp 一样按累计计数 + THROTTLE,不为区间里的每一条
+        // 都打一行。
+        if (res.need_log) {
+          RCLCPP_WARN_THROTTLE(node_->get_logger(), steady_clock_, 5000,
+                                "%s: %s 已经写过 stamp<=%.3f 的记录,这一条与既有内容"
+                                "重叠,已跳过不重复落盘(累计已跳过 %zu 条;通常是"
+                                "重放/重启接续同一份数据造成的,不是数据丢失)",
+                                name_.c_str(), res.path.c_str(), res.stamp,
+                                res.suppressed_duplicate_count);
+        }
+        return;
     }
   }
 
@@ -162,12 +179,31 @@ private:
     // core_.should_warn_silence(),把"是否应该现在打印"这个节流决策下放到
     // PosSourceWriter 自己按实例持有的状态里(见该函数的注释),这里改用
     // 普通的 RCLCPP_WARN 打印它返回 true 时的这一次。
-    if (!core_.should_warn_silence(steady_now_s(), silence_timeout_s_)) return;
-    RCLCPP_WARN(node_->get_logger(),
-                "%s(topic=%s): 已经超过 %.1f 秒没有写出任何一条记录——"
-                "检查话题名是否配对、驱动是否在跑;订阅固定是 reliable QoS,"
-                "如果对端发布者是 best_effort,同样会表现为持续沉默",
-                name_.c_str(), topic_.c_str(), silence_timeout_s_);
+    //
+    // final-fix-wave 第 4 项:should_warn_silence() 为真只说明"文件没有
+    // 增长",原因可能是两种完全不同的故障——干脆按 core_.has_recent_message()
+    // 分两种文案:从没收到过消息(话题/QoS/驱动问题) vs 消息一直在到达但
+    // 没能写出(root/输出路径/权限问题,典型是默认 root 不存在又建不出来)。
+    // 复现:root 指向一个不存在也建不出来的路径时,原来的实现只会在这里
+    // 反复打印"检查话题名是否配对、驱动是否在跑"——消息其实一直在到达,这
+    // 句话完全文不对题,现场会被引导去排查一个根本没问题的方向。
+    const double now = steady_now_s();
+    if (!core_.should_warn_silence(now, silence_timeout_s_)) return;
+    if (core_.has_recent_message(now, silence_timeout_s_)) {
+      RCLCPP_WARN(node_->get_logger(),
+                  "%s(topic=%s): 消息一直在到达,但已经超过 %.1f 秒没有成功写出任何一条"
+                  "记录到 %s——检查这个路径(以及 pos_writer.root)是否可写、磁盘是否"
+                  "已满;正常情况下这里会先看到一条 open/write 失败的 ERROR,如果没有,"
+                  "说明失败锁存期内又发生了同类失败,详情看最早那一条 ERROR",
+                  name_.c_str(), topic_.c_str(), silence_timeout_s_,
+                  core_.current_path().empty() ? "(尚未确定路径)" : core_.current_path().c_str());
+    } else {
+      RCLCPP_WARN(node_->get_logger(),
+                  "%s(topic=%s): 已经超过 %.1f 秒没有收到过任何消息、也没有写出任何一条"
+                  "记录——检查话题名是否配对、驱动是否在跑;订阅固定是 reliable QoS,"
+                  "如果对端发布者是 best_effort,同样会表现为持续沉默",
+                  name_.c_str(), topic_.c_str(), silence_timeout_s_);
+    }
   }
 
   rclcpp::Node* node_;

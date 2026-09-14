@@ -163,6 +163,28 @@ bool PosWriter::open(const std::string& path) {
     const auto sz = std::filesystem::file_size(fp, size_ec);
     if (!size_ec) is_new = (sz == 0);
   }
+  // final-fix-wave 第 1 项:重新打开一个已存在且非空的文件之前,先确定
+  // 这个文件已经写到哪一秒——否则 write() 没有任何依据判断"这条记录是不是
+  // 已经在文件里了"。复用 read_pos()(不写第二个 .pos 解析器)解析已有
+  // 内容,取最后一条能被成功解析的记录的 stamp 作为分界线;读不出来(理论
+  // 上不该发生,防御性处理)就退化成没有去重保护,好过直接拒绝打开。
+  has_resume_cutoff_ = false;
+  resume_cutoff_ = 0.0;
+  last_write_suppressed_ = false;
+  suppressed_duplicate_count_ = 0;
+  if (!is_new) {
+    try {
+      const auto existing = read_pos(path, PosReadOptions{leap_, ts_});
+      if (!existing.empty()) {
+        has_resume_cutoff_ = true;
+        resume_cutoff_ = existing.back().stamp;
+      }
+    } catch (const std::exception&) {
+      // 文件已经确认存在(上面 file_size 没报错),这里失败极不寻常
+      // (比如竞态下被删掉)——不让它阻止 open(),只是没有去重保护。
+    }
+  }
+
   out_.open(path, std::ios::app);
   if (!out_.is_open()) return false;
   path_ = path;
@@ -174,7 +196,18 @@ bool PosWriter::open(const std::string& path) {
 }
 
 bool PosWriter::write(const PosRecord& r) {
-  if (!out_.is_open()) return false;
+  if (!out_.is_open()) {
+    last_write_suppressed_ = false;
+    return false;
+  }
+  if (has_resume_cutoff_ && r.stamp <= resume_cutoff_) {
+    // 与文件里已有内容重叠(bag 重放/进程重启重新收到同一段数据/误起了
+    // 第二个实例)——静默跳过,不算失败:调用方据此报一次汇总计数。
+    last_write_suppressed_ = true;
+    ++suppressed_duplicate_count_;
+    return true;
+  }
+  last_write_suppressed_ = false;
   out_ << format_pos_record(r, ts_, leap_);
   out_.flush();
   return static_cast<bool>(out_);

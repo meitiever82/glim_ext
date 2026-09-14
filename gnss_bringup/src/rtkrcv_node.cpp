@@ -100,6 +100,19 @@ std::vector<gnss_bringup::StatFileInfo> list_stat_candidates(const fs::path& run
 
 namespace gnss_bringup {
 
+// final-fix-wave 第 6 项:check_sol_port_free() 探测到 sol_port 已经被别人
+// 监听(kListening,见下面的 throw)时,这不是一次"配置有误"——最常见的
+// 原因是上一个 rtkrcv_node 被 kill -9 之后留下的孤儿 rtkrcv,配置本身完全
+// 合法。main() 里原来统一的 catch(std::exception) 把它和真正的配置错误
+// (端口越界、conf 参数非法……)混在一起,都打成一行"启动失败,配置有误",
+// 会把操作人员往错误的方向引导(去检查参数,而不是 `pgrep -a rtkrcv`)。
+// 用一个专门的异常类型,让 main() 能分开措辞——不改变行为或退出码,两条
+// 路径都还是"打一行 RCLCPP_ERROR + 非零退出"。
+class OrphanPortError : public std::runtime_error {
+public:
+  using std::runtime_error::runtime_error;
+};
+
 // 把 Task 1-6 的组件接成一个可运行的 rtkrcv 监管节点。
 class RtkrcvSupervisorNode {
 public:
@@ -352,7 +365,9 @@ private:
       case gnss_bringup::PortProbeResult::kFree:
         return;
       case gnss_bringup::PortProbeResult::kListening:
-        throw std::runtime_error(
+        // final-fix-wave 第 6 项:专用异常类型,main() 据此选用"疑似孤儿
+        // 残留"而不是"配置有误"的措辞——见 OrphanPortError 的注释。
+        throw OrphanPortError(
             "sol_port=" + std::to_string(conf_.sol_port) +
             " 已经有人在监听——很可能是上一次 rtkrcv_node 异常退出(kill -9/OOM)"
             "遗留的孤儿 rtkrcv 进程,也可能是误开的第二个实例。继续启动会导致"
@@ -665,6 +680,17 @@ int main(int argc, char** argv) {
 
   try {
     sup = std::make_unique<gnss_bringup::RtkrcvSupervisorNode>(node.get());
+  } catch (const gnss_bringup::OrphanPortError& e) {
+    // final-fix-wave 第 6 项:sol_port 已经被别人占着,不是配置错误——
+    // 最常见的原因是上一个 rtkrcv_node 被 kill -9 之后留下的孤儿 rtkrcv。
+    // 行为和退出码与下面的通用分支完全一致,只是措辞指向正确的排查方向。
+    RCLCPP_ERROR(node->get_logger(),
+                 "启动失败,sol_port 疑似被残留的孤儿 rtkrcv 占用(不是配置错误):"
+                 " %s",
+                 e.what());
+    sup.reset();
+    rclcpp::shutdown();
+    return 1;
   } catch (const std::exception& e) {
     // 配置错误(端口越界、conf 参数非法、run_dir 建不出来……)必须落成一行
     // RCLCPP_ERROR + 非零退出,不能让异常捅到 main() 外面变成

@@ -106,12 +106,27 @@ pos_writer:
     # 一节)。现场部署前请确认这个路径所在磁盘有足够空间且可写。
     root: "/data/gnss/pos"
     # 每一路各自独立抽稀、独立轮转、独立写文件;一路失败(打不开/写不进)
-    # 不影响其它路(pos_writer_node.cpp 的设计要求)。这里默认接入三路:
-    # 两路来自 gnss_cgi610(driver_ws 里的 gnss_chcnav 节点,两种协议/接口各
-    # 出一路 RtkFix),一路来自本包自己的 rtkrcv_node。gnss_cgi610 不在本仓
-    # 构建范围内,若现场没有这个节点,对应的两路只会持续"沉默"(见下面
-    # silence_timeout_s 的告警),不会导致 pos_writer 本身启动失败。
-    sources: ["can", "gpchc", "rtkrcv"]
+    # 不影响其它路(pos_writer_node.cpp 的设计要求)。
+    #
+    # final-fix-wave 第 3 项:默认只接入一路——"can"(gnss_cgi610 驱动,
+    # driver_ws 里的 gnss_chcnav 节点,发布到下面 can.topic)。此前默认是
+    # ["can", "gpchc", "rtkrcv"],但:
+    #   - "gpchc" 对应的话题 /gnss_cgi610/rtk_fix_gpchc 没有任何发布者——
+    #     gnss_cgi610 驱动只发布一路 RtkFix(即 can 这一路),不存在"两种
+    #     协议/接口各出一路 RtkFix"这回事(旧注释有误,已改正)。
+    #   - "rtkrcv" 这一路依赖 rtkrcv_node,而 launch 文件里 enable_rtkrcv
+    #     默认是 false,rtkrcv_node 默认不会被启动。
+    #   默认三路里有两路在默认配置下必然永久沉默,每 5 秒各报一次 WARN——
+    #   现场很快会把这条本该报警的沉默告警当成"正常噪音"忽略掉,这正是
+    #   沉默检测存在的意义被自己的默认配置废掉。
+    #
+    # 现场需要接入 rtkrcv 这一路时:先 `-p enable_rtkrcv:=true`(或在覆盖
+    # 文件里打开它)启动 rtkrcv_node,再把这里改成
+    # `sources: ["can", "rtkrcv"]`;如果 gnss_cgi610 驱动确实会发布
+    # gpchc 这一路(现场协议确认之后),再加上 "gpchc"。下面 can/gpchc/
+    # rtkrcv 三行 topic 映射都保留在配置里,按需把对应的名字加进 sources
+    # 即可,不需要另外声明。
+    sources: ["can"]
     # 1 Hz 抽稀周期(spec §5.3)。落盘的是"每 period_s 秒取一条"的摘要,不是
     # 全量流——全量原始数据由下面的 rosbag2 录制脚本另外负责。
     period_s: 1.0
@@ -131,6 +146,13 @@ pos_writer:
     # 每一路的订阅话题;pos_writer 固定用 reliable QoS 订阅(与 rtkrcv_node
     # 发布 ~/rtk_fix 用的 QoS 一致),如果对端发布者是 best_effort,同样会
     # 表现为持续沉默——见上面 silence_timeout_s 的告警文案。
+    #
+    # 只有出现在上面 sources 列表里的名字,pos_writer_node 才会真的用
+    # declare_parameter("<name>.topic", ...) 声明这个参数——不在 sources
+    # 里的名字对应的这一行不会被节点读取(YAML 键与实际生效的已声明参数
+    # 保持一致,final-fix-wave 第 3 项)。gpchc/rtkrcv 两行注释掉,是因为
+    # 默认的 sources 只有 "can";现场把某个名字加进 sources 时,取消对应
+    # 这一行的注释即可,topic 值不需要改。
     can:    { topic: "/gnss_cgi610/rtk_fix" }
-    gpchc:  { topic: "/gnss_cgi610/rtk_fix_gpchc" }
-    rtkrcv: { topic: "/rtkrcv_node/rtk_fix" }
+    # gpchc:  { topic: "/gnss_cgi610/rtk_fix_gpchc" }
+    # rtkrcv: { topic: "/rtkrcv_node/rtk_fix" }

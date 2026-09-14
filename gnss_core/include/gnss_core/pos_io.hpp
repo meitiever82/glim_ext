@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -47,6 +48,25 @@ std::string format_pos_record(const PosRecord& r, PosTimeSystem time_system, int
 // 追加式 .pos 写出器(spec §5.3:追加写、崩溃安全)。
 // 与 write_pos 共用同一套表头与单行格式化,格式只写一遍。
 // 打开已存在且非空的文件时不再重写表头,直接续写——因此进程重启不会破坏文件。
+//
+// final-fix-wave 第 1 项(重放/重启接续同一个文件会重复写行):open() 一个
+// 已存在且非空的文件时,复用 read_pos()(不写第二个 .pos 解析器)取文件里
+// 最后一条能被成功解析的记录的 stamp,作为这次续写会话的"分界线"。此后
+// write() 里任何 stamp <= 分界线的记录都被判定为与文件里已有内容重叠
+// (bag 重放、进程重启后重新收到同一段数据、或误起了第二个实例都会产生这种
+// 输入),悄悄跳过、不落盘——但不当成错误(返回 true),只计数,供调用方
+// 报一次"跳过了多少条"。
+//
+// 分界线只在 open() 时确定一次,后续同一个会话里的 write() 不会更新它——
+// 因此同一次运行内(比如两次调用传入完全相同的 stamp)不受这条去重逻辑
+// 影响,这是刻意的:1 Hz 抽稀之类的"同一次运行内不应该出现重复"由更上层的
+// PosDecimator 负责,PosWriter 自己只管"重新打开一个已经有内容的文件时,
+// 不要把已经在磁盘上的东西再写一遍"这一件事,职责边界清楚。
+//
+// 断电导致文件最后一行只写了一半(列数不够 10 列)的情况:parse_llh_solution
+// 本来就会跳过列数不足的行,分界线因此自然落在它之前最后一条完整记录上;
+// 残缺的半行本身既不会被信任为分界线,也不会被就地修复——write() 只管在
+// 它后面继续追加。
 class PosWriter {
 public:
   PosWriter() = default;
@@ -58,16 +78,31 @@ public:
   // 打开(追加模式)。父目录不存在时创建。失败返回 false,不抛。
   bool open(const std::string& path);
   // 追加一条并 flush —— 崩溃安全的代价是每条一次 flush,1 Hz 下可忽略。
+  // stamp <= 续写分界线的记录会被静默去重(不落盘)但仍然返回 true——
+  // 这不是 I/O 失败,调用方用 last_write_was_suppressed()/
+  // suppressed_duplicate_count() 判断要不要报一次去重日志。
   bool write(const PosRecord& r);
   void close();
   bool is_open() const { return out_.is_open(); }
   const std::string& path() const { return path_; }
+
+  // 最近一次 write() 是不是因为与续写分界线重叠而被跳过(没有真正落盘)。
+  bool last_write_was_suppressed() const { return last_write_suppressed_; }
+  // 自本次 open() 以来,因为与文件里已有内容重叠而被跳过的记录累计数——
+  // 每次 open() 重新计数为 0。调用方据此报一次"跳过了多少条",而不是为
+  // 区间里的每一条都打一行日志。
+  std::size_t suppressed_duplicate_count() const { return suppressed_duplicate_count_; }
 
 private:
   std::ofstream out_;
   std::string path_;
   PosTimeSystem ts_ = PosTimeSystem::GPST;
   int leap_ = 18;
+
+  bool has_resume_cutoff_ = false;
+  double resume_cutoff_ = 0.0;
+  bool last_write_suppressed_ = false;
+  std::size_t suppressed_duplicate_count_ = 0;
 };
 
 // RTKLIB Q → 归一化质量:1→FIXED 2→FLOAT 4→DGPS 5→SINGLE 其它→NONE
