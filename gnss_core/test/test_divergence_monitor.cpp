@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 
 #include "gnss_core/divergence_monitor.hpp"
 using namespace gnss_core;
@@ -101,4 +102,61 @@ TEST(DivergenceMonitor, RegimeChangeRestartsTheClock) {
   ASSERT_TRUE(s.since.has_value());
   EXPECT_DOUBLE_EQ(*s.since, 10.0)
       << "由回退模式的旧计时切到 empirical 模式,应重新起算,不能沿用回退阶段的 0.0";
+}
+
+// round3a fix1:上一版"回退/经验切换即清零计时"的规则有一个漏洞——一次持续
+// 时长接近 divergence_window_s 的偏差,会在 empirical 模式下被排除在窗口外,
+// 窗口被剪枝耗尽后掉回回退模式,重置计时,然后回退模式又把故障样本收进窗口,
+// 攒出一份等于故障本身的"经验基线",故障就此被吸收、不再报警。
+// 本用例复现该场景并断言它不会发生:0.5 m 的偏差从 t=20 一直报警到 t=400,
+// 阈值全程远小于 0.5 m(不会被故障样本自己的 RMS 抬上去)。
+TEST(DivergenceMonitor, LongDivergenceIsNotAbsorbedWhenTheWindowStarves) {
+  DivergenceMonitor m(cfg_small());
+  for (int t = 0; t < 20; ++t) m.update(t, 0.02, 0.001);   // 攒出一份 0.02 m 的基线
+  for (int t = 20; t <= 400; ++t) {
+    const auto s = m.update(t, 0.5, 0.001);
+    ASSERT_TRUE(s.since.has_value()) << "t=" << t;
+    EXPECT_DOUBLE_EQ(*s.since, 20.0) << "t=" << t;
+    EXPECT_LT(s.threshold_m, 0.5) << "t=" << t;
+  }
+}
+
+// round3a fix1:只有真正的数据缺口(配对样本间隔 >= divergence_window_s)才应该
+// 重新预热;一次真正的数据缺口之后,重新预热期间依然按 design decision 2 判定
+// (回退阈值),直到窗口重新攒够样本才转回经验模式。
+TEST(DivergenceMonitor, LongPairingGapRestartsWarmUp) {
+  DivergenceMonitor m(cfg_small());
+  for (int t = 0; t < 20; ++t) m.update(t, 0.02, 0.001);
+  m.update(200.0, std::nullopt, 0.001);   // 隧道/信号中断:200-19=181 >= window_s(100)
+
+  const auto s1 = m.update(250.0, 0.1, 0.001);   // 250-200 一段时间没配对了,重新预热
+  ASSERT_TRUE(s1.since.has_value());
+  EXPECT_DOUBLE_EQ(*s1.since, 250.0);
+  EXPECT_EQ(m.window_size(), 1u)
+      << "重新预热:按回退阈值 0.003 判定(0.1 超限),但样本仍要入窗口";
+
+  for (int t = 251; t <= 259; ++t) m.update(t, 0.1, 0.001);   // 窗口攒到 10(含 t=250 的那个)
+  const auto s2 = m.update(260.0, 0.1, 0.001);
+  EXPECT_TRUE(s2.empirical);
+  EXPECT_FALSE(s2.since.has_value()) << "预热在这一拍开始时结束,重新起算计时";
+  EXPECT_NEAR(s2.threshold_m, 0.3, 1e-9);   // 基线 0.1 → 阈值 0.3
+}
+
+TEST(DivergenceMonitor, NonFiniteDivergenceIsIgnored) {
+  {
+    DivergenceMonitor m(cfg_small());
+    m.update(0.0, 0.02, 0.001);
+    const auto s = m.update(1.0, std::numeric_limits<double>::quiet_NaN(), 0.001);
+    EXPECT_FALSE(s.divergence_m.has_value());
+    EXPECT_FALSE(s.since.has_value());
+    EXPECT_EQ(m.window_size(), 1u);
+  }
+  {
+    DivergenceMonitor m(cfg_small());
+    m.update(0.0, 0.02, 0.001);
+    const auto s = m.update(1.0, std::numeric_limits<double>::infinity(), 0.001);
+    EXPECT_FALSE(s.divergence_m.has_value());
+    EXPECT_FALSE(s.since.has_value());
+    EXPECT_EQ(m.window_size(), 1u);
+  }
 }

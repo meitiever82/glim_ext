@@ -3,10 +3,25 @@
 // σ 用最近 divergence_window_s 内"未超限"时的偏差 RMS——设计文档要求经验 σ 且排除当前偏差段,
 // 这样 610 "自信地错"(自报 σ 很小)也能被抓到;样本不足(divergence_min_samples)时回退到
 // rtkrcv 自报 σ 判定(design decision 2:回退阶段仍然判定,不是不判定)。
-// 回退阶段为了能攒起经验基线,样本无论是否超限都要入窗口——代价是预热期里若真的
-// 发生过一次偏差,会被计入第一份经验基线;经验阶段沿用原规则,超限样本排除在
-// 窗口外。回退/经验两种模式切换的瞬间,持续超限计时(since)重新起算,不借用
-// 另一种模式下攒的旧计时。
+//
+// 用显式的预热状态 warming_up_,不再从 empirical 派生("回退/经验切换即重置计时"
+// 那版规则会让一次持续 ~divergence_window_s 的偏差被剪枝耗尽窗口、误判成新基线,
+// round3a fix1 已发现并推翻):
+//   1. 预热期(warming_up_ == true):样本无论是否超限都要入窗口,并用当前阈值
+//      (窗口样本不够 min_samples 时是回退 σ)判定——超限则起算/保持 since,
+//      否则清零。
+//   2. 预热期里窗口第一次攒够 divergence_min_samples,转入经验模式,并在判定
+//      这一拍之前清零 since(经验模式的第一次真正超限该有自己的起始时刻,不能
+//      借用预热期攒下的旧计时)。这是唯一会清零 since 的模式切换。
+//   3. 预热期结束后:超限样本排除在窗口外、不重启计时;不超限则清零 since 并
+//      入窗口——不论此刻阈值是经验的还是(窗口被剪枝耗尽后回落到的)回退阈值
+//      都一样,一次持续的故障不能靠耗尽窗口把自己"学"成新基线。
+//   4. 只有真正的数据缺口(两次配对样本时刻间隔 >= divergence_window_s)才重新
+//      预热;持续故障期间每秒都有配对样本,不会触发。未配对(nullopt)的 tick
+//      不更新配对时刻。
+//   5. 非有限值(NaN/inf)一律当作没配上处理:不入窗口、不重启/保持 since、
+//      不更新配对时刻。
+// 代价:预热期里若真的发生过一次偏差,会被计入第一份经验基线。
 #include <cstddef>
 #include <deque>
 #include <optional>
@@ -35,7 +50,8 @@ private:
   size_t min_samples_;
   std::deque<std::pair<double, double>> window_;   // (t, d)
   std::optional<double> since_;
-  bool prev_empirical_ = false;   // 上一 tick 的模式(回退/经验),用于探测模式切换
+  bool warming_up_ = true;              // 是否还在预热(窗口尚未攒够经验基线)
+  std::optional<double> last_paired_t_; // 最近一次"配对上"(divergence_m 有限值)的时刻
 };
 
 }  // namespace gnss_core
