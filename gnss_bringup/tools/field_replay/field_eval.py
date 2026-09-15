@@ -251,6 +251,60 @@ def wrap180(a: float) -> float:
     return (a + 180.0) % 360.0 - 180.0
 
 
+def heading_circular_std_deg(headings: Sequence[float]) -> Optional[float]:
+    """航向的圆周标准差(°):sqrt(-2 ln R),R 为单位向量平均长度;跨 0° 正确处理。"""
+    if not headings:
+        return None
+    c = sum(math.cos(math.radians(h)) for h in headings) / len(headings)
+    s_ = sum(math.sin(math.radians(h)) for h in headings) / len(headings)
+    r = min(1.0, math.hypot(c, s_))
+    if r <= 1e-12:
+        return float("inf")
+    return math.degrees(math.sqrt(max(0.0, -2.0 * math.log(r))))
+
+
+# 判定参数:航向圆周标准差至少这么大,车体系与地理系的偏移才分得开(直线行驶两者无法区分)
+MIN_HEADING_CIRC_STD_DEG = 30.0
+MIN_OFFSET_SAMPLES = 30
+SMALL_OFFSET_M = 0.2
+
+
+def classify_offset(de: Sequence[float], dn: Sequence[float], headings: Sequence[float]) -> Tuple[str, str]:
+    """水平差 (de, dn) 与对应航向 → (类别, 说明)。
+    类别:too_few | insufficient_heading | small | body_fixed | geo_fixed | inconclusive。
+    body_fixed 要求:航向圆周标准差 ≥ MIN_HEADING_CIRC_STD_DEG、车体系均值合 > SMALL_OFFSET_M、
+    车体系标准差合 < 均值合的一半、且小于 ENU 标准差合。"""
+    n = len(headings)
+    if n < MIN_OFFSET_SAMPLES:
+        return "too_few", f"样本 {n} < {MIN_OFFSET_SAMPLES},无法判定"
+    fw, rt = [], []
+    for e, nn, h in zip(de, dn, headings):
+        f_, r_ = body_decompose(e, nn, h)
+        fw.append(f_)
+        rt.append(r_)
+    mf, sf = mean_std(fw)
+    mr, sr = mean_std(rt)
+    me, se = mean_std(list(de))
+    mn, sn = mean_std(list(dn))
+    body_std = math.hypot(sf, sr)
+    enu_std = math.hypot(se, sn)
+    mag = math.hypot(mf, mr)
+    cstd = heading_circular_std_deg(headings)
+    if mag <= SMALL_OFFSET_M and math.hypot(me, mn) <= SMALL_OFFSET_M:
+        return "small", f"车体系均值合 {mag:.3f} m ≤ {SMALL_OFFSET_M} m,未见明显偏移"
+    if cstd < MIN_HEADING_CIRC_STD_DEG:
+        return "insufficient_heading", (f"航向圆周标准差 {cstd:.1f}° < {MIN_HEADING_CIRC_STD_DEG:.0f}°,航向变化不足,"
+                                        "分不清车体系固定(杆臂)与地理系固定偏移")
+    if mag > SMALL_OFFSET_M and body_std < 0.5 * mag and body_std < enu_std:
+        return "body_fixed", (f"**提示存在车体系固定偏移(杆臂)**:车体系均值 前 {mf:.3f} / 右 {mr:.3f} m(合 {mag:.3f} m),"
+                              f"车体系标准差合 {body_std:.3f} m < ENU 标准差合 {enu_std:.3f} m,航向圆周标准差 {cstd:.1f}°")
+    if enu_std < body_std and math.hypot(me, mn) > SMALL_OFFSET_M:
+        return "geo_fixed", (f"**偏移不随航向转动**:ENU 均值 东 {me:.3f} / 北 {mn:.3f} m,ENU 标准差合 {enu_std:.3f} m "
+                             f"< 车体系标准差合 {body_std:.3f} m,更像地理系固定偏移(基准/基站坐标差)而非杆臂")
+    return "inconclusive", (f"车体系均值合 {mag:.3f} m、标准差合 {body_std:.3f} m,ENU 标准差合 {enu_std:.3f} m,"
+                            "不满足任一判据")
+
+
 # ---------------------------------------------------------------------------
 # events.log
 # ---------------------------------------------------------------------------
@@ -422,13 +476,13 @@ def fnum(v, nd=3) -> str:
 
 
 def ftime(t: Optional[float], gpst: bool = False) -> str:
+    """UTC unix 秒 → "HH:MM:SS.mmm";先整体四舍五入到毫秒再拆秒,x.9996 进位到下一秒。"""
     if t is None:
         return "—"
     import time as _t
-    tt = t + (GPS_UTC_LEAP if gpst else 0)
-    whole = math.floor(tt + 1e-6)
-    frac = tt - whole
-    return _t.strftime("%H:%M:%S", _t.gmtime(whole)) + f".{int(round(frac * 1000)) % 1000:03d}"[:4]
+    total_ms = int(round((t + (GPS_UTC_LEAP if gpst else 0)) * 1000.0))
+    whole, ms = divmod(total_ms, 1000)
+    return _t.strftime("%H:%M:%S", _t.gmtime(whole)) + f".{ms:03d}"
 
 
 def table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
@@ -648,7 +702,7 @@ def evaluate(run: str, ref_path: str, bag_path: Optional[str], out_path: str, la
                         cogs[d.t] = course_deg(e, n)
                 if bh[j] is not None:
                     headings[d.t] = bh[j]
-            heading_src = (f"录包 `/gnss_cgi610/rtk_fix.heading`(双天线航向,heading_valid=true,按 gnss_time 与 can.pos "
+            heading_src = (f"录包 `/gnss_cgi610/rtk_fix.heading`(610 航向,heading_valid=true,按 gnss_time 与 can.pos "
                            f"历元配对,容差 0.03 s);速度由同话题 50 Hz 位置在 t±0.5 s 的位移求得")
         if not headings:
             # 退回:can.pos 相邻历元航迹向,仅速度 > 1 m/s
@@ -703,25 +757,11 @@ def evaluate(run: str, ref_path: str, bag_path: Optional[str], out_path: str, la
                          f"|差| p95 {fnum(quantile([abs(x) for x in dh], 0.95), 2)}°(大于 90° 的多为倒车)。\n")
         # 判定
         fw, rt, sp, sf, sr, se_, sn_, mf, mr = info_all
-        verdict = "样本不足,无法判定"
-        if len(fw) >= 30 and sf is not None and sr is not None:
-            body_std = math.hypot(sf, sr)
-            enu_std = math.hypot(se_, sn_)
-            mag = math.hypot(mf, mr)
-            if mag > 0.2 and body_std < 0.5 * mag and body_std <= enu_std:
-                verdict = (f"**提示存在固定杆臂偏移**:车体系均值 前 {mf:.3f} / 右 {mr:.3f} m(合 {mag:.3f} m),"
-                           f"车体系标准差合 {body_std:.3f} m,小于 ENU 标准差合 {enu_std:.3f} m")
-            elif mag > 0.2 and enu_std < body_std:
-                verdict = (f"**偏移不随航向转动**:ENU 标准差合 {enu_std:.3f} m < 车体系标准差合 {body_std:.3f} m,"
-                           "偏移更像固定在地理坐标系(基准/基站坐标差)而非车体杆臂")
-            elif mag <= 0.2:
-                verdict = f"车体系均值合 {mag:.3f} m ≤ 0.2 m,未见明显杆臂偏移"
-            else:
-                verdict = (f"车体系均值合 {mag:.3f} m,但标准差合 {body_std:.3f} m 不够小(判据:< 均值合的一半),"
-                           "不能确认是固定杆臂")
-        L.append("自动判定(判据:车体系均值合 > 0.2 m、车体系标准差合 < 均值合的一半、且不大于 ENU 标准差合 → 固定杆臂):"
-                 + verdict + "。\n")
-        if verdict.startswith("**提示存在固定杆臂偏移**"):
+        sel = [d for d in dref if d.t in headings]
+        kind, verdict = classify_offset([d.de for d in sel], [d.dn for d in sel], [headings[d.t] for d in sel])
+        L.append(f"自动判定(判据:航向圆周标准差 ≥ {MIN_HEADING_CIRC_STD_DEG:.0f}°、车体系均值合 > {SMALL_OFFSET_M} m、"
+                 "车体系标准差合 < 均值合的一半且小于 ENU 标准差合 → 车体系固定偏移):" + verdict + "。\n")
+        if kind == "body_fixed":
             lever_body = (mf, mr)
             for d in dref:
                 if d.t in headings:
@@ -919,7 +959,8 @@ def judge_event(iv: EventInterval, data_end: Optional[float], ref_in: List[PosRe
             fixed = sum(1 for r in rtk_in if r.q == 1) / len(rtk_in)
             rm = quantile(rtk_d, 0.5)
             if dur >= 60 and fixed >= 0.95 and rm < 0.05:
-                return "无法判定(解算未受影响)", (f"持续 {dur:.0f} s,同期 rtkrcv 固定率 {100 * fixed:.0f}%、与 ref 水平中位 {rm:.3f} m;"
+                full = (iv.t_close - iv.t_open) if iv.t_close is not None else None
+                return "无法判定(解算未受影响)", (f"截至数据终点持续 {dur:.0f} s(事件记录时长 {fnum(full, 1)} s,含数据结束后的尾部),同期 rtkrcv 固定率 {100 * fixed:.0f}%、与 ref 水平中位 {rm:.3f} m;"
                                                  "pos 层面否定不了残差/失锁本身,但'动态遮挡/天线馈线问题'之类原因在解上没有体现")
         return "无法判定", ("pos 层面无法直接验证残差/失锁;同期 ref 固定率 "
                            f"{fnum(ref_fix_rate, 0)}%" + (f"、rtkrcv−ref 水平中位 {quantile(rtk_d, 0.5):.2f} m" if rtk_d else ""))

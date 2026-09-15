@@ -317,5 +317,73 @@ class EventsLogTest(unittest.TestCase):
         self.assertIsNone(ns.t_close)
 
 
+class FtimeTest(unittest.TestCase):
+    def test_millisecond_rounding_carries_into_seconds(self):
+        # x.9996 s 四舍五入到毫秒应进位成下一秒 .000,不能打印成本秒 .000
+        self.assertEqual(fe.ftime(T_UTC + 0.9996), "08:49:32.000")
+        self.assertEqual(fe.ftime(T_UTC + 59.9996), "08:50:31.000")
+
+    def test_plain_and_gpst(self):
+        self.assertEqual(fe.ftime(T_UTC + 0.02), "08:49:31.020")
+        self.assertEqual(fe.ftime(T_UTC, gpst=True), "08:49:49.000")
+        self.assertEqual(fe.ftime(None), "—")
+
+
+def _offsets(headings, body=None, geo=None):
+    """按航向序列造 (de, dn):body=(前, 右) 车体系固定偏移,geo=(de, dn) 地理系固定偏移。"""
+    de, dn = [], []
+    for i, hdg in enumerate(headings):
+        noise = 0.01 * math.sin(7.0 * i)
+        e = n = 0.0
+        if body is not None:
+            h = math.radians(hdg)
+            e += body[0] * math.sin(h) + body[1] * math.cos(h)
+            n += body[0] * math.cos(h) - body[1] * math.sin(h)
+        if geo is not None:
+            e += geo[0]
+            n += geo[1]
+        de.append(e + noise)
+        dn.append(n - noise)
+    return de, dn
+
+
+class OffsetClassificationTest(unittest.TestCase):
+    def test_circular_std_of_headings(self):
+        self.assertAlmostEqual(fe.heading_circular_std_deg([45.0] * 10), 0.0, places=6)
+        self.assertAlmostEqual(fe.heading_circular_std_deg([359.0, 1.0]), 1.0, delta=0.01)   # 跨 0° 不能当成 180° 散布
+        self.assertGreater(fe.heading_circular_std_deg([0.0, 90.0, 180.0, 270.0] * 5), 90.0)
+        self.assertIsNone(fe.heading_circular_std_deg([]))
+
+    def test_straight_drive_with_geographic_offset_is_not_body_fixed(self):
+        hdgs = [45.0 + 0.5 * math.sin(i) for i in range(100)]   # 直线行驶,航向几乎不变
+        de, dn = _offsets(hdgs, geo=(3.0, -2.0))
+        kind, _ = fe.classify_offset(de, dn, hdgs)
+        self.assertNotEqual(kind, "body_fixed")
+        self.assertEqual(kind, "insufficient_heading")
+        # 航向完全不变时车体系与 ENU 标准差相等,旧判据(车体系标准差 ≤ ENU 标准差)会误判为杆臂
+        hdgs = [45.0] * 100
+        de, dn = _offsets(hdgs, geo=(3.0, -2.0))
+        self.assertEqual(fe.classify_offset(de, dn, hdgs)[0], "insufficient_heading")
+
+    def test_turning_drive_with_body_offset_is_body_fixed(self):
+        hdgs = [i * 3.6 for i in range(100)]   # 转满一圈
+        de, dn = _offsets(hdgs, body=(-8.45, 1.85))
+        kind, text = fe.classify_offset(de, dn, hdgs)
+        self.assertEqual(kind, "body_fixed")
+        self.assertIn("-8.45", text)
+
+    def test_turning_drive_with_geographic_offset_is_geo_fixed(self):
+        hdgs = [i * 3.6 for i in range(100)]
+        de, dn = _offsets(hdgs, geo=(3.0, -2.0))
+        kind, _ = fe.classify_offset(de, dn, hdgs)
+        self.assertEqual(kind, "geo_fixed")
+
+    def test_small_offset_and_too_few_samples(self):
+        hdgs = [i * 3.6 for i in range(100)]
+        de, dn = _offsets(hdgs, body=(0.05, 0.02))
+        self.assertEqual(fe.classify_offset(de, dn, hdgs)[0], "small")
+        self.assertEqual(fe.classify_offset(de[:10], dn[:10], hdgs[:10])[0], "too_few")
+
+
 if __name__ == "__main__":
     unittest.main()
