@@ -124,6 +124,25 @@ TEST(GnssDiagNodeProcess, StartupGraceDelaysTheFirstJudgement) {
   EXPECT_EQ(node.wait_exit(20.0), 0) << node.log();
 }
 
+TEST(GnssDiagNodeProcess, InterruptDuringStartupIsNotAConfigError) {
+  // 回归:root 目录在构造函数开头建出来,之后还要建 publisher/subscription/service/定时器。
+  // 这段时间里收到 SIGINT,rclcpp 的信号处理器先让 context 失效,后面的 create_* 抛
+  // "rcl node's context is invalid",main() 以前把它当成配置错误打"启动失败,配置有误"
+  // 并退出 1。root 目录一出现就立刻打断,反复几轮。
+  for (int round = 0; round < 5; ++round) {
+    SCOPED_TRACE("round=" + std::to_string(round));
+    const auto dir = make_temp_dir("diag_node_intr_");
+    ASSERT_FALSE(dir.empty());
+    TempDirGuard dir_guard(dir);
+    const std::string root = dir + "/diag";
+    NodeProcess node(GNSS_DIAG_NODE_PATH, diag_args(root, 0.0), dir + "/node.log", isolated_env(dir));
+    ASSERT_TRUE(wait_until([&] { return fs::exists(root); }, 20.0, 1ms)) << node.log();
+    node.interrupt();
+    EXPECT_EQ(node.wait_exit(20.0), 0) << node.log();
+    EXPECT_EQ(node.log().find("启动失败"), std::string::npos) << node.log();
+  }
+}
+
 TEST(GnssDiagNodeProcess, WiresInputsToDiagnosticsBaseHistoryAndTheResetService) {
   const auto dir = make_temp_dir("diag_node_wire_");
   ASSERT_FALSE(dir.empty());

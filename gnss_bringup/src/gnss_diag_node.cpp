@@ -329,17 +329,38 @@ private:
 int main(int argc, char** argv) {
   std::shared_ptr<rclcpp::Node> node;
   std::unique_ptr<gnss_bringup::GnssDiagNode> diag;
+  std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> executor;
+  bool rclcpp_initialized = false;
   // 与 pos_writer_node.cpp 相同:rclcpp::init / 节点构造 / 参数声明的异常统一收口成一行错误 + 退出码 1
   try {
     rclcpp::init(argc, argv);
+    rclcpp_initialized = true;
+    // executor 紧跟 init 建好,不用 rclcpp::spin(node):后者在里面临时构造 executor,
+    // 构造函数刚走完、还没进 spin 时收到停止信号,executor 的 guard condition 会因
+    // context 失效而抛,那一行在 try 外面就是 SIGABRT(见 rtkrcv_node.cpp main())。
+    executor = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
     node = std::make_shared<rclcpp::Node>("gnss_diag");
     diag = std::make_unique<gnss_bringup::GnssDiagNode>(node.get());
+    executor->add_node(node);
   } catch (const gnss_bringup::RootDirError& e) {
     RCLCPP_ERROR(node->get_logger(), "启动失败: %s", e.what());
     diag.reset();
     if (rclcpp::ok()) rclcpp::shutdown();
     return 1;
   } catch (const std::exception& e) {
+    // 启动途中收到 SIGINT/SIGTERM:rclcpp 的信号处理器先让 context 失效,节点构造或
+    // GnssDiagNode 构造函数里的 create_* 随即抛 "context is invalid"。这是正常的停机
+    // 请求,不是配置错误,退出 0。rclcpp::init 本身抛出时 rclcpp::ok() 同样为假,
+    // 所以要先确认 init 已经成功,免得把 --ros-args 解析失败也当成中断。
+    if (rclcpp_initialized && !rclcpp::ok()) {
+      if (node) {
+        RCLCPP_INFO(node->get_logger(), "启动过程中收到停止信号,放弃启动: %s", e.what());
+      } else {
+        std::fprintf(stderr, "gnss_diag: 启动过程中收到停止信号,放弃启动: %s\n", e.what());
+      }
+      diag.reset();
+      return 0;
+    }
     if (node) {
       RCLCPP_ERROR(node->get_logger(), "启动失败,配置有误: %s", e.what());
     } else {
@@ -350,7 +371,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  rclcpp::spin(node);
+  executor->spin();   // context 已经失效时立刻返回
+  executor->remove_node(node);
+  executor.reset();
   diag->shutdown();   // node 仍存活:now()、日志都可用
   diag.reset();
   rclcpp::shutdown();

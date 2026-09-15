@@ -32,6 +32,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -172,6 +173,10 @@ public:
       subscribe_uplink_streams();
       start_stat_tailer();
       start_health_publisher();
+      // 构造完成的唯一标志。"rtkrcv 已启动 pid=" 是监管线程在 start_supervisor()
+      // 里打的,那时后面几步(话题、定时器)还没建;要在"节点已完整起来"之后
+      // 才动手的人(测试、运维脚本)等这一行。
+      RCLCPP_INFO(node_->get_logger(), "rtkrcv_node 已就绪");
     } catch (...) {
       stop_stat_tailer();
       // 与析构函数保持同样的停止顺序:subscribe_uplink_streams() 等后续步骤
@@ -754,11 +759,21 @@ private:
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<rclcpp::Node>("rtkrcv_node");
+  std::shared_ptr<rclcpp::Node> node;
   std::unique_ptr<gnss_bringup::RtkrcvSupervisorNode> sup;
+  std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> executor;
 
+  // 启动期间一切会建 rcl 实体的步骤都放进 try:rclcpp::init 之后任何时刻收到 SIGINT,
+  // context 都会立刻失效,之后再建的节点(参数服务)、话题、定时器、guard condition
+  // 都会抛,留在 try 外面就是 std::terminate()/SIGABRT。executor 也不例外——
+  // rclcpp::spin(node) 在里面临时构造 executor,构造时建 guard condition,构造函数
+  // 刚走完、还没进 spin 时来的信号同样会让它抛(gnss_cleanup_node 的测试实测打中过)。
+  // 所以 executor 在 init 之后第一个建好,后面只 add_node + spin。
   try {
+    executor = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
+    node = std::make_shared<rclcpp::Node>("rtkrcv_node");
     sup = std::make_unique<gnss_bringup::RtkrcvSupervisorNode>(node.get());
+    executor->add_node(node);
   } catch (const gnss_bringup::OrphanPortError& e) {
     // final-fix-wave 第 6 项:sol_port 已经被别人占着,不是配置错误——
     // 最常见的原因是上一个 rtkrcv_node 被 kill -9 之后留下的孤儿 rtkrcv。
@@ -771,16 +786,39 @@ int main(int argc, char** argv) {
     rclcpp::shutdown();
     return 1;
   } catch (const std::exception& e) {
+    // 启动途中收到 SIGINT/SIGTERM:rclcpp 的信号处理器先让 context 失效,构造函数
+    // 后面的 create_subscription/create_publisher 随即抛 "rcl node's context is
+    // invalid"。这是一次正常的停机请求,不是配置错误——不能打"配置有误"误导排查,
+    // 也不能退出 1(systemd/launch 会把它当成故障)。构造函数自己的 catch 已经停掉
+    // ProcessSupervisor、收掉 rtkrcv 子进程;这里照常 reset + shutdown 后退出 0。
+    // 信号处理器之外没有别的地方会让 context 失效,!rclcpp::ok() 足以区分。
+    if (!rclcpp::ok()) {
+      if (node) {
+        RCLCPP_INFO(node->get_logger(), "启动过程中收到停止信号,放弃启动: %s", e.what());
+      } else {
+        std::fprintf(stderr, "rtkrcv_node: 启动过程中收到停止信号,放弃启动: %s\n", e.what());
+      }
+      sup.reset();
+      rclcpp::shutdown();
+      return 0;
+    }
     // 配置错误(端口越界、conf 参数非法、run_dir 建不出来……)必须落成一行
     // RCLCPP_ERROR + 非零退出,不能让异常捅到 main() 外面变成
     // std::terminate()——现场操作人员需要看到的是清楚的报错,不是 core dump。
-    RCLCPP_ERROR(node->get_logger(), "启动失败,配置有误: %s", e.what());
+    if (node) {
+      RCLCPP_ERROR(node->get_logger(), "启动失败,配置有误: %s", e.what());
+    } else {
+      std::fprintf(stderr, "rtkrcv_node: 启动失败,配置有误: %s\n", e.what());
+    }
     sup.reset();
     rclcpp::shutdown();
     return 1;
   }
 
-  rclcpp::spin(node);
+  // 与 rclcpp::spin(node) 相同的三步;context 已经失效时 spin() 会立刻返回
+  executor->spin();
+  executor->remove_node(node);
+  executor.reset();
 
   // 显式按类析构函数注释里那套顺序停止,必须发生在 node 本身析构之前——
   // sup 析构时 node 仍然完整存活,回调里 node_->now() / publisher::publish()

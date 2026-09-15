@@ -50,8 +50,16 @@ void run_pass(rclcpp::Node& node, const gnss_bringup::CleanupParams& p) {
 int main(int argc, char** argv) {
   std::shared_ptr<rclcpp::Node> node;
   gnss_bringup::CleanupParams p;
+  rclcpp::TimerBase::SharedPtr timer;
+  std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> executor;
+  bool rclcpp_initialized = false;
   try {
     rclcpp::init(argc, argv);
+    rclcpp_initialized = true;
+    // executor 紧跟 init 建好,不用 rclcpp::spin(node):后者在里面临时构造 executor,
+    // 下面第一轮清理期间收到停止信号时,executor 的 guard condition 会因 context 失效
+    // 而抛,那一行在 try 外面就是 SIGABRT(测试实测打中过)。
+    executor = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
     node = std::make_shared<rclcpp::Node>("gnss_cleanup");
     p.bag_root = node->declare_parameter<std::string>("bag_root", "");
     p.pos_root = node->declare_parameter<std::string>("pos_root", "");
@@ -61,7 +69,24 @@ int main(int argc, char** argv) {
     p.watermark_pct = node->declare_parameter<double>("watermark_pct", p.watermark_pct);
     p.interval_s = node->declare_parameter<double>("interval_s", p.interval_s);
     gnss_bringup::validate_cleanup_params(p);
+    // 定时器也在 try 里建:启动途中收到停止信号时 create_wall_timer 会因 context 失效而抛,
+    // 放在 try 外面就是 std::terminate()/SIGABRT。它建好之后节点才算起来,"已启动"
+    // 与第一轮清理都排在它后面。
+    timer = node->create_wall_timer(std::chrono::milliseconds(static_cast<int64_t>(p.interval_s * 1000.0)),
+                                    [&node, &p] { run_pass(*node, p); });
+    executor->add_node(node);
   } catch (const std::exception& e) {
+    // 启动途中收到 SIGINT/SIGTERM:rclcpp 的信号处理器先让 context 失效,节点构造
+    // (参数服务)或 create_wall_timer 随即抛 "context is invalid"。这是正常的停机请求,
+    // 不是配置错误,退出 0。rclcpp::init 本身抛出时 rclcpp::ok() 同样为假,先确认 init 成功过。
+    if (rclcpp_initialized && !rclcpp::ok()) {
+      if (node) {
+        RCLCPP_INFO(node->get_logger(), "启动过程中收到停止信号,放弃启动: %s", e.what());
+      } else {
+        std::fprintf(stderr, "gnss_cleanup: 启动过程中收到停止信号,放弃启动: %s\n", e.what());
+      }
+      return 0;
+    }
     if (node) {
       RCLCPP_ERROR(node->get_logger(), "启动失败,配置有误: %s", e.what());
     } else {
@@ -75,9 +100,9 @@ int main(int argc, char** argv) {
               p.bag_root.empty() ? "-" : p.bag_root.c_str(), p.pos_root.empty() ? "-" : p.pos_root.c_str(),
               p.retention_days, p.watermark_pct, p.interval_s);
   run_pass(*node, p);
-  const auto timer = node->create_wall_timer(
-      std::chrono::milliseconds(static_cast<int64_t>(p.interval_s * 1000.0)), [&node, &p] { run_pass(*node, p); });
-  rclcpp::spin(node);
+  executor->spin();   // context 已经失效时立刻返回
+  executor->remove_node(node);
+  executor.reset();
   rclcpp::shutdown();
   return 0;
 }

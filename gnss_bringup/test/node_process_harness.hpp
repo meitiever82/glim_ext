@@ -86,11 +86,14 @@ inline std::size_t count_occurrences(const std::string& hay, const std::string& 
   return n;
 }
 
-inline bool wait_until(const std::function<bool()>& pred, double timeout_s) {
+// poll 默认 50 ms;"启动中途中断"一类测试要在构造函数剩下的几毫秒窗口里送出信号,
+// 需要传 1 ms 这样的细粒度轮询。
+inline bool wait_until(const std::function<bool()>& pred, double timeout_s,
+                       std::chrono::milliseconds poll = std::chrono::milliseconds(50)) {
   const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_s);
   while (std::chrono::steady_clock::now() < end) {
     if (pred()) return true;
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(poll);
   }
   return pred();
 }

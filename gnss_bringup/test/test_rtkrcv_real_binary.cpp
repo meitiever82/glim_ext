@@ -121,7 +121,8 @@ TEST(RtkrcvRealBinary, ReplayedTwoStationRtcmYieldsRtkFixesThroughTheNode) {
       [&] {
         ex.spin_some(std::chrono::milliseconds(20));
         return pub_obs->get_subscription_count() > 0 && pub_corr->get_subscription_count() > 0 &&
-               node.log().find("sol stream: connected") != std::string::npos;
+               node.log().find("sol stream: connected") != std::string::npos &&
+               node.log().find("rtkrcv_node 已就绪") != std::string::npos;
       },
       30.0);
   if (!ready) {
