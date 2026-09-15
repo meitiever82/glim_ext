@@ -124,3 +124,14 @@ TEST(Retention, CleanupDatedRootOnARealDirectory) {
   EXPECT_TRUE(missing.deleted.empty());
   std::filesystem::remove_all(root);
 }
+
+TEST(Retention, DiskUsedPctOfARealPathAndOfAMissingOne) {
+  const char* base = std::getenv("TMPDIR");
+  const std::string dir = base ? base : "/tmp";
+  const auto pct = disk_used_pct(dir);
+  ASSERT_TRUE(pct.has_value());
+  EXPECT_GE(*pct, 0.0);
+  EXPECT_LE(*pct, 100.0);
+  EXPECT_FALSE(disk_used_pct(dir + "/definitely_absent_retention_dir_xyz").has_value())
+      << "查不到用量时要让调用方知道,而不是当成 0%";
+}

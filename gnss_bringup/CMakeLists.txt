@@ -13,6 +13,8 @@ find_package(gnss_msgs REQUIRED)
 # 下游包(本包)必须自己补上,否则找不到 FindGeographicLib.cmake。
 list(APPEND CMAKE_MODULE_PATH "/usr/share/cmake/geographiclib")
 find_package(gnss_core REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 # 不依赖 ROS 的 I/O 与进程管理,便于单测
 add_library(gnss_bringup_io SHARED
@@ -39,13 +41,29 @@ install(TARGETS rtcm_bridge DESTINATION lib/${PROJECT_NAME})
 
 add_executable(rtkrcv_node src/rtkrcv_node.cpp)
 target_link_libraries(rtkrcv_node gnss_bringup_io gnss_core::gnss_core)
-ament_target_dependencies(rtkrcv_node rclcpp gnss_msgs)
+ament_target_dependencies(rtkrcv_node rclcpp gnss_msgs diagnostic_msgs)
 install(TARGETS rtkrcv_node DESTINATION lib/${PROJECT_NAME})
 
 add_executable(pos_writer src/pos_writer_node.cpp)
 target_link_libraries(pos_writer gnss_bringup_io gnss_core::gnss_core)
 ament_target_dependencies(pos_writer rclcpp gnss_msgs)
 install(TARGETS pos_writer DESTINATION lib/${PROJECT_NAME})
+
+add_executable(gnss_diag_node src/gnss_diag_node.cpp)
+target_link_libraries(gnss_diag_node gnss_core::gnss_core)
+# diag_node_support.hpp / rtk_fix_mapping.hpp 在本包 include/ 下;本目标不链接
+# gnss_bringup_io(不需要 TCP/进程管理),所以没有从别处间接拿到这条 include 路径。
+target_include_directories(gnss_diag_node PRIVATE include)
+ament_target_dependencies(gnss_diag_node rclcpp gnss_msgs diagnostic_msgs std_srvs)
+install(TARGETS gnss_diag_node DESTINATION lib/${PROJECT_NAME})
+
+add_executable(gnss_cleanup_node src/gnss_cleanup_node.cpp)
+target_link_libraries(gnss_cleanup_node gnss_core::gnss_core)
+# 与 gnss_diag_node 同样的道理:cleanup_params.hpp 在本包 include/ 下,本目标没有链接
+# gnss_bringup_io(不需要 TCP/进程管理),没有从别处间接拿到这条 include 路径。
+target_include_directories(gnss_cleanup_node PRIVATE include)
+ament_target_dependencies(gnss_cleanup_node rclcpp)
+install(TARGETS gnss_cleanup_node DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -97,6 +115,13 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pos_rotation test/test_pos_rotation.cpp)
   target_include_directories(test_pos_rotation PRIVATE include)
 
+  # diag_node_support.hpp:gnss_diag_node 的纯逻辑(消息转换、状态组装、按天追加写、
+  # base.pos 末行、时钟回跳、控制点参数),不起节点
+  ament_add_gtest(test_diag_node_support test/test_diag_node_support.cpp)
+  target_link_libraries(test_diag_node_support gnss_core::gnss_core)
+  target_include_directories(test_diag_node_support PRIVATE include test)
+  ament_target_dependencies(test_diag_node_support gnss_msgs diagnostic_msgs)
+
   # pos_writer_params.hpp 是纯函数(time_system/leap_seconds/record 时间戳
   # 合理性的校验),不碰 ROS 节点,pos_writer_node.cpp 自己的可独立测试的
   # 部分,和 rtcm_bridge_params.hpp/test_rtcm_bridge_params 同样的处理方式。
@@ -119,6 +144,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_sol_stream_log_gate test/test_sol_stream_log_gate.cpp)
   target_include_directories(test_sol_stream_log_gate PRIVATE include)
 
+  # rtkrcv_health.hpp:健康评估纯函数
+  ament_add_gtest(test_rtkrcv_health test/test_rtkrcv_health.cpp)
+  target_include_directories(test_rtkrcv_health PRIVATE include)
+  ament_target_dependencies(test_rtkrcv_health diagnostic_msgs)
+
   # 节点级测试:把 rtkrcv_node 可执行文件当子进程起,配 fake_rtkrcv.sh。
   # 用 gtest 而不是 launch_testing:开发机的 pytest 9.1.1 与 Humble 的
   # launch_testing 插件不兼容。
@@ -126,6 +156,16 @@ if(BUILD_TESTING)
   target_include_directories(test_rtkrcv_node_process PRIVATE include test)
   add_dependencies(test_rtkrcv_node_process rtkrcv_node)
   target_compile_definitions(test_rtkrcv_node_process PRIVATE
+    RTKRCV_NODE_PATH="$<TARGET_FILE:rtkrcv_node>"
+    FAKE_RTKRCV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test/fake_rtkrcv.sh")
+
+  # rtkrcv_node 健康话题的节点级测试:假 rtkrcv + 本进程 rclcpp 订阅 ~/diagnostics,
+  # 并在 sol_port 上扮演 rtkrcv 的解算输出
+  ament_add_gtest(test_rtkrcv_node_health_process test/test_rtkrcv_node_health_process.cpp TIMEOUT 180)
+  target_include_directories(test_rtkrcv_node_health_process PRIVATE include test)
+  ament_target_dependencies(test_rtkrcv_node_health_process rclcpp gnss_msgs diagnostic_msgs)
+  add_dependencies(test_rtkrcv_node_health_process rtkrcv_node)
+  target_compile_definitions(test_rtkrcv_node_health_process PRIVATE
     RTKRCV_NODE_PATH="$<TARGET_FILE:rtkrcv_node>"
     FAKE_RTKRCV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test/fake_rtkrcv.sh")
 
@@ -140,6 +180,30 @@ if(BUILD_TESTING)
     RTKRCV_NODE_PATH="$<TARGET_FILE:rtkrcv_node>"
     RTKRCV_FAKETIME_WRAPPER="${CMAKE_CURRENT_SOURCE_DIR}/test/rtkrcv_faketime.sh"
     GNSS_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/data")
+
+  # gnss_diag_node 节点级测试:起子进程,本进程用 rclcpp 喂数据/收诊断/调服务/发 /clock。
+  # 1005 帧构造复用 gnss_core 的测试夹具(同一仓库的兄弟包,只在测试里引用)。
+  find_package(rosgraph_msgs REQUIRED)
+  ament_add_gtest(test_gnss_diag_node_process test/test_gnss_diag_node_process.cpp TIMEOUT 240)
+  target_link_libraries(test_gnss_diag_node_process gnss_core::gnss_core)
+  target_include_directories(test_gnss_diag_node_process PRIVATE include test
+    ${CMAKE_CURRENT_SOURCE_DIR}/../gnss_core/test)
+  ament_target_dependencies(test_gnss_diag_node_process rclcpp gnss_msgs diagnostic_msgs std_srvs rosgraph_msgs)
+  add_dependencies(test_gnss_diag_node_process gnss_diag_node)
+  target_compile_definitions(test_gnss_diag_node_process PRIVATE
+    GNSS_DIAG_NODE_PATH="$<TARGET_FILE:gnss_diag_node>")
+
+  # cleanup_params.hpp:清理节点的参数校验与一轮清理(先录包根目录,再 .pos 根目录)
+  ament_add_gtest(test_cleanup_params test/test_cleanup_params.cpp)
+  target_link_libraries(test_cleanup_params gnss_core::gnss_core)
+  target_include_directories(test_cleanup_params PRIVATE include test)
+
+  ament_add_gtest(test_gnss_cleanup_node_process test/test_gnss_cleanup_node_process.cpp TIMEOUT 120)
+  target_link_libraries(test_gnss_cleanup_node_process gnss_core::gnss_core)
+  target_include_directories(test_gnss_cleanup_node_process PRIVATE include test)
+  add_dependencies(test_gnss_cleanup_node_process gnss_cleanup_node)
+  target_compile_definitions(test_gnss_cleanup_node_process PRIVATE
+    GNSS_CLEANUP_NODE_PATH="$<TARGET_FILE:gnss_cleanup_node>")
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})

@@ -33,4 +33,8 @@ CleanupReport cleanup_dated_root(const std::string& root,
                                  const std::function<std::optional<int>(const std::string&)>& parse_date,
                                  int today_yyyymmdd, int retention_days, double watermark_pct);
 
+// path 所在文件系统的已用百分比(0–100)。fs::space 失败或容量为 0 时为空——
+// 调用方要能区分"查不到"与"用了 0%"(3a 遗留 C:以前静默退化为只按天数删除)。
+std::optional<double> disk_used_pct(const std::string& path);
+
 }  // namespace gnss_core

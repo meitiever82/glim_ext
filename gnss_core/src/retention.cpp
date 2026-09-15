@@ -100,10 +100,7 @@ CleanupReport cleanup_dated_root(const std::string& root,
     if (const auto date = parse_date(name)) entries.push_back({name, *date});
   }
   const auto used_pct = [&root]() {
-    std::error_code space_ec;
-    const auto info = fs::space(root, space_ec);
-    if (space_ec || info.capacity == 0) return 0.0;   // 查不到用量时只按保留天数删
-    return static_cast<double>(info.capacity - info.free) / static_cast<double>(info.capacity) * 100.0;
+    return disk_used_pct(root).value_or(0.0);   // 查不到用量时只按保留天数删(节点清理后会复查并报出)
   };
   const auto remove = [&root](const std::string& name) {
     std::error_code rm_ec;
@@ -113,6 +110,13 @@ CleanupReport cleanup_dated_root(const std::string& root,
   report.deleted = sweep_dated_entries(std::move(entries), today_yyyymmdd, retention_days, watermark_pct,
                                        used_pct, remove);
   return report;
+}
+
+std::optional<double> disk_used_pct(const std::string& path) {
+  std::error_code ec;
+  const auto info = std::filesystem::space(path, ec);
+  if (ec || info.capacity == 0) return std::nullopt;
+  return static_cast<double>(info.capacity - info.free) / static_cast<double>(info.capacity) * 100.0;
 }
 
 }  // namespace gnss_core

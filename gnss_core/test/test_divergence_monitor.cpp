@@ -13,6 +13,8 @@ DiagnosisConfig cfg_small() {
   c.divergence_window_s = 100.0;
   c.divergence_min_samples = 10;
   c.divergence_sigma_floor_m = 0.05;
+  // 既有用例钉的是不设上限时的窗口/预热/held 行为(基线常取 0.2 m),上限另有专门用例
+  c.divergence_sigma_max_m = 10.0;
   return c;
 }
 }  // namespace
@@ -228,4 +230,63 @@ TEST(DivergenceMonitor, ShortPairingGapKeepsTheLearnedBaseline) {
   EXPECT_FALSE(s.since.has_value()) << "0.5 < 0.6;若丢了 held 基线,阈值只剩 0.15,会误判超限";
   EXPECT_TRUE(s.empirical);
   EXPECT_NEAR(s.threshold_m, 0.6, 1e-9);
+}
+
+// 设计决定 4:不可学习的样本(任一路不是 FIXED)照常判定、计时,但不进经验窗口——
+// 预热期与预热结束后都一样。
+TEST(DivergenceMonitor, NonLearnableSamplesAreJudgedButNotAdmitted) {
+  DivergenceMonitor m(cfg_small());
+  auto s = m.update(0.0, 0.02, 0.001, false);
+  EXPECT_EQ(m.window_size(), 0u) << "预热期里不可学习的样本也不能入窗口";
+  s = m.update(1.0, 0.5, 0.001, false);
+  ASSERT_TRUE(s.since.has_value()) << "不可学习不等于不判定:0.5 > 0.15";
+  EXPECT_DOUBLE_EQ(*s.since, 1.0);
+
+  DivergenceMonitor w(cfg_small());
+  for (int t = 0; t < 10; ++t) w.update(t, 0.02, 0.001);   // 窗口攒满 10 个
+  s = w.update(10.0, 0.03, 0.001, false);                   // 预热在这一拍结束;0.03 < 0.15
+  EXPECT_FALSE(s.since.has_value());
+  EXPECT_EQ(w.window_size(), 10u) << "未超限但不可学习:不入窗口";
+  s = w.update(11.0, 0.5, 0.001, false);
+  ASSERT_TRUE(s.since.has_value());
+  EXPECT_DOUBLE_EQ(*s.since, 11.0);
+}
+
+// 设计决定 4:学到的 σ 最多 divergence_sigma_max_m,阈值里来自学习的部分最多 3 × 上限
+TEST(DivergenceMonitor, LearnedSigmaIsCapped) {
+  auto cfg = cfg_small();
+  cfg.divergence_sigma_max_m = 0.10;
+  DivergenceMonitor m(cfg);
+  for (int t = 0; t < 10; ++t) m.update(t, 0.2, 0.001);   // 窗口 RMS 0.2
+  const auto s = m.update(10.0, 0.35, 0.001);
+  EXPECT_TRUE(s.empirical);
+  EXPECT_NEAR(s.threshold_m, 0.30, 1e-9) << "不设上限时是 0.6";
+  ASSERT_TRUE(s.since.has_value()) << "0.35 > 0.30";
+  EXPECT_DOUBLE_EQ(*s.since, 10.0);
+}
+
+// 3a 遗留 A.1:启动时就存在的 0.5 m 持续偏差,预热期会被收进窗口,但上限让它学不成"正常"
+TEST(DivergenceMonitor, AnOffsetPresentFromStartIsStillReportedAfterWarmUp) {
+  auto cfg = cfg_small();
+  cfg.divergence_sigma_max_m = 0.10;
+  DivergenceMonitor m(cfg);
+  for (int t = 0; t < 10; ++t) m.update(t, 0.5, 0.001);
+  for (int t = 10; t <= 400; ++t) {
+    const auto s = m.update(t, 0.5, 0.001);
+    ASSERT_TRUE(s.since.has_value()) << "t=" << t;
+    EXPECT_DOUBLE_EQ(*s.since, 10.0) << "t=" << t << ":预热结束那一拍重新起算,之后一直保持";
+    EXPECT_LE(s.threshold_m, 0.30 + 1e-9) << "t=" << t;
+  }
+}
+
+// 3a 遗留 C:held 基线只存窗口 RMS(带下限、上限),从不存本拍的当前 σ
+TEST(DivergenceMonitor, HeldBaselineNeverStoresTheCurrentSigma) {
+  DivergenceMonitor m(cfg_small());
+  for (int t = 0; t < 10; ++t) m.update(t, 0.02, 0.001);   // 基线 = 下限 0.05
+  const auto raised = m.update(10.0, 0.02, 0.3);             // 当前 σ 0.3 抬高本拍阈值
+  EXPECT_NEAR(raised.threshold_m, 0.9, 1e-9);
+  // t=105:t<=5 的样本出窗,剩 6..10 共 5 个 < 10,走 held 基线;105-10=95 < 100 不算缺口
+  const auto s = m.update(105.0, 0.5, 0.001);
+  EXPECT_TRUE(s.empirical);
+  EXPECT_NEAR(s.threshold_m, 0.15, 1e-9) << "held 基线若存了当前 σ,这里会是 0.9";
 }

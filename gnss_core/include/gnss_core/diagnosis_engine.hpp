@@ -51,6 +51,8 @@ public:
   // 还没收到过任何 1005/1006 时什么都不做,返回 nullopt。
   std::optional<BaseUpdate> reset_base_baseline(double t);
   std::optional<Ecef> baseline() const { return base_.baseline(); }
+  // 当前已开事件的规则码(字典序),壳发布状态时列出
+  std::vector<std::string> open_event_codes() const { return events_.open_codes(); }
 
 private:
   bool fresh(const std::optional<double>& t, double now) const;

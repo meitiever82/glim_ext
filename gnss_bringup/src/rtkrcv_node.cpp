@@ -13,6 +13,7 @@
 //   6. TcpStream 连 rtkrcv 的解算输出端口,按行切分喂 parse_llh_solution
 //   7. 订阅 corrections/raw_obs,broadcast 进两个 LocalReserver
 //   8. 轮询 run_dir 下最新的 rtkrcv_*.stat,tail 新增字节,原样发布
+//   9. 1 Hz 发布 ~/diagnostics:子进程是否在跑、多久没有解算行、上行是否有数据(rtkrcv_health.hpp)
 //
 // 析构顺序:先停我们自己起的辅助线程(stat tail——它只是观察者,不参与
 // Task 1-6 组件之间的数据流,什么时候停都不影响正确性),然后严格按 brief
@@ -37,6 +38,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -44,6 +46,7 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <gnss_msgs/msg/raw_stream.hpp>
 #include <gnss_msgs/msg/rtk_fix.hpp>
 
@@ -54,6 +57,7 @@
 #include "gnss_bringup/rtcm_bridge_params.hpp"   // is_valid_port_for_direction:与 rtcm_bridge_node 共用的端口校验
 #include "gnss_bringup/rtk_fix_mapping.hpp"       // to_rtk_fix + LineSplitter + plan_stat_tail
 #include "gnss_bringup/rtkrcv_conf.hpp"
+#include "gnss_bringup/rtkrcv_health.hpp"         // evaluate_rtkrcv_health:~/diagnostics 的纯评估函数
 #include "gnss_bringup/sol_stream_log_gate.hpp"   // sol 流状态日志去重
 #include "gnss_bringup/tcp_stream.hpp"
 #include "gnss_core/rtkstat.hpp"                  // parse_llh_solution
@@ -101,6 +105,11 @@ std::vector<gnss_bringup::StatFileInfo> list_stat_candidates(const fs::path& run
   return out;
 }
 
+inline int64_t steady_now_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 }  // namespace
 
 namespace gnss_bringup {
@@ -139,6 +148,7 @@ public:
     // 再原样把异常继续往外抛给 main() 的 catch,而不是依赖“把起线程的语句
     // 挪到最后一行”这种容易被后续改动悄悄破坏的顺序假设。
     try {
+      started_ns_ = steady_now_ns();
       read_params();
       // fix round 1(独立评审实测复现):这一步必须排在 start_local_reservers()/
       // write_conf() 之前——check_sol_port_free() 只依赖 read_params() 已经
@@ -161,6 +171,7 @@ public:
       connect_solution_stream();
       subscribe_uplink_streams();
       start_stat_tailer();
+      start_health_publisher();
     } catch (...) {
       stop_stat_tailer();
       // 与析构函数保持同样的停止顺序:subscribe_uplink_streams() 等后续步骤
@@ -251,6 +262,7 @@ private:
     pos_opts_.default_time_system = gnss_core::PosTimeSystem::GPST;
 
     stat_poll_interval_s_ = declare_positive_seconds("stat_poll_interval_s", 0.2);
+    health_no_solution_warn_s_ = declare_positive_seconds("health_no_solution_warn_s", 30.0);
 
     if (run_dir_.empty()) {
       throw std::invalid_argument("run_dir 不能为空");
@@ -488,8 +500,8 @@ private:
           // final-fix-wave 第 2 项:terminal=true 说明这条 TcpStream 的
           // worker 线程已经永久退出(sol_port 这条是客户端流,目前唯一会
           // 触发的终态路径是 eventfd() 分配失败),不会再有任何重连尝试。
-          // 这个节点不会自动重启它,也没有健康检查话题,现场只能靠这行
-          // 日志发现——必须是 ERROR。
+          // 这个节点不会自动重启它;~/diagnostics 随后会因为没有解算行转为
+          // WARN,但原因只在这行日志里——必须是 ERROR。
           // 隧道里 rtkrcv 长时间没有解算输出时,TcpStream 每 sol_idle_timeout_s
           // 报一次 idle timeout 断开、紧接着一次 connected——不加控制会在
           // INFO 级别刷一整夜。SolStreamLogGate 只放行第一次 idle 周期,
@@ -541,6 +553,8 @@ private:
       gnss_core::PosRecord rec;
       if (!gnss_core::parse_llh_solution(line, rec, pos_opts_)) continue;
 
+      last_solution_ns_.store(steady_now_ns());
+
       {
         std::lock_guard<std::mutex> lk(sol_log_mutex_);
         sol_log_gate_.on_solution_line();
@@ -567,11 +581,13 @@ private:
     corr_sub_ = node_->create_subscription<gnss_msgs::msg::RawStream>(
         corr_topic_, rclcpp::QoS(100).reliable(),
         [this](const gnss_msgs::msg::RawStream::SharedPtr msg) {
+          if (!msg->data.empty()) last_uplink_ns_.store(steady_now_ns());
           corr_reserver_.broadcast(msg->data.data(), msg->data.size());
         });
     obs_sub_ = node_->create_subscription<gnss_msgs::msg::RawStream>(
         obs_topic_, rclcpp::QoS(100).reliable(),
         [this](const gnss_msgs::msg::RawStream::SharedPtr msg) {
+          if (!msg->data.empty()) last_uplink_ns_.store(steady_now_ns());
           obs_reserver_.broadcast(msg->data.data(), msg->data.size());
         });
     RCLCPP_INFO(node_->get_logger(), "订阅上行: %s -> corr, %s -> obs",
@@ -665,6 +681,30 @@ private:
     return total;
   }
 
+  // ---------- Step 8: 健康状态 ----------
+  // 墙钟定时器:健康看的是真实流逝的时间,不跟随 sim time。回调在 spin 线程上,只读原子量。
+  void start_health_publisher() {
+    health_pub_ = node_->create_publisher<diagnostic_msgs::msg::DiagnosticArray>("~/diagnostics", 10);
+    health_timer_ = node_->create_wall_timer(std::chrono::seconds(1), [this] { publish_health(); });
+  }
+
+  void publish_health() {
+    const int64_t now_ns = steady_now_ns();
+    const auto since = [now_ns](int64_t t_ns) -> std::optional<double> {
+      if (t_ns == 0) return std::nullopt;
+      return static_cast<double>(now_ns - t_ns) * 1e-9;
+    };
+    RtkrcvHealthInput in;
+    in.child_running = supervisor_ && supervisor_->child_running();
+    in.since_start_s = static_cast<double>(now_ns - started_ns_) * 1e-9;
+    in.since_solution_s = since(last_solution_ns_.load());
+    in.since_uplink_s = since(last_uplink_ns_.load());
+    diagnostic_msgs::msg::DiagnosticArray arr;
+    arr.header.stamp = node_->now();
+    arr.status.push_back(evaluate_rtkrcv_health(in, health_no_solution_warn_s_));
+    health_pub_->publish(arr);
+  }
+
   rclcpp::Node* node_;
 
   RtkrcvConfParams conf_;
@@ -677,6 +717,12 @@ private:
   std::string corr_topic_, obs_topic_, frame_id_;
   gnss_core::PosReadOptions pos_opts_;
   double stat_poll_interval_s_ = 0.2;
+  double health_no_solution_warn_s_ = 30.0;
+  int64_t started_ns_ = 0;
+  std::atomic<int64_t> last_solution_ns_{0};   // TcpStream 线程写,spin 线程读;0 = 从未
+  std::atomic<int64_t> last_uplink_ns_{0};     // 订阅回调写
+  rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr health_pub_;
+  rclcpp::TimerBase::SharedPtr health_timer_;
 
   // 声明顺序仅影响“构造中途抛异常”这一种边缘路径下的自动析构顺序;正常
   // 路径下的停止顺序由上面手写的析构函数体决定,不依赖这里的排列。

@@ -625,3 +625,31 @@ TEST(ProcessSupervisor, ChildDiesWhenTheForkingThreadGoesAway) {
   EXPECT_TRUE(gone) << "helper 进程被 SIGKILL 之后 rtkrcv 仍然活着,"
                        "PR_SET_PDEATHSIG 没生效(或者没有跨 execve 保留)";
 }
+
+TEST(ProcessSupervisor, ChildRunningTracksTheChildLifetime) {
+  auto s = std::make_shared<ProcessSupervisor>(cfg_for("live", 0.1));
+  EXPECT_FALSE(s->child_running());
+  s->start();
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!s->child_running() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  EXPECT_TRUE(s->child_running());
+  ASSERT_EQ(stop_async(s).wait_for(std::chrono::seconds(10)), std::future_status::ready);
+  EXPECT_FALSE(s->child_running());
+}
+
+TEST(ProcessSupervisor, ChildRunningIsFalseWhileWaitingToRestart) {
+  auto c = cfg_for("die", 5.0);
+  c.max_restart_delay_s = 5.0;
+  auto s = std::make_shared<ProcessSupervisor>(c);
+  s->start();
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (s->spawn_count() < 1 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));   // 立即退出的子进程已被回收,正在退避
+  EXPECT_EQ(s->spawn_count(), 1);
+  EXPECT_FALSE(s->child_running());
+  ASSERT_EQ(stop_async(s).wait_for(std::chrono::seconds(10)), std::future_status::ready);
+}

@@ -32,10 +32,8 @@
 #                         `.pos` 按 UTC 零点换文件是两套不同的机制,不要混淆。
 #   GNSS_BAG_STORAGE      rosbag2 存储后端,对应 `--storage`。默认 sqlite3。
 #
-# 缺口(spec A6,轮 3 做,这里只记录,不实现):rosbag2 本身没有按保留天数
-# 或磁盘水位自动清理旧 bag 的能力——这个脚本只管"怎么录",不管"录多了怎么
-# 删"。长期运行必须由运维自行监控 GNSS_BAG_ROOT 所在磁盘的占用并手动/用外部
-# 定时任务清理,否则会把磁盘写满。详见 README「rosbag2 录制」一节。
+# 清理:本脚本只管"怎么录"。旧 bag 由 gnss_cleanup_node(随 gnss_bringup.launch.py 默认启动)
+# 按保留天数与磁盘水位删除,它的 bag_root 默认与这里的 GNSS_BAG_ROOT 一致。详见 README「清理节点」。
 set -euo pipefail
 
 GNSS_BAG_ROOT="${GNSS_BAG_ROOT:-$HOME/gnss_bags}"
