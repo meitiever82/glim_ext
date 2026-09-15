@@ -575,7 +575,7 @@ private:
     if (sol_splitter_.overflow_count() != prev_overflow) {
       // 限流:超限本身在真正配错(binary format / 接错端口)的场景下会
       // 持续发生,不节流会刷屏。
-      RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), steady_clock_, 5000,
                             "sol 流单行超过上限被丢弃(累计 %zu 次)——"
                             "检查 outstr1-format / sol_port 是否接对了流",
                             sol_splitter_.overflow_count());
@@ -591,7 +591,7 @@ private:
           if (corr_reserver_.broadcast(msg->data.data(), msg->data.size()) == 0 && !msg->data.empty()) {
             corr_dropped_bytes_ += msg->data.size();
             // 节流:rtkrcv 启动/重启的头几秒没连上属正常;持续出现说明 rtkrcv 连不上本机端口
-            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 10000,
+            RCLCPP_WARN_THROTTLE(node_->get_logger(), steady_clock_, 10000,
                                  "corrections 上行没有 rtkrcv 连入 corr_port=%d,字节被丢弃(累计 %llu 字节)",
                                  conf_.corr_port, static_cast<unsigned long long>(corr_dropped_bytes_));
           }
@@ -602,7 +602,7 @@ private:
           if (!msg->data.empty()) last_uplink_ns_.store(steady_now_ns());
           if (obs_reserver_.broadcast(msg->data.data(), msg->data.size()) == 0 && !msg->data.empty()) {
             obs_dropped_bytes_ += msg->data.size();
-            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 10000,
+            RCLCPP_WARN_THROTTLE(node_->get_logger(), steady_clock_, 10000,
                                  "raw_obs 上行没有 rtkrcv 连入 obs_port=%d,字节被丢弃(累计 %llu 字节)",
                                  conf_.obs_port, static_cast<unsigned long long>(obs_dropped_bytes_));
           }
@@ -748,6 +748,9 @@ private:
   // 两个上行订阅回调各自写各自的计数(无人接收而丢弃的累计字节),只用于告警文案
   uint64_t corr_dropped_bytes_ = 0;
   uint64_t obs_dropped_bytes_ = 0;
+  // 告警节流用的稳态时钟(同 pos_writer/gnss_diag 的 steady_clock_):节点时钟在 use_sim_time
+  // 下跟 /clock 走,/clock 停发时会冻结,节流窗口永远不过期,告警就只打一次
+  rclcpp::Clock steady_clock_{RCL_STEADY_TIME};
   std::unique_ptr<TcpStream> sol_stream_;
   std::unique_ptr<ProcessSupervisor> supervisor_;
 
