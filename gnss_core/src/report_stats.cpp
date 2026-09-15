@@ -46,7 +46,7 @@ SourceStats source_stats(const std::string& name, const std::vector<PosRecord>& 
     if (r.q == kFixedQ) ++fixed[static_cast<size_t>(idx)];
   }
   for (size_t i = 0; i < n.size(); ++i) {
-    s.hourly.push_back(HourBucket{static_cast<double>(h0 + static_cast<long long>(i)) * 3600.0, n[i],
+    s.hourly.push_back(HourBucket{static_cast<double>(h0 + static_cast<long long>(i)) * 3600.0, n[i], fixed[i],
                                   ratio(fixed[i], n[i])});
   }
   return s;

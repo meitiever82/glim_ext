@@ -1,11 +1,11 @@
 #include "gnss_core/report_html.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <map>
 #include <optional>
 #include <string>
-#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -113,9 +113,14 @@ std::string section_fix(const ReportStats& s) {
   return o + "</section>";
 }
 
+// 柱状图超过这么多个小时桶就改为按 UTC 日汇总(Task 4 review 裁定:31 天 744 组柱每组不到 1 px)
+constexpr size_t kMaxHourlyBarGroups = 48;
+
 std::string section_hourly(const ReportStats& s) {
   std::string o = "<section id=\"hourly\"><h2>2. 分小时固定率</h2>";
   if (s.sources.empty()) return o + note("时间窗内没有任何 .pos 记录。") + "</section>";
+  // 两条规则互相独立:multi_day() 只决定时间标签带不带日期(窗口超过 24 h);
+  // kMaxHourlyBarGroups 决定柱状图按小时还是按日(小时桶超过 48 个),表格始终按小时。
   const bool with_date = multi_day(s.params.window);
   std::vector<std::string> labels, colors, headers{"小时（UTC）"};
   for (size_t i = 0; i < s.sources.size(); ++i) {
@@ -124,23 +129,61 @@ std::string section_hourly(const ReportStats& s) {
     headers.push_back(html_escape(s.sources[i].name) + " 固定率（历元）");
   }
   const size_t hours = s.sources.front().hourly.size();
+  const bool daily_bars = hours > kMaxHourlyBarGroups;
   std::vector<SvgBarGroup> groups;
   std::vector<std::vector<std::string>> rows;
-  for (size_t h = 0; h < hours; ++h) {
-    const double t_start = s.sources.front().hourly[h].t_start;
+  long long current_day = 0;
+  std::vector<int> day_fixed, day_epochs;
+  const auto flush_day = [&]() {
+    if (day_epochs.empty()) return;
     SvgBarGroup g;
-    g.label = format_utc_short(t_start, with_date);
-    std::vector<std::string> row{html_escape(g.label)};
-    for (const auto& src : s.sources) {
-      const HourBucket& b = src.hourly[h];
-      g.values.push_back(b.fix_ratio);
-      row.push_back(b.epochs > 0 ? pct(b.fix_ratio) + "（" + std::to_string(b.epochs) + "）" : "-");
+    g.label = format_utc_short(static_cast<double>(current_day) * 86400.0, true).substr(0, 5);   // "MM/DD"
+    for (size_t i = 0; i < day_epochs.size(); ++i) {
+      g.values.push_back(day_epochs[i] > 0 ? std::optional<double>(static_cast<double>(day_fixed[i]) / day_epochs[i])
+                                           : std::nullopt);
     }
     groups.push_back(std::move(g));
-    rows.push_back(std::move(row));
+    day_epochs.clear();
+    day_fixed.clear();
+  };
+  for (size_t h = 0; h < hours; ++h) {
+    const double t_start = s.sources.front().hourly[h].t_start;
+    const std::string label = format_utc_short(t_start, with_date);
+    if (daily_bars) {
+      const long long day = static_cast<long long>(std::floor(t_start / 86400.0));
+      if (day_epochs.empty() || day != current_day) {
+        flush_day();
+        current_day = day;
+        day_epochs.assign(s.sources.size(), 0);
+        day_fixed.assign(s.sources.size(), 0);
+      }
+    }
+    SvgBarGroup g;
+    g.label = label;
+    std::vector<std::string> row{html_escape(label)};
+    bool any = false;
+    for (size_t i = 0; i < s.sources.size(); ++i) {
+      const HourBucket& b = s.sources[i].hourly[h];
+      g.values.push_back(b.fix_ratio);
+      row.push_back(b.epochs > 0 ? pct(b.fix_ratio) + "（" + std::to_string(b.epochs) + "）" : "-");
+      any = any || b.epochs > 0;
+      if (daily_bars) {
+        day_epochs[i] += b.epochs;
+        day_fixed[i] += b.fixed;
+      }
+    }
+    if (!daily_bars) groups.push_back(std::move(g));
+    if (any) rows.push_back(std::move(row));   // 裁定:表格只列有数据的小时
   }
+  flush_day();
   o += svg_ratio_bar_chart(groups, labels, colors);
+  if (daily_bars) {
+    o += note("时间窗超过 " + std::to_string(kMaxHourlyBarGroups) +
+              " 小时，柱状图按 UTC 日汇总（当日固定历元 / 当日全部历元）；下表仍按小时。");
+  }
+  if (rows.empty()) return o + note("时间窗内没有任何历元。") + "</section>";
   o += table(headers, rows);
+  o += note("只列出有数据的小时；某个源在该小时没有记录显示“-”。");
   return o + "</section>";
 }
 

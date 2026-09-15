@@ -31,6 +31,7 @@ struct QualityCounts {
 struct HourBucket {
   double t_start = 0.0;              // UTC 整点
   int epochs = 0;
+  int fixed = 0;                     // Q=1 的历元数(多日报告按日汇总柱状图时用)
   std::optional<double> fix_ratio;   // 该小时没有记录时为空
 };
 

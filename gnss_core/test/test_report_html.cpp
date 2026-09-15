@@ -154,6 +154,52 @@ TEST(ReportHtml, TrackRunsAreColouredByQuality) {
   EXPECT_NE(track.find("stroke=\"#e0b23c\""), std::string::npos) << "can 后半段是浮点解";
 }
 
+// 表格 tbody 里的行数
+size_t body_rows(const std::string& html_part) {
+  const size_t a = html_part.find("<tbody>");
+  const size_t b = html_part.find("</tbody>");
+  if (a == std::string::npos || b == std::string::npos) return 0;
+  return count(html_part.substr(a, b - a), "<tr");
+}
+
+// 裁定(Task 4 review):超过 48 个小时桶时柱状图改为按 UTC 日的固定率(sum fixed / sum epochs),表格仍按小时
+TEST(ReportHtml, MultiDayWindowsChartDailyFixRatiosButKeepTheHourlyTable) {
+  ReportInputs in;
+  for (int h = 0; h < 31 * 24; ++h) in.sources["can"].push_back(rec(T + h * 3600.0 + 10.0, h % 4 == 0 ? 1 : 2));
+  ReportParams p;
+  p.window = ReportWindow{T, T + 31 * 86400.0};
+  const auto html = render_report_html(compute_report(in, p), ReportMeta{"/r", T});
+  const std::string hourly = section(html, "hourly", "track");
+  const size_t svg_end = hourly.find("</svg>");
+  ASSERT_NE(svg_end, std::string::npos);
+  const std::string chart = hourly.substr(0, svg_end);
+  EXPECT_LE(count(chart, "<rect class=\"bar\""), 31u) << "31 天最多 31 组柱";
+  EXPECT_GE(count(chart, "<rect class=\"bar\""), 31u) << "每天都有数据";
+  EXPECT_NE(chart.find("can 25.0%"), std::string::npos) << "日固定率 = 当天固定历元 / 当天历元";
+  EXPECT_NE(hourly.find("按 UTC 日"), std::string::npos) << "要说明柱状图的口径变了";
+  EXPECT_EQ(body_rows(hourly), 31u * 24u) << "表格仍按小时";
+
+  // 48 个小时桶以内仍按小时画
+  ReportParams two_days;
+  two_days.window = ReportWindow{T, T + 2 * 86400.0};
+  const std::string h2 = section(render_report_html(compute_report(in, two_days), ReportMeta{"/r", T}), "hourly", "track");
+  EXPECT_EQ(count(h2.substr(0, h2.find("</svg>")), "<rect class=\"bar\""), 48u);
+}
+
+// 裁定(final review):表格只列有数据的小时,并注明;柱状图不变
+TEST(ReportHtml, HourlyTableListsOnlyHoursWithData) {
+  ReportInputs in;
+  in.sources["can"] = {rec(T + 3600.0 + 1.0, 1), rec(T + 3600.0 + 2.0, 2)};
+  in.sources["rtkrcv"] = {rec(T + 3 * 3600.0 + 1.0, 1)};
+  const auto html = render_report_html(compute_report(in, day_params()), ReportMeta{"/r", T});
+  const std::string hourly = section(html, "hourly", "track");
+  EXPECT_EQ(body_rows(hourly), 2u) << "01 时(can)与 03 时(rtkrcv)";
+  EXPECT_NE(hourly.find("<td>01:00</td>"), std::string::npos);
+  EXPECT_NE(hourly.find("<td>03:00</td>"), std::string::npos);
+  EXPECT_EQ(hourly.find("<td>02:00</td>"), std::string::npos);
+  EXPECT_NE(hourly.find("只列出有数据的小时"), std::string::npos);
+}
+
 TEST(ReportHtml, EmptyInputsRenderPlaceholdersInsteadOfFailing) {
   const auto html = render_report_html(compute_report(ReportInputs{}, day_params()), ReportMeta{"/r", T});
   for (const char* text : {"时间窗内没有任何 .pos 记录", "没有可绘制的位置", "未配置控制点", "无法比较",

@@ -63,6 +63,7 @@ TEST(ReportStats, FixRatioQualityCountsAndHourlyPerSource) {
   EXPECT_DOUBLE_EQ(rtk.hourly[0].t_start, kBase);
   EXPECT_EQ(rtk.hourly[0].epochs, 10);
   EXPECT_NEAR(*rtk.hourly[0].fix_ratio, 0.8, 1e-12);
+  EXPECT_EQ(rtk.hourly[0].fixed, 8) << "多日报告按日汇总时要用固定历元数";
   EXPECT_EQ(rtk.hourly[1].epochs, 1);
   EXPECT_NEAR(*rtk.hourly[1].fix_ratio, 1.0, 1e-12);
 
