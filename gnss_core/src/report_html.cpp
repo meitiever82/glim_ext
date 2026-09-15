@@ -16,7 +16,8 @@ namespace gnss_core {
 
 namespace {
 const char* const kCss = R"CSS(
-body{font-family:"Noto Sans CJK SC","Source Han Sans SC","Microsoft YaHei","PingFang SC",sans-serif;color:#222;
+:root{color-scheme:light}
+body{background:#fff;font-family:"Noto Sans CJK SC","Source Han Sans SC","Microsoft YaHei","PingFang SC",sans-serif;color:#222;
   max-width:820px;margin:24px auto;padding:0 16px;font-size:14px;line-height:1.5}
 h1{font-size:22px;margin:0 0 12px}
 h2{font-size:17px;border-bottom:2px solid #444;padding-bottom:4px;margin-top:30px}

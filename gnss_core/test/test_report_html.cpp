@@ -88,6 +88,8 @@ TEST(ReportHtml, ContainsEverySectionInOrderAndIsSelfContained) {
   }
   EXPECT_NE(html.find("@page"), std::string::npos);
   EXPECT_NE(html.find("@media print"), std::string::npos);
+  EXPECT_NE(html.find(":root{color-scheme:light}"), std::string::npos) << "暗色浏览器里也按浅色渲染";
+  EXPECT_NE(html.find("background:#fff"), std::string::npos) << "body 显式白底";
   EXPECT_EQ(html.find("<script"), std::string::npos);
   EXPECT_EQ(html.find("<link"), std::string::npos);
   EXPECT_EQ(html.find("http://"), std::string::npos);

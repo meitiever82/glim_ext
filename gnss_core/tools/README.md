@@ -155,7 +155,7 @@ tools/run_injection_suite.sh <lidar_bag_dir> /tmp/inj_suite
 - [ ] Orin 上首次运行 `pos_to_rtkfix_bag.py`(短 `.pos` 试跑 + `ros2 bag info` 核对),再跑 `run_injection_suite.sh`,把 `summary.txt` 贴到本 README
 - [ ] 实车 LiDAR+IMU bag 无 GNSS 跑出 `traj_imu.txt` + 同段 `RtkFix` 导出 `.pos`,跑 `estimate_lever_arm`,结果填入 config 并把 `sigma_floor` 降到 `[0.05,0.05,0.1]`
 
-## 5. 定位报告(`gnss_report`,spec §3 F2/F3)
+## 7. 定位报告(`gnss_report`,spec §3 F2/F3)
 
 读取 `pos_writer` / `gnss_diag_node` 写出的 `<root>/YYYYMMDD/{*.pos,events.log,base.pos}`,生成一个自包含 HTML
 (内联 CSS 与 SVG,离线可看),浏览器打开后"打印 → 另存为 PDF"。
@@ -169,3 +169,6 @@ gnss_report --root /data/gnss/pos --from "2026/09/15 08:00:00" --to "2026/09/15 
 绝对基准校验(需要 `--control-point`)、610(can/gpchc)与 rtkrcv 的偏差、基站坐标稳定性、事件汇总与明细。
 口径移植自 rtk-monitor 的 `report.py`,差异见 `glim_underground/docs/gnss/plans/2026-09-16-round4a-report-tool.md`「设计决定」。
 读不了的文件与解析不了的行会在终端打"警告",并列在报告开头,不会中断生成。
+`.pos` 的时间列可以是日历格式 `YYYY/MM/DD HH:MM:SS.sss`,也可以是 rnx2rtkp 默认的 GPS 周 + 周内秒
+(`WWWW SSSSSS.SSS`),都按表头的 GPST/UTC 换算;有内容却读出 0 条记录的文件会报警告。
+基站坐标稳定性以时间窗开始前最后一条 `base.pos` 记录为基准(往前逐日查找),因为 `base.pos` 只在坐标变化时才写。
