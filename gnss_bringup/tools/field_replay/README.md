@@ -98,6 +98,7 @@ run_<mode>/
 | `candump_log.py` | 纯函数:candump 行解析(Task 2) |
 | `can_sigma_patch.py` | 纯函数 + CLI:CAN 日志补 σ 帧 |
 | `rnx_nav_to_rtcm.c` | RINEX 星历 → RTCM3 星历电文(运行时编译) |
+| `field_eval.py` | 一遍运行的结果评估 → Markdown(各源概况、rtkrcv/can 对 ref、杆臂、基站、事件核对、诊断话题) |
 | `tests/` | `python3 -m unittest discover -s tests`(不用 pytest) |
 
 ### field_replay.py 单独使用
@@ -120,3 +121,21 @@ field_replay.py --rtcm <base.rtcm3> --obs <cgi610.dat> [--can-log <log>] [--nav-
 - 退出码:0 正常;2 输入/端口错误;3 `rtcm_bridge` 未连接或 `--wait-connected-ports` 超时;4 断线后未重连;
   5 canplayer 异常;130 信号。
 - `--speed` 只影响 TCP 与 `/clock`,canplayer 没有倍速,带 CAN 时应保持 1×。
+
+## 结果评估 field_eval.py
+
+```bash
+source /opt/ros/humble/setup.bash; source ~/glim_ws/install/setup.bash; source ~/driver_ws/install/setup.bash   # 读录包要用
+field_eval.py --run <seg>/integration_20260916/run_B --ref <seg>/gnss/rtk_check.pos \
+  --out <seg>/integration_20260916/eval/B.md [--bag <run>/bags/gnss_*] [--label B] [--pair-tol 0.1]
+```
+
+- `.pos` 两种时间列都认:pos_writer 的"日期 时间"(头部 `time=GPST`)和 rnx2rtkp 默认的"GPS 周 周内秒"。
+  GPST 一律减 18 s 换成 UTC 再配对。注意 `gnss_core` 的 `read_pos`(因而 `calibrate_sigma_scale`)
+  只认"日期 时间"列,直接喂 rnx2rtkp 默认输出会读到 0 条;要用它时让 rnx2rtkp 加 `-t` 输出日期时间。
+- 位置差 = 源 − ref,在 ref 点的当地 ENU 下计算;按时间一对一配对,容差 0.1 s。
+- 杆臂分析的航向优先取录包 `/gnss_cgi610/rtk_fix.heading`(heading_valid=true)。没有 ROS 环境或录包时,
+  退回用 can.pos 相邻历元的航迹向(速度 > 1 m/s),输出里会写明用的是哪种。
+- 事件核对只回答"事件描述的现象与原因跟同期 ref/rtkrcv/can 数据是否相符",判据写在每行的依据里;
+  multipath / cycle_slip 在 pos 层面验证不了,标"无法判定"。
+- 测试:`tests/test_field_eval.py`(合成数据:两种 .pos 格式、时间配对、分位数、ENU/车体系分解、events.log 解析)。
