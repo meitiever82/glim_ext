@@ -111,6 +111,10 @@ rtkrcv_node:
     # 轮询 run_dir 下最新 .stat 文件、发现新增字节并转发的间隔。
     stat_poll_interval_s: 0.2
 
+    # ~/diagnostics(1 Hz)在超过这么多秒没有解算行时转为 WARN。隧道内没有解属正常,
+    # 这个 WARN 在隧道里是预期的;开阔天空下持续 WARN 才需要排查。
+    health_no_solution_warn_s: 30.0
+
 pos_writer:
   ros__parameters:
     # .pos 落盘的根目录,实际文件路径是 "<root>/YYYYMMDD/<source>.pos"

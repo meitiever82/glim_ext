@@ -41,7 +41,7 @@ install(TARGETS rtcm_bridge DESTINATION lib/${PROJECT_NAME})
 
 add_executable(rtkrcv_node src/rtkrcv_node.cpp)
 target_link_libraries(rtkrcv_node gnss_bringup_io gnss_core::gnss_core)
-ament_target_dependencies(rtkrcv_node rclcpp gnss_msgs)
+ament_target_dependencies(rtkrcv_node rclcpp gnss_msgs diagnostic_msgs)
 install(TARGETS rtkrcv_node DESTINATION lib/${PROJECT_NAME})
 
 add_executable(pos_writer src/pos_writer_node.cpp)
@@ -136,6 +136,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_sol_stream_log_gate test/test_sol_stream_log_gate.cpp)
   target_include_directories(test_sol_stream_log_gate PRIVATE include)
 
+  # rtkrcv_health.hpp:健康评估纯函数
+  ament_add_gtest(test_rtkrcv_health test/test_rtkrcv_health.cpp)
+  target_include_directories(test_rtkrcv_health PRIVATE include)
+  ament_target_dependencies(test_rtkrcv_health diagnostic_msgs)
+
   # 节点级测试:把 rtkrcv_node 可执行文件当子进程起,配 fake_rtkrcv.sh。
   # 用 gtest 而不是 launch_testing:开发机的 pytest 9.1.1 与 Humble 的
   # launch_testing 插件不兼容。
@@ -143,6 +148,16 @@ if(BUILD_TESTING)
   target_include_directories(test_rtkrcv_node_process PRIVATE include test)
   add_dependencies(test_rtkrcv_node_process rtkrcv_node)
   target_compile_definitions(test_rtkrcv_node_process PRIVATE
+    RTKRCV_NODE_PATH="$<TARGET_FILE:rtkrcv_node>"
+    FAKE_RTKRCV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test/fake_rtkrcv.sh")
+
+  # rtkrcv_node 健康话题的节点级测试:假 rtkrcv + 本进程 rclcpp 订阅 ~/diagnostics,
+  # 并在 sol_port 上扮演 rtkrcv 的解算输出
+  ament_add_gtest(test_rtkrcv_node_health_process test/test_rtkrcv_node_health_process.cpp TIMEOUT 180)
+  target_include_directories(test_rtkrcv_node_health_process PRIVATE include test)
+  ament_target_dependencies(test_rtkrcv_node_health_process rclcpp gnss_msgs diagnostic_msgs)
+  add_dependencies(test_rtkrcv_node_health_process rtkrcv_node)
+  target_compile_definitions(test_rtkrcv_node_health_process PRIVATE
     RTKRCV_NODE_PATH="$<TARGET_FILE:rtkrcv_node>"
     FAKE_RTKRCV_PATH="${CMAKE_CURRENT_SOURCE_DIR}/test/fake_rtkrcv.sh")
 

@@ -56,6 +56,9 @@ public:
   int last_child_pid() const { return last_spawned_pid_.load(); }
   // binary 解析不到可执行文件、本轮没能派生子进程的累计次数。
   int start_failure_count() const { return start_failure_count_.load(); }
+  // 子进程已派生且尚未被回收(退避等待重启期间为 false)。供健康检查用;
+  // 与 child_pid_ 同一个原子量,只是一瞬间的快照。
+  bool child_running() const { return child_pid_.load() > 0; }
 
 private:
   void run();
