@@ -272,8 +272,12 @@ std::string section_divergence(const ReportStats& s) {
 
 std::string section_base(const ReportStats& s) {
   std::string o = "<section id=\"base\"><h2>6. 基站坐标稳定性</h2>";
-  if (s.base.series.empty()) return o + note("时间窗内没有基站坐标记录（base.pos）。") + "</section>";
-  o += "<p>相对时间窗内第一条记录的最大偏移 <b>" + metres(s.base.max_m) + " m</b>　状态：" +
+  if (s.base.series.empty()) return o + note("时间窗内及之前都没有基站坐标记录（base.pos）。") + "</section>";
+  const std::string ref_desc =
+      s.base.reference_before_window
+          ? "时间窗开始前最后一条记录（" + format_utc_timestamp(*s.base.reference_t) + "）"
+          : "时间窗内第一条记录（" + format_utc_timestamp(*s.base.reference_t) + "，之前没有更早的记录）";
+  o += "<p>相对" + ref_desc + "的最大偏移 <b>" + metres(s.base.max_m) + " m</b>　状态：" +
        status(s.base.exceeded, "⚠ 超过 " + fmt("%.3f", s.params.base_shift_m) + " m——基站坐标可能变动") + "</p>";
   SvgLineSeries series;
   series.label = "基站偏移";
@@ -286,7 +290,9 @@ std::string section_base(const ReportStats& s) {
   opt.threshold = s.params.base_shift_m;
   opt.threshold_label = "告警阈值 " + fmt("%.3f", s.params.base_shift_m) + " m";
   o += svg_line_chart({series}, opt);
-  o += note("共 " + std::to_string(s.base.series.size()) + " 条记录（基站坐标变化超过 1 mm 才记一条）。");
+  o += note("时间窗内共 " + std::to_string(s.base.series.size() - (s.base.reference_before_window ? 1 : 0)) +
+            " 条记录。base.pos 只在基站坐标变化超过 1 mm 时才记一条，所以基准取时间窗开始前的最后一条"
+            "（往前逐日查找）；曲线在时间窗起点处的 0 点即该基准。");
   return o + "</section>";
 }
 

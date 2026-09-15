@@ -39,6 +39,9 @@ struct ReportInputs {
   std::map<std::string, std::vector<PosRecord>> sources;   // 源名(.pos 文件名去扩展名) → 窗口内记录,时间升序
   std::vector<ReportEvent> events;                          // 与窗口有交集的事件,按开启时刻升序
   std::vector<BaseSample> base_history;                     // 窗口内基站坐标史,时间升序
+  // t0 之前最后一条有效 base.pos 记录(可能在更早的日期目录里)。gnss_diag_node 只在坐标变化时写一行,
+  // 所以窗口内第一行不能当基准——窗口开头的那次变动会被当成基准本身而看不见。没有更早记录时为空。
+  std::optional<BaseSample> base_before_window;
   std::vector<std::string> warnings;                        // 读不了的文件、解析不了的行等,不中断装载
 };
 

@@ -178,6 +178,32 @@ TEST(ReportStats, BaseSeriesIsTheOffsetFromTheFirstSample) {
   EXPECT_FALSE(compute_report(ReportInputs{}, p).base.max_m.has_value());
 }
 
+// final review Critical:有窗口之前的基准时,序列从 t0 处的 0 开始,偏移相对那条记录算
+TEST(ReportStats, BaseSeriesUsesTheRowBeforeTheWindowAsReferenceWhenPresent) {
+  ReportInputs in;
+  in.base_before_window = BaseSample{kBase - 86400.0, Ecef{-2148744.1, 4426641.2, 4044655.9}};
+  in.base_history = {BaseSample{kBase + 36000.0, Ecef{-2148744.6, 4426641.2, 4044655.9}}};
+  const auto s = compute_report(in, params(kBase, kBase + 86400.0));
+  ASSERT_EQ(s.base.series.size(), 2u);
+  EXPECT_DOUBLE_EQ(s.base.series[0].t, kBase) << "基准点的时刻夹到 t0";
+  EXPECT_DOUBLE_EQ(s.base.series[0].offset_m, 0.0);
+  EXPECT_NEAR(s.base.series[1].offset_m, 0.5, 1e-6);
+  ASSERT_TRUE(s.base.max_m.has_value());
+  EXPECT_NEAR(*s.base.max_m, 0.5, 1e-6);
+  EXPECT_TRUE(s.base.exceeded);
+  ASSERT_TRUE(s.base.reference_t.has_value());
+  EXPECT_DOUBLE_EQ(*s.base.reference_t, kBase - 86400.0);
+  EXPECT_TRUE(s.base.reference_before_window);
+
+  // 只有窗口前的基准、窗口内没有变化:一个 0 点,不告警
+  ReportInputs quiet;
+  quiet.base_before_window = in.base_before_window;
+  const auto q = compute_report(quiet, params(kBase, kBase + 86400.0));
+  ASSERT_EQ(q.base.series.size(), 1u);
+  EXPECT_DOUBLE_EQ(*q.base.max_m, 0.0);
+  EXPECT_FALSE(q.base.exceeded);
+}
+
 TEST(ReportStats, EventsAreCopiedAndSummarisedByCode) {
   ReportInputs in;
   in.events = {event("corr_outage", kBase, kBase + 28.0), event("low_sats", kBase + 50.0, std::nullopt),

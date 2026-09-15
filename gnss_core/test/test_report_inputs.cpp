@@ -174,6 +174,43 @@ TEST(ReportInputs, BaseHistoryIsWindowedAndBrokenInputsBecomeWarnings) {
   EXPECT_TRUE(base_warned);
 }
 
+// final review Critical:base.pos 只在坐标变化时写一行,窗口内第一行当基准会把窗口开头的变动藏起来。
+// 装载要同时给出 t0 之前最后一条有效记录——往更早的日期目录倒着找,找到第一个有有效行的目录就停。
+TEST(ReportInputs, BaseBeforeWindowIsTheLastValidRowFoundScanningOlderDayDirsBackwards) {
+  TempDir root;
+  ASSERT_FALSE(root.path().empty());
+  const double day = 86400.0;
+  write_text(root.path() + "/20260910/base.pos",
+             base_pos_header() + format_base_history_line(T - 5.0 * day, Ecef{9.0, 9.0, 9.0}) + "\n");
+  write_text(root.path() + "/20260912/base.pos",
+             base_pos_header() + format_base_history_line(T - 3.0 * day, Ecef{1.0, 2.0, 3.0}) + "\n" +
+                 format_base_history_line(T - 3.0 * day + 60.0, Ecef{1.5, 2.0, 3.0}) + "\n" +
+                 "2026/09/12 00:02:00.000  7.0\n");   // 最后一行是半行,不算
+  write_text(root.path() + "/20260913/base.pos", base_pos_header());   // 只有表头:继续往前找
+  write_text(root.path() + "/20260915/base.pos",
+             base_pos_header() + format_base_history_line(T + 36000.0, Ecef{2.0, 2.0, 3.0}) + "\n");
+  const auto in = load_report_inputs(root.path(), kDay);
+  ASSERT_TRUE(in.base_before_window.has_value()) << "t0 之前的坐标在三天前的目录里";
+  EXPECT_NEAR(in.base_before_window->t, T - 3.0 * day + 60.0, 1e-3) << "取该目录最后一条有效行";
+  EXPECT_DOUBLE_EQ(in.base_before_window->p.x, 1.5);
+  ASSERT_EQ(in.base_history.size(), 1u);
+
+  // 窗口从当天中午开始:同一天窗口之前的行就是基准,不必再往前找
+  const ReportWindow noon{T + 43200.0, T + 50000.0};
+  write_text(root.path() + "/20260915/base.pos",
+             base_pos_header() + format_base_history_line(T + 100.0, Ecef{3.0, 2.0, 3.0}) + "\n" +
+                 format_base_history_line(T + 45000.0, Ecef{4.0, 2.0, 3.0}) + "\n");
+  const auto in2 = load_report_inputs(root.path(), noon);
+  ASSERT_TRUE(in2.base_before_window.has_value());
+  EXPECT_NEAR(in2.base_before_window->t, T + 100.0, 1e-3);
+  ASSERT_EQ(in2.base_history.size(), 1u);
+  EXPECT_NEAR(in2.base_history[0].t, T + 45000.0, 1e-3);
+
+  TempDir empty;
+  ASSERT_FALSE(empty.path().empty());
+  EXPECT_FALSE(load_report_inputs(empty.path(), kDay).base_before_window.has_value());
+}
+
 TEST(ReportInputs, UnreadablePosFileIsAWarningNotAFailure) {
   if (::geteuid() == 0) GTEST_SKIP() << "root 无视文件权限,无法构造读失败";
   TempDir root;

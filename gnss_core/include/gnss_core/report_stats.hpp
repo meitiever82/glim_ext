@@ -68,7 +68,9 @@ struct BaseOffsetSample {
 };
 
 struct BaseStats {
-  std::vector<BaseOffsetSample> series;   // 相对时间窗内第一条记录
+  std::vector<BaseOffsetSample> series;   // 相对基准记录的偏移(基准见 reference_t)
+  std::optional<double> reference_t;      // 基准记录的时刻;无基站记录时为空
+  bool reference_before_window = false;   // 基准取自 t0 之前(ReportInputs::base_before_window)
   std::optional<double> max_m;
   bool exceeded = false;                  // max_m > base_shift_m
 };

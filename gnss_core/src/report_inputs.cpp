@@ -4,6 +4,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -46,6 +47,11 @@ bool read_lines(const fs::path& path, std::vector<std::string>& lines) {
 }
 
 bool is_content_line(const std::string& line) { return !line.empty() && line[0] != '%'; }
+
+// t0 之前时刻最大的一条有效行并入 best(没有则不动)
+void keep_latest_before(double t, const Ecef& p, double t0, std::optional<BaseSample>& best) {
+  if (t < t0 && (!best || t > best->t)) best = BaseSample{t, p};
+}
 
 // 设计决定 9:按文件顺序配对 OPEN/CLOSE
 std::vector<ReportEvent> pair_events(const std::vector<EventLogLine>& lines) {
@@ -153,12 +159,32 @@ ReportInputs load_report_inputs(const std::string& root, const ReportWindow& win
         for (const auto& line : lines) {
           if (const auto parsed = parse_base_history_line(line)) {
             if (in_window(parsed->first, window)) in.base_history.push_back(BaseSample{parsed->first, parsed->second});
+            keep_latest_before(parsed->first, parsed->second, window.t0, in.base_before_window);
           } else if (is_content_line(line)) {
             ++bad;
           }
         }
         if (bad > 0) {
           in.warnings.push_back(base_path.string() + " 中 " + std::to_string(bad) + " 行无法解析(可能是掉电留下的半行)");
+        }
+      }
+    }
+  }
+
+  // 基站坐标稳定性的基准:窗口前最后一条有效行。上面已扫过 [t0 前一天, t1 所在日];
+  // 还没有就像 gnss_bringup 的 read_last_base_history 那样往更早的日期目录倒着找,
+  // 找到第一个有有效行的目录就停(base.pos 只在坐标变化时才写,几天没变很正常)。
+  // 这里读不了的文件不重复报警告(与节点启动时的行为一致:当作没有记录)。
+  if (!in.base_before_window) {
+    auto older = day_dirs(root, 0, first - 1);
+    for (auto it = older.rbegin(); it != older.rend() && !in.base_before_window; ++it) {
+      std::vector<std::string> lines;
+      std::error_code ec;
+      const fs::path base_path = it->second / "base.pos";
+      if (!fs::exists(base_path, ec) || !read_lines(base_path, lines)) continue;
+      for (const auto& line : lines) {
+        if (const auto parsed = parse_base_history_line(line)) {
+          keep_latest_before(parsed->first, parsed->second, window.t0, in.base_before_window);
         }
       }
     }

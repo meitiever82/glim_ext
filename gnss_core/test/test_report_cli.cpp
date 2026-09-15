@@ -149,6 +149,30 @@ TEST(ReportCli, WritesTheReportForADayAndPrintsASummaryAndWarnings) {
   EXPECT_NE(html.find("2026/09/16 00:00:00.000"), std::string::npos) << "--day 覆盖整个 UTC 自然日";
 }
 
+// final review Critical 复现(rev4a/bmove):前一天记了基站坐标,当天挪了 0.5 m 只写了一行
+TEST(ReportCli, ABaseMoveOnTheReportDayIsVisibleAgainstThePreviousDaysRow) {
+  TempDir dir;
+  ASSERT_FALSE(dir.path().empty());
+  const std::string root = dir.path() + "/root";
+  fs::create_directories(root + "/20260914");
+  fs::create_directories(root + "/20260915");
+  std::ofstream(root + "/20260914/base.pos")
+      << base_pos_header() << format_base_history_line(T - 57600.0, Ecef{-2148744.1, 4426641.2, 4044655.9}) << "\n";
+  std::ofstream(root + "/20260915/base.pos")
+      << base_pos_header() << format_base_history_line(T + 36000.0, Ecef{-2148744.6, 4426641.2, 4044655.9}) << "\n";
+  const std::string out_path = dir.path() + "/r.html";
+  const auto r = run({"--root", root, "--day", "20260915", "--out", out_path});
+  ASSERT_EQ(r.code, 0) << r.err;
+  const std::string html = slurp(out_path);
+  const size_t a = html.find("id=\"base\""), b = html.find("id=\"events\"");
+  ASSERT_NE(a, std::string::npos);
+  ASSERT_NE(b, std::string::npos);
+  const std::string base = html.substr(a, b - a);
+  EXPECT_NE(base.find("<b>0.500 m</b>"), std::string::npos) << base;
+  EXPECT_NE(base.find("基站坐标可能变动"), std::string::npos) << base;
+  EXPECT_NE(base.find("2026/09/14 08:00:00.000"), std::string::npos) << "说明基准取自哪条记录\n" << base;
+}
+
 TEST(ReportCli, DefaultOutputNameEncodesTheWindowInTheCurrentDirectory) {
   TempDir dir;
   ASSERT_FALSE(dir.path().empty());

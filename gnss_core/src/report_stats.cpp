@@ -139,15 +139,21 @@ ReportStats compute_report(const ReportInputs& in, const ReportParams& p) {
     s.abs_ref.exceeded = s.abs_ref.max_m && *s.abs_ref.max_m > p.abs_ref_max_m;
   }
 
-  // 设计决定 8:相对窗口内第一条基站坐标
-  if (!in.base_history.empty()) {
-    const Ecef& p0 = in.base_history.front().p;
-    for (const auto& b : in.base_history) {
-      const double off = std::sqrt((b.p.x - p0.x) * (b.p.x - p0.x) + (b.p.y - p0.y) * (b.p.y - p0.y) +
-                                   (b.p.z - p0.z) * (b.p.z - p0.z));
-      s.base.series.push_back(BaseOffsetSample{b.t, off});
+  // 设计决定 8(final review 修订):基准优先取 t0 之前最后一条记录——gnss_diag_node 只在坐标变化时写行,
+  // 以窗口内第一行为基准会把"窗口开头那次变动"本身当成基准而看不见;序列从 t0 处的 0 开始。
+  // 没有更早记录时退回 rtk-monitor 的口径:窗口内第一条。
+  if (in.base_before_window || !in.base_history.empty()) {
+    const BaseSample ref = in.base_before_window ? *in.base_before_window : in.base_history.front();
+    s.base.reference_t = ref.t;
+    s.base.reference_before_window = in.base_before_window.has_value();
+    const auto add = [&](double t, const Ecef& b) {
+      const Ecef& p0 = ref.p;
+      const double off = std::sqrt((b.x - p0.x) * (b.x - p0.x) + (b.y - p0.y) * (b.y - p0.y) + (b.z - p0.z) * (b.z - p0.z));
+      s.base.series.push_back(BaseOffsetSample{t, off});
       s.base.max_m = s.base.max_m ? std::max(*s.base.max_m, off) : off;
-    }
+    };
+    if (in.base_before_window) add(std::max(ref.t, p.window.t0), ref.p);
+    for (const auto& b : in.base_history) add(b.t, b.p);
     s.base.exceeded = *s.base.max_m > p.base_shift_m;
   }
 
