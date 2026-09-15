@@ -13,6 +13,7 @@ find_package(gnss_msgs REQUIRED)
 # 下游包(本包)必须自己补上,否则找不到 FindGeographicLib.cmake。
 list(APPEND CMAKE_MODULE_PATH "/usr/share/cmake/geographiclib")
 find_package(gnss_core REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 
 # 不依赖 ROS 的 I/O 与进程管理,便于单测
 add_library(gnss_bringup_io SHARED
@@ -96,6 +97,13 @@ if(BUILD_TESTING)
   # 方式,单独可测。
   ament_add_gtest(test_pos_rotation test/test_pos_rotation.cpp)
   target_include_directories(test_pos_rotation PRIVATE include)
+
+  # diag_node_support.hpp:gnss_diag_node 的纯逻辑(消息转换、状态组装、按天追加写、
+  # base.pos 末行、时钟回跳、控制点参数),不起节点
+  ament_add_gtest(test_diag_node_support test/test_diag_node_support.cpp)
+  target_link_libraries(test_diag_node_support gnss_core::gnss_core)
+  target_include_directories(test_diag_node_support PRIVATE include test)
+  ament_target_dependencies(test_diag_node_support gnss_msgs diagnostic_msgs)
 
   # pos_writer_params.hpp 是纯函数(time_system/leap_seconds/record 时间戳
   # 合理性的校验),不碰 ROS 节点,pos_writer_node.cpp 自己的可独立测试的

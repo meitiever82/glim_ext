@@ -24,30 +24,12 @@ inline bool is_valid_pos_source(const std::string& source) {
 
 }  // namespace detail
 
-// 计算记录应当落盘的路径:<root>/YYYYMMDD/<source>.pos,YYYYMMDD 按 UTC 取
-// (必须用 gmtime_r,不能用 localtime_r——原因与 gnss_core::pos_io.cpp 里的
-// 时间处理相同:同一份数据在不同时区的机器上重放,必须落进同一个日期目录)。
-//
-// 失败(返回空字符串)的三类输入,选择"可见地失败"而不是悄悄拼出一个能用
-// 但没意义的路径:
-//   1) root 为空——拼出来会变成 "/YYYYMMDD/source.pos" 这种指向文件系统根
-//      目录的绝对路径,写穿了比报错更危险。
-//   2) source 为空,或者带路径分隔符——同样是路径穿越/落错位置的风险。
-//   3) utc_stamp 不是有限数(NaN/±inf),或者超出 time_t 能表示的范围——
-//      转换成 time_t 是未定义行为,不能让它悄悄溜过去变成一个随机路径。
-// 这条函数保持纯粹、不抛异常(调用方在下一个任务里是 ROS 订阅回调,一次
-// 格式错误的输入不该打断整条订阅链路),调用方看到空字符串就应该跳过这条
-// 记录并计数/打日志,而不是把它当成合法路径去开文件。
-//
-// 0 和其他"合法但离谱"的 utc_stamp(比如负数、代表 1970 年之前的时间)不在
-// 上面三类拒绝范围内——上一个任务在 gnss_time 和 header.stamp 都是 0 的
-// 极端情况下确实会把 0 传下来,这是真实可能发生的输入,不是需要挡住的坏
-// 输入。此时函数按 UTC 纪元零点正常换算,落进 "19700101" 目录:这本身就是
-// "可见地失败"的一种形式——产出的路径肉眼一看就不正常,比悄悄映射到"今天"
-// 之类的默认值更容易被发现和排查。
-inline std::string pos_path_for(const std::string& root, const std::string& source, double utc_stamp) {
+// <root>/YYYYMMDD/<filename>,YYYYMMDD 按 UTC。拒绝规则与下面 pos_path_for 的说明相同
+// (空 root、filename 为空/带 '/'/是 "." 或 ".."、时间非有限或超出 time_t),失败返回空串。
+// .pos、events.log、base.pos 共用这一套日期目录规则(spec §5.3)。
+inline std::string day_file_path(const std::string& root, const std::string& filename, double utc_stamp) {
   if (root.empty()) return "";
-  if (!detail::is_valid_pos_source(source)) return "";
+  if (!detail::is_valid_pos_source(filename) || filename == "." || filename == "..") return "";
 
   // NaN/±inf,或者超出 time_t 能表示范围的值:double→time_t 的窄化转换在
   // 这种输入下是未定义行为(标准没有规定结果),必须在转换前挡住,而不是
@@ -73,9 +55,35 @@ inline std::string pos_path_for(const std::string& root, const std::string& sour
   std::string r = root;
   while (r.size() > 1 && r.back() == '/') r.pop_back();
   if (r == "/") {
-    return r + datebuf + "/" + source + ".pos";
+    return r + datebuf + "/" + filename;
   }
-  return r + "/" + datebuf + "/" + source + ".pos";
+  return r + "/" + datebuf + "/" + filename;
+}
+
+// 计算记录应当落盘的路径:<root>/YYYYMMDD/<source>.pos,YYYYMMDD 按 UTC 取
+// (必须用 gmtime_r,不能用 localtime_r——原因与 gnss_core::pos_io.cpp 里的
+// 时间处理相同:同一份数据在不同时区的机器上重放,必须落进同一个日期目录)。
+//
+// 失败(返回空字符串)的三类输入,选择"可见地失败"而不是悄悄拼出一个能用
+// 但没意义的路径:
+//   1) root 为空——拼出来会变成 "/YYYYMMDD/source.pos" 这种指向文件系统根
+//      目录的绝对路径,写穿了比报错更危险。
+//   2) source 为空,或者带路径分隔符——同样是路径穿越/落错位置的风险。
+//   3) utc_stamp 不是有限数(NaN/±inf),或者超出 time_t 能表示的范围——
+//      转换成 time_t 是未定义行为,不能让它悄悄溜过去变成一个随机路径。
+// 这条函数保持纯粹、不抛异常(调用方在下一个任务里是 ROS 订阅回调,一次
+// 格式错误的输入不该打断整条订阅链路),调用方看到空字符串就应该跳过这条
+// 记录并计数/打日志,而不是把它当成合法路径去开文件。
+//
+// 0 和其他"合法但离谱"的 utc_stamp(比如负数、代表 1970 年之前的时间)不在
+// 上面三类拒绝范围内——上一个任务在 gnss_time 和 header.stamp 都是 0 的
+// 极端情况下确实会把 0 传下来,这是真实可能发生的输入,不是需要挡住的坏
+// 输入。此时函数按 UTC 纪元零点正常换算,落进 "19700101" 目录:这本身就是
+// "可见地失败"的一种形式——产出的路径肉眼一看就不正常,比悄悄映射到"今天"
+// 之类的默认值更容易被发现和排查。
+inline std::string pos_path_for(const std::string& root, const std::string& source, double utc_stamp) {
+  if (!detail::is_valid_pos_source(source)) return "";
+  return day_file_path(root, source + ".pos", utc_stamp);
 }
 
 // current_path 是节点当前打开着的文件路径("" 表示还没打开过任何文件);

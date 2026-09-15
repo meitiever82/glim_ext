@@ -3,6 +3,7 @@
 #include <string>
 #include "gnss_bringup/pos_rotation.hpp"
 
+using gnss_bringup::day_file_path;
 using gnss_bringup::pos_path_for;
 using gnss_bringup::should_rotate;
 
@@ -97,4 +98,17 @@ TEST(PosRotation, RootThatIsOnlySlashesNormalizesToFilesystemRoot) {
   // root="/" 去掉末尾多余的 '/' 之后不能变成空串——那样就绕过了空 root 的
   // 拒绝逻辑,还会拼出一个少了前导 '/' 的相对路径。
   EXPECT_EQ(pos_path_for("/", "can", 1789208625.0), "/20260912/can.pos");
+}
+
+TEST(DayFilePath, SameDateRulesAsPosFiles) {
+  EXPECT_EQ(day_file_path("/data/gnss/", "events.log", 1789208625.0), "/data/gnss/20260912/events.log");
+  EXPECT_EQ(day_file_path("/d", "base.pos", 1789257600.0), "/d/20260913/base.pos");
+}
+
+TEST(DayFilePath, RejectsUnsafeInput) {
+  EXPECT_EQ(day_file_path("", "events.log", 1789208625.0), "");
+  EXPECT_EQ(day_file_path("/d", "", 1789208625.0), "");
+  EXPECT_EQ(day_file_path("/d", "a/b", 1789208625.0), "");
+  EXPECT_EQ(day_file_path("/d", "..", 1789208625.0), "") << "\"..\" 会逃出日期目录";
+  EXPECT_EQ(day_file_path("/d", "events.log", std::numeric_limits<double>::quiet_NaN()), "");
 }
