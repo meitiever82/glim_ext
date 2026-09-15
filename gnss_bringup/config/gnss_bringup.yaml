@@ -174,3 +174,72 @@ pos_writer:
     can:    { topic: "/gnss_cgi610/rtk_fix" }
     # gpchc:  { topic: "/gnss_cgi610/rtk_fix_gpchc" }
     # rtkrcv: { topic: "/rtkrcv_node/rtk_fix" }
+
+gnss_diag:
+  ros__parameters:
+    # 诊断落盘根目录:<root>/YYYYMMDD/events.log(事件)、<root>/YYYYMMDD/base.pos(基站坐标史)、
+    # <root>/base_baseline(基站基线)。与 pos_writer.root 相同,诊断文件与 .pos 落在同一个
+    # 日期目录里(spec §5.3),清理节点也按同一个目录一起清。
+    root: "/data/gnss/pos"
+    # 四路输入。solution_topic 需要 enable_rtkrcv:=true 才有数据;stat_topic 同样来自 rtkrcv_node。
+    corrections_topic: "/gnss/rtcm_corrections"
+    solution_topic: "/rtkrcv_node/rtk_fix"
+    device_topic: "/gnss_cgi610/rtk_fix"
+    stat_topic: "/rtkrcv_node/stat"
+    # solver_enabled 由 launch 按 enable_rtkrcv 注入,这里不写。
+    #
+    # 注意:下面的秒数/米数一律写成带小数点的形式(60.0 而不是 60)——ROS 参数类型严格,
+    # 写成整数会在启动时因类型不符拒绝启动。
+    #
+    # 启动(以及时钟回跳重建引擎)后的宽限期:只接收数据、不判定,避免 rtkrcv 收敛前每次开机
+    # 都记一条 no_solution。代价:宽限期内真实的差分中断等故障晚这么多秒才记录。
+    startup_grace_s: 60.0
+    # ROS 时间回退超过这么多秒视为时钟回跳(回放 bag 重新开始、系统校时):关闭已开事件并重建引擎
+    clock_jump_tolerance_s: 1.0
+    # 两路解都在到达、却连续这么多秒没配上对时打一次 WARN(device_divergence 此时无法判定)
+    unpaired_warn_s: 60.0
+    # 控制点(abs_ref_shift 规则):三个等长数组。没有控制点时整段保持注释——
+    # ROS 无法从空列表推断类型(同 rtkrcv_node.args 的说明)。经纬度写成带小数点的数。
+    # control_points:
+    #   names: ["K1"]
+    #   lat: [44.50123456]
+    #   lon: [90.28765432]
+    # 规则阈值,默认值与 gnss_core::DiagnosisConfig 相同(移植自 rtk-monitor,
+    # 本项目新增项见 docs/gnss/plans/2026-09-15-round3a-diagnosis-core.md「设计决定」)
+    diagnosis:
+      corr_gap_s: 3.0
+      age_max_s: 10.0
+      base_shift_m: 0.1
+      min_sats: 6
+      resid_max_m: 2.0
+      low_el_deg: 20.0
+      low_snr_dbhz: 35.0
+      min_ratio: 3.0
+      slip_max_per_30s: 5
+      divergence_sigma: 3.0
+      divergence_hold_s: 5.0
+      close_hysteresis_s: 10.0
+      sol_stale_s: 5.0
+      abs_ref_max_m: 0.2
+      abs_ref_radius_m: 3.0
+      divergence_window_s: 600.0
+      divergence_min_samples: 60
+      divergence_sigma_floor_m: 0.05
+      # 学到的偏差 σ 上限(维护者 2026-09-15 决定):学习部分给出的阈值最多 3 × 0.10 = 0.30 m,
+      # 更大的持续偏差不会被学成正常;rtkrcv 浮点解时的当前 σ 不受此限
+      divergence_sigma_max_m: 0.10
+      divergence_pair_max_dt_s: 2.0
+      divergence_epoch_max_dt_s: 0.1
+      base_warmup_s: 600.0
+
+gnss_cleanup:
+  ros__parameters:
+    # bag_root 由 launch 注入(默认 $GNSS_BAG_ROOT,未设置时 $HOME/gnss_bags,与 record_gnss.sh 一致)。
+    # .pos 与诊断文件的根目录,与 pos_writer.root / gnss_diag.root 相同
+    pos_root: "/data/gnss/pos"
+    # 超过这么多天的日期目录/录包删除;今天的、以及每个根目录下最新的一项永不删
+    retention_days: 14
+    # 所在盘用量高于这个百分比时,从最旧的开始继续删,直到低于水位(同样不删今天与最新一项)
+    watermark_pct: 85.0
+    # 启动时先清一轮,之后每隔这么多秒一轮
+    interval_s: 3600.0
