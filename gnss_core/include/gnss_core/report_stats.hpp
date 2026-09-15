@@ -113,6 +113,8 @@ struct ReportStats {
 // can、gpchc、rtkrcv、ref 在前(存在才列),其余按名字
 std::vector<std::string> ordered_source_names(const std::map<std::string, std::vector<PosRecord>>& sources);
 
+// 前置条件:inputs 的记录形如 load_report_inputs() 的输出——每个源的
+// PosRecord、events、base_history 都已限定在时间窗内、按时间升序;不做二次校验。
 ReportStats compute_report(const ReportInputs& inputs, const ReportParams& params);
 
 }  // namespace gnss_core

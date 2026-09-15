@@ -171,6 +171,7 @@ ReportStats compute_report(const ReportInputs& in, const ReportParams& p) {
   std::unique_ptr<LlaToEnu> origin;
   for (const auto& name : names) {
     const auto& recs = in.sources.at(name);
+    if (recs.empty()) continue;   // 原点取第一个非空源;空源(front() 未定义行为)跳过
     origin = std::make_unique<LlaToEnu>(recs.front().lat, recs.front().lon, recs.front().height);
     s.track_origin = name;
     break;
@@ -188,6 +189,7 @@ ReportStats compute_report(const ReportInputs& in, const ReportParams& p) {
   const size_t max_points = std::max<size_t>(p.max_track_points, 2);
   for (const auto& name : names) {
     const auto& recs = in.sources.at(name);
+    if (recs.empty()) continue;   // 空源不产生轨迹条目
     const size_t stride = std::max<size_t>(1, (recs.size() + max_points - 1) / max_points);
     Track track;
     track.source = name;

@@ -217,9 +217,12 @@ TEST(ReportStats, TracksShareOneOriginAndSplitOnTimeGaps) {
   EXPECT_NEAR(s.tracks[1].segments[0][0].n, 3.0, 0.02) << "所有源用同一个原点";
 }
 
+// 10001 点、stride=ceil(10001/4000)=3:10000 % 3 == 1,段尾索引不会被 stride
+// 恰好整除(不像 round4a task-3 首版用 10000 点时 9999 % 3 == 0 的巧合,那份
+// 数据测不出去掉 `i != b` 的变异——见 task-3-report.md「Fix round 1」)。
 TEST(ReportStats, LongTracksAreDownsampledKeepingSegmentEnds) {
   ReportInputs in;
-  for (int i = 0; i < 10000; ++i) in.sources["can"].push_back(rec(kBase + i, 1, north(i * 0.1)));
+  for (int i = 0; i < 10001; ++i) in.sources["can"].push_back(rec(kBase + i, 1, north(i * 0.1)));
   auto p = params(kBase, kBase + 20000.0);
   p.max_track_points = 4000;
   const auto s = compute_report(in, p);
@@ -229,7 +232,7 @@ TEST(ReportStats, LongTracksAreDownsampledKeepingSegmentEnds) {
   EXPECT_LE(seg.size(), 4002u);
   EXPECT_GE(seg.size(), 2500u);
   EXPECT_DOUBLE_EQ(seg.front().t, kBase);
-  EXPECT_DOUBLE_EQ(seg.back().t, kBase + 9999.0) << "段尾必须保留";
+  EXPECT_DOUBLE_EQ(seg.back().t, kBase + 10000.0) << "段尾必须保留";
 }
 
 TEST(ReportStats, EventMarkersUseTheEventIndexAndSkipEventsWithoutPosition) {
@@ -245,6 +248,34 @@ TEST(ReportStats, EventMarkersUseTheEventIndexAndSkipEventsWithoutPosition) {
   EXPECT_EQ(s.event_markers[1].index, 3);
   EXPECT_NEAR(s.event_markers[1].n, 10.0, 0.05);
   EXPECT_TRUE(s.tracks.empty());
+}
+
+// design 决定 11:原点取"第一个非空源"的首条记录;某个源恰好一条记录都没有
+// (比如那份 .pos 存在但窗口内没有落在时间窗里)不能让 recs.front() 越界。
+TEST(ReportStats, TrackOriginSkipsEmptySourcesInOrder) {
+  ReportInputs in;
+  in.sources["can"] = {};
+  in.sources["rtkrcv"] = {rec(kBase + 1.0, 1, north(2.0))};
+  const auto s = compute_report(in, params(kBase, kBase + 10.0));
+  ASSERT_TRUE(s.track_origin.has_value());
+  EXPECT_EQ(*s.track_origin, "rtkrcv") << "can 排在前面但是空的,原点应跳到 rtkrcv";
+  ASSERT_EQ(s.sources.size(), 2u);
+  EXPECT_EQ(s.sources[0].name, "can");
+  EXPECT_EQ(s.sources[0].epochs, 0);
+  EXPECT_FALSE(s.sources[0].fix_ratio.has_value());
+  ASSERT_EQ(s.tracks.size(), 1u) << "空源不产生轨迹条目";
+  EXPECT_EQ(s.tracks[0].source, "rtkrcv");
+}
+
+// 事件汇总次数相同时按代码升序(设计里没写明的隐含顺序,由 std::map 聚合的
+// 遍历顺序 + stable_sort 一起保证;不依赖 events 输入顺序)
+TEST(ReportStats, EventSummaryTiesAreOrderedByCode) {
+  ReportInputs in;
+  in.events = {event("zeta_code", kBase, kBase + 1.0), event("alpha_code", kBase + 10.0, kBase + 11.0)};
+  const auto s = compute_report(in, params(kBase, kBase + 100.0));
+  ASSERT_EQ(s.event_summary.size(), 2u);
+  EXPECT_EQ(s.event_summary[0].code, "alpha_code") << "次数都是 1,按代码升序,不按输入顺序(zeta 先出现)";
+  EXPECT_EQ(s.event_summary[1].code, "zeta_code");
 }
 
 TEST(ReportStats, EmptyInputsProduceEmptyStats) {
