@@ -27,20 +27,32 @@ pos_writer → pos/YYYYMMDD/{can,rtkrcv}.pos;gnss_diag → diag/;record_gnss.sh 
 ## 用法
 
 ```bash
-run_field_integration.sh <A|B|dry|dryB> <seg> [duration_s]
+run_field_integration.sh [--force] <A|B|dry|dryB> <seg> [duration_s]
+# 装好后也可以:ros2 run gnss_bringup run_field_integration.sh …
 ```
 
 | 模式 | 差分流 | 星历注入 | 时长 | 运行目录 |
 |---|---|---|---|---|
-| `A` | `base.rtcm3` 原样 | 无 | 整段 | `<seg>/integration_20260916/run_A` |
+| `A` | `base.rtcm3` 原样 | 无 | 整段 | `$INTEG/run_A` |
 | `B` | `base.rtcm3` | `rover.nav` → RTCM3(1019/1020/1042/1045/1046),第一块之前一次、之后每 30 数据秒一次 | 整段 | `run_B` |
 | `dry` | 同 A | 无 | 前 `duration_s` 数据秒(默认 90) | `run_dry` |
 | `dryB` | 同 B | 同 B | 前 `duration_s` 数据秒(默认 90) | `run_dryB` |
 
+**产物根目录与覆盖保护**:
+
+- `INTEG` = 环境变量 `GNSS_FIELD_INTEG_DIR`;没给时,`<seg>/integration_20260916` 存在就用它(兼容 2026-09-16
+  那一轮),否则用 `<seg>/integration_<今天 YYYYMMDD>`。`INTEG` 必须事先建好(数据段只读,脚本不在数据段里建目录),
+  路径里要有 `integration_*` 这一级(清空前的名字守卫)。
+- `run_<mode>` 已存在且非空时**默认拒绝**(退出码 2),以免覆盖已有结果;确认可以丢弃时加 `--force`。
+  **2026-09-16 那一轮的 `run_A`/`run_B` 是结果文档引用的证据,重跑请换新目录**:
+  `mkdir -p <seg>/integration_$(date +%Y%m%d) && GNSS_FIELD_INTEG_DIR=<seg>/integration_$(date +%Y%m%d) run_field_integration.sh A <seg>`。
+- 工作空间:`GLIM_WS_INSTALL`(默认 `/home/steve/glim_ws/install`)、`DRIVER_WS_INSTALL`(默认
+  `/home/steve/driver_ws/install`),脚本依次 source `/opt/ros/humble`、这两个 overlay。
+
 A 的观测流里 610 没有输出 GPS 星历(只有 13 条 Galileo、1 条北斗),rtkrcv 很可能解不出;
 B 用当天更早的星历补上,用来区分"链路问题"和"星历缺失"。
 
-脚本做的事:清空运行目录 → 生成补 σ 帧的 CAN 日志副本(和 B 的星历电文)→ 写 `params.yaml`
+脚本做的事:检查运行目录(非空要 `--force`)→ 清空运行目录 → 生成补 σ 帧的 CAN 日志副本(和 B 的星历电文)→ 写 `params.yaml`
 → 后台起 `gnss_bringup.launch.py`(`enable_rtkrcv:=true enable_diag:=false enable_cleanup:=false`)、
 `gnss_diag_node`(`use_sim_time:=true`)、`gnss_chcnav_can`(节点名 `gnss_cgi610`,`vcan0`,
 `timestamp_source:=gps`)、`record_gnss.sh` → 5 s 后前台跑 `field_replay.py` → 依次 SIGINT
@@ -55,8 +67,12 @@ B 用当天更早的星历补上,用来区分"链路问题"和"星历缺失"。
 gnss_bringup Task 6 F2 让 conf 固定写 `misc-timeout =0`、`misc-reconnect =1000` 之后连接不再空闲断开,
 旧等法永远等不到(实测等满 25 s 退出 3),改为只要求端口上此刻有连接。
 
-残留进程检查的模式锚定在程序名上(脚本自身、grep/tail 日志的 shell 不算),`run_field_integration.sh --print-proc-pat`
-打印模式,`tests/test_proc_pattern.py` 用样例命令行校验漏报/误报。
+残留进程检查(开跑前与收尾后各一次)的模式锚定在程序名上(脚本自身、grep/tail 日志的 shell 不算):
+rtkrcv、各节点、canplayer、field_replay.py 不分 ROS domain 一律算(同名进程会抢 vcan0 与本机端口);
+通用的 `ros2 bag|launch|run` 只算环境里 `ROS_DOMAIN_ID=66` 的(读 `/proc/<pid>/environ`),别的终端里无关的
+ros2 命令不误报。收尾时若 rtkrcv 没被节点停掉,兜底只杀"rtkrcv 程序且 `-o` 正好是本次 `rtkrcv/rtkrcv.conf`"的进程。
+`--print-proc-pat`、`--print-ros2-cli-pat`、`--print-rtkrcv-pat <run>`、`--list-leftovers` 用于自检,
+`tests/test_proc_pattern.py` 用样例命令行和伪装成 `ros2 launch` 的真进程校验漏报/误报。
 
 排查:`RTKRCV_TRACE_LEVEL=3 run_field_integration.sh dryB <seg> 50` 给 rtkrcv 加 `-t 3`,
 trace 写在 `rtkrcv/rtkrcv_*.trace`(level 3 约 1 MB / 50 s)。

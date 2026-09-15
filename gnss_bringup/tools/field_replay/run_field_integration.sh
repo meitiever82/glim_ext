@@ -2,7 +2,9 @@
 # run_field_integration.sh —— 现场数据整链路回放一遍(Task 3)
 #
 # 用法:
-#   run_field_integration.sh <A|B|dry|dryB> <seg> [duration_s]
+#   run_field_integration.sh [--force] <A|B|dry|dryB> <seg> [duration_s]
+#
+#   --force  运行目录 run_<mode> 已存在且非空时清空后重跑;不给则拒绝(退出码 2),以免覆盖已有证据
 #
 #   A     原样:差分 = <seg>/gnss/base.rtcm3,观测 = <seg>/raw/cgi610.dat,整段 1×
 #   B     补星历:同 A,另把 <seg>/gnss/rover.nav 编码成 RTCM3 星历电文,注入差分流
@@ -10,7 +12,16 @@
 #   dry   试跑:A 的输入,只放前 duration_s 数据秒(默认 90)
 #   dryB  试跑:B 的输入,只放前 duration_s 数据秒(默认 90)
 #
-# 产物全部在 RUN=<seg>/integration_20260916/run_<mode>/(每次运行先清空这个目录,只清这一个):
+# 环境变量(可选):
+#   GNSS_FIELD_INTEG_DIR  产物根目录 INTEG(须已存在,且路径里有 integration_* 这一级)。缺省:
+#                         <seg>/integration_20260916 存在就用它(兼容 2026-09-16 那一轮),
+#                         否则 <seg>/integration_<今天 YYYYMMDD>
+#   GLIM_WS_INSTALL       缺省 /home/steve/glim_ws/install(提供 gnss_bringup)
+#   DRIVER_WS_INSTALL     缺省 /home/steve/driver_ws/install(提供 gnss_chcnav)
+#   RTKLIB_SRC            RTKLIB-EX 源码树(B/dryB 编译 rnx_nav_to_rtcm.c 用)
+#   RTKRCV_TRACE_LEVEL    1-5 时给 rtkrcv 加 -t <level>
+#
+# 产物全部在 RUN=$INTEG/run_<mode>/(非空时须 --force 才清空重跑,只清这一个目录):
 #   params.yaml              由 gnss_bringup.yaml 改出来的参数覆盖
 #   can_with_sigma.log       补了全零 σ 帧(0x326/0x328/0x32B)的 CAN 日志副本
 #   nav.rtcm3                (B/dryB)rover.nav 编码出的星历电文
@@ -39,18 +50,58 @@ HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # 这里改成锚定在程序名上:命令行第一个词(或 python 解释器后的脚本/ros2 子命令)是这些程序才算。
 # Fix round 1:原模式漏掉 rtkrcv_node(`rtkrcv( |$)` 不认 rtkrcv_node)、gnss_cleanup_node、
 # 不带解释器前缀的 `ros2 bag record`、python3.10 这类解释器名。样例见 tests/test_proc_pattern.py。
+# 最终修复轮:具体程序名(rtkrcv、各节点、canplayer、field_replay.py)不分 ROS domain 一律算——别的会话里的
+# 同名进程也会抢 vcan0 / 本机端口,照样要先处理;通用的 `ros2 bag|launch|run` 只算 ROS_DOMAIN_ID 等于本脚本
+# 所用 domain 的(读 /proc/<pid>/environ,读不到的算别人的),别的终端里无关的 ros2 launch 不再误报。
+RUN_DOMAIN_ID=66
 PROC_PAT='^(\S*/)?(rtkrcv|rtkrcv_node|rtcm_bridge|pos_writer|gnss_diag_node|gnss_cleanup_node|gnss_chcnav_can|canplayer)( |$)'
-PROC_PAT+='|^(\S*/)?python[0-9.]*( -u)? (\S*/)?(ros2 (bag|launch|run)|field_replay\.py)( |$)'
-PROC_PAT+='|^(\S*/)?ros2 (bag|launch|run)( |$)'
-leftovers() { pgrep -af "$PROC_PAT" || true; }
+PROC_PAT+='|^(\S*/)?python[0-9.]*( -u)? (\S*/)?field_replay\.py( |$)'
+ROS2_CLI_PAT='^(\S*/)?python[0-9.]*( -u)? (\S*/)?ros2 (bag|launch|run)( |$)'
+ROS2_CLI_PAT+='|^(\S*/)?ros2 (bag|launch|run)( |$)'
+in_run_domain() {  # in_run_domain <pid>:该进程启动时的环境里 ROS_DOMAIN_ID 等于 RUN_DOMAIN_ID
+  { tr '\0' '\n' < "/proc/$1/environ"; } 2>/dev/null | grep -qx "ROS_DOMAIN_ID=$RUN_DOMAIN_ID"
+}
+leftovers() {
+  pgrep -af "$PROC_PAT" || true
+  local pid args
+  while read -r pid args; do
+    [[ -n "$pid" ]] && in_run_domain "$pid" && printf '%s %s\n' "$pid" "$args"
+  done < <(pgrep -af "$ROS2_CLI_PAT" || true)
+  return 0
+}
 
-# 自检用:打印上面的模式后退出(不需要 ROS),tests/test_proc_pattern.py 拿它对样例命令行跑 grep -E
-if [[ "${1:-}" == --print-proc-pat ]]; then printf '%s\n' "$PROC_PAT"; exit 0; fi
-MODE="${1:-}"
-SEG="${2:-}"
-DUR_ARG="${3:-}"
+# ERE 转义(路径里的 . + ( ) 等按字面匹配)
+ere_escape() { printf '%s' "$1" | sed 's/[][\.*^$+?(){}|]/\\&/g'; }
+# 收尾兜底用:只认 rtkrcv 程序本身、且 -o 参数正好是本次运行的 conf(rtkrcv_node 的启动参数是
+# `rtkrcv -s -nc -r 2 -o <conf> [args...]`);tail/vim 这个 conf 的进程、别的运行目录的 rtkrcv 都不算
+rtkrcv_conf_pat() { printf '^(\\S*/)?rtkrcv( .*)? -o %s( |$)' "$(ere_escape "$1/rtkrcv/rtkrcv.conf")"; }
 
-usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+# 自检用(不需要 ROS),tests/test_proc_pattern.py 用:
+#   --print-proc-pat / --print-ros2-cli-pat  打印模式,拿它对样例命令行跑 grep -E
+#   --print-rtkrcv-pat <run>                 打印收尾兜底用的 rtkrcv 模式
+#   --list-leftovers                         打印此刻的残留检查结果(验证 domain 过滤)
+case "${1:-}" in
+  --print-proc-pat) printf '%s\n' "$PROC_PAT"; exit 0 ;;
+  --print-ros2-cli-pat) printf '%s\n' "$ROS2_CLI_PAT"; exit 0 ;;
+  --print-rtkrcv-pat) rtkrcv_conf_pat "${2:?}"; echo; exit 0 ;;
+  --list-leftovers) leftovers; exit 0 ;;
+esac
+
+FORCE=0
+POS_ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --force) FORCE=1 ;;
+    -*) echo "未知选项: $a" >&2; exit 2 ;;
+    *) POS_ARGS+=("$a") ;;
+  esac
+done
+MODE="${POS_ARGS[0]:-}"
+SEG="${POS_ARGS[1]:-}"
+DUR_ARG="${POS_ARGS[2]:-}"
+
+usage() { sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+[[ ${#POS_ARGS[@]} -le 3 ]] || usage
 [[ -n "$MODE" && -n "$SEG" ]] || usage
 
 case "$MODE" in
@@ -72,15 +123,36 @@ RTCM="$SEG/gnss/base.rtcm3"
 OBS="$SEG/raw/cgi610.dat"
 CAN_SRC="$SEG/raw/can7.candump.log"
 RNX_NAV="$SEG/gnss/rover.nav"
-INTEG="$SEG/integration_20260916"
-RUN="$INTEG/run_$MODE"
+if [[ -n "${GNSS_FIELD_INTEG_DIR:-}" ]]; then
+  INTEG="$GNSS_FIELD_INTEG_DIR"
+elif [[ -d "$SEG/integration_20260916" ]]; then
+  INTEG="$SEG/integration_20260916"
+else
+  INTEG="$SEG/integration_$(date +%Y%m%d)"
+fi
+GLIM_WS_INSTALL="${GLIM_WS_INSTALL:-/home/steve/glim_ws/install}"
+DRIVER_WS_INSTALL="${DRIVER_WS_INSTALL:-/home/steve/driver_ws/install}"
 
 for f in "$RTCM" "$OBS" "$CAN_SRC"; do
   [[ -r "$f" ]] || { echo "缺输入文件: $f" >&2; exit 2; }
 done
 if [[ $NAV == 1 && ! -r "$RNX_NAV" ]]; then echo "缺输入文件: $RNX_NAV" >&2; exit 2; fi
-[[ -d "$INTEG" ]] || { echo "缺目录 $INTEG(数据段只读,产物只写这里,需先建好)" >&2; exit 2; }
+[[ -d "$INTEG" ]] || { echo "缺目录 $INTEG(数据段只读,产物只写这里,需先建好;或用 GNSS_FIELD_INTEG_DIR 指定)" >&2; exit 2; }
+INTEG="$(readlink -f "$INTEG")"
+RUN="$INTEG/run_$MODE"
 
+# 名字守卫(任何清空之前):只清 <…/integration_*/…>/run_<A|B|dry|dryB>,INTEG 不能就是数据段目录本身
+case "$RUN" in
+  */integration_*/run_A|*/integration_*/run_B|*/integration_*/run_dry|*/integration_*/run_dryB) ;;
+  *) echo "RUN=$RUN 不是预期的运行目录(路径里要有 integration_* 这一级),拒绝使用" >&2; exit 2 ;;
+esac
+[[ "$INTEG" != "$SEG" && "$INTEG" != / ]] || { echo "INTEG=$INTEG 不能是数据段目录或 /" >&2; exit 2; }
+# 不覆盖已有证据:运行目录非空时要 --force 才清空
+if [[ -d "$RUN" && -n "$(find "$RUN" -mindepth 1 -maxdepth 1 -print -quit)" && $FORCE != 1 ]]; then
+  echo "运行目录 $RUN 已存在且非空,拒绝覆盖(里面可能是要保留的结果)。" >&2
+  echo "换一个产物根目录(GNSS_FIELD_INTEG_DIR=<新目录>),或确认可以丢弃后加 --force 重跑。" >&2
+  exit 2
+fi
 
 # ---------- 前置检查 ----------
 if ip link show vcan0 2>/dev/null | grep -q "UP"; then :; else
@@ -94,8 +166,8 @@ if [[ -n "$(leftovers)" ]]; then
 fi
 
 # ---------- 1. 运行目录与环境 ----------
-case "$RUN" in
-  */integration_20260916/run_A|*/integration_20260916/run_B|*/integration_20260916/run_dry|*/integration_20260916/run_dryB) ;;
+case "$RUN" in   # 与上面的名字守卫相同,紧挨着清空再查一次
+  */integration_*/run_A|*/integration_*/run_B|*/integration_*/run_dry|*/integration_*/run_dryB) ;;
   *) echo "内部错误:RUN=$RUN 不是预期的运行目录,拒绝清空" >&2; exit 2 ;;
 esac
 mkdir -p "$RUN"
@@ -105,17 +177,18 @@ mkdir -p "$RUN/logs" "$RUN/roslog" "$RUN/rtkrcv" "$RUN/pos" "$RUN/diag" "$RUN/ba
 exec > >(trap '' INT; exec tee -a "$RUN/logs/run.log") 2>&1
 
 say() { echo "[run_field_integration $(date +%H:%M:%S)] $*"; }
-say "mode=$MODE seg=$SEG run=$RUN nav=$NAV duration=${DUR:-整段}"
+say "mode=$MODE seg=$SEG run=$RUN nav=$NAV duration=${DUR:-整段} force=$FORCE"
+say "GLIM_WS_INSTALL=$GLIM_WS_INSTALL DRIVER_WS_INSTALL=$DRIVER_WS_INSTALL"
 
-export ROS_DOMAIN_ID=66
+export ROS_DOMAIN_ID=$RUN_DOMAIN_ID
 export ROS_LOG_DIR="$RUN/roslog"
 # shellcheck disable=SC1091
 source /opt/ros/humble/setup.bash
 # shellcheck disable=SC1091
-source /home/steve/glim_ws/install/setup.bash
+source "$GLIM_WS_INSTALL/setup.bash" || { say "source $GLIM_WS_INSTALL/setup.bash 失败"; exit 2; }
 # driver_ws 放最后:提供 gnss_chcnav(Task 1 核对过两份 gnss_msgs 同源,都带 ratio)
 # shellcheck disable=SC1091
-source /home/steve/driver_ws/install/setup.bash
+source "$DRIVER_WS_INSTALL/setup.bash" || { say "source $DRIVER_WS_INSTALL/setup.bash 失败"; exit 2; }
 command -v ros2 >/dev/null || { say "source 后仍找不到 ros2"; exit 2; }
 BRINGUP_PREFIX="$(ros2 pkg prefix gnss_bringup)" || { say "找不到 gnss_bringup 包"; exit 2; }
 ros2 pkg prefix gnss_chcnav >/dev/null || { say "找不到 gnss_chcnav 包(driver_ws 未编译?)"; exit 2; }
@@ -224,11 +297,12 @@ cleanup() {
   stop_group gnss_chcnav
   stop_group bringup
   # rtkrcv 在自己的会话里(rtkrcv_node 的 ProcessSupervisor 用 setsid),launch 退出时由
-  # rtkrcv_node 负责停;万一节点被 SIGKILL,这里按本次 conf 路径兜底
-  if pgrep -f "$RUN/rtkrcv/rtkrcv.conf" >/dev/null; then
-    say "rtkrcv 仍在(节点未能停掉它),SIGTERM:"; pgrep -af "$RUN/rtkrcv/rtkrcv.conf"
-    pkill -TERM -f "$RUN/rtkrcv/rtkrcv.conf"; sleep 3
-    pkill -KILL -f "$RUN/rtkrcv/rtkrcv.conf" 2>/dev/null && FORCED+=("rtkrcv")
+  # rtkrcv_node 负责停;万一节点被 SIGKILL,这里兜底——只认 rtkrcv 程序且 -o 是本次 conf(见 rtkrcv_conf_pat)
+  local rtk_pat; rtk_pat="$(rtkrcv_conf_pat "$RUN")"
+  if pgrep -f "$rtk_pat" >/dev/null; then
+    say "rtkrcv 仍在(节点未能停掉它),SIGTERM:"; pgrep -af "$rtk_pat"
+    pkill -TERM -f "$rtk_pat"; sleep 3
+    pkill -KILL -f "$rtk_pat" 2>/dev/null && FORCED+=("rtkrcv")
   fi
   ros2 daemon stop > /dev/null 2>&1 || true
 }
@@ -281,7 +355,7 @@ LEFT="$(leftovers)"
 if [[ -n "$LEFT" ]]; then
   say "残留进程:"; echo "$LEFT"
 else
-  say "残留进程检查(pgrep -af '$PROC_PAT'):无"
+  say "残留进程检查(pgrep -af '$PROC_PAT';ros2 bag/launch/run 只算 ROS_DOMAIN_ID=$RUN_DOMAIN_ID 的):无"
 fi
 [[ ${#FORCED[@]} -gt 0 ]] && say "被强制 SIGKILL 的:${FORCED[*]}"
 
