@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <sstream>
@@ -25,6 +26,26 @@
 extern char** environ;
 
 namespace gnss_bringup_test {
+
+// round 1 review(最初在 test_gnss_diag_node_process.cpp 里写出来的教训):
+// 原来每个用例末尾显式 fs::remove_all(dir),但 ASSERT_* 失败时 gtest 会在那
+// 一行直接 return,末尾的清理代码整段跳不到,临时目录就漏删了。改成
+// RAII——构造顺序必须在 NodeProcess 之前,这样它的析构(删除目录)一定晚于
+// NodeProcess 的析构(SIGKILL+waitpid,保证子进程已经退出、不会再往目录里写
+// 东西),LIFO 析构顺序自动保证"先等子进程死透,再删目录",不需要额外的
+// 先后协调。搬进这个共享头文件,供多个节点级测试文件复用。
+class TempDirGuard {
+ public:
+  explicit TempDirGuard(std::string dir) : dir_(std::move(dir)) {}
+  ~TempDirGuard() {
+    if (!dir_.empty()) std::filesystem::remove_all(dir_);
+  }
+  TempDirGuard(const TempDirGuard&) = delete;
+  TempDirGuard& operator=(const TempDirGuard&) = delete;
+
+ private:
+  std::string dir_;
+};
 
 inline std::string make_temp_dir(const std::string& prefix) {
   const char* base = std::getenv("TMPDIR");

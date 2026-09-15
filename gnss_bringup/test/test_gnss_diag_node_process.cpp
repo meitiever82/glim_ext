@@ -57,23 +57,8 @@ std::string all_day_files(const std::string& root, const std::string& filename) 
   return out;
 }
 
-// review round 1:原来每个用例末尾显式 fs::remove_all(dir),但 ASSERT_* 失败时
-// gtest 会在那一行直接 return,末尾的清理代码整段跳不到,临时目录就漏删了。改成
-// RAII——构造顺序必须在 NodeProcess 之前,这样它的析构(删除目录)一定晚于
-// NodeProcess 的析构(SIGKILL+waitpid,保证子进程已经退出、不会再往目录里写东西),
-// LIFO 析构顺序自动保证"先等子进程死透,再删目录",不需要额外的先后协调。
-class TempDirGuard {
- public:
-  explicit TempDirGuard(std::string dir) : dir_(std::move(dir)) {}
-  ~TempDirGuard() {
-    if (!dir_.empty()) fs::remove_all(dir_);
-  }
-  TempDirGuard(const TempDirGuard&) = delete;
-  TempDirGuard& operator=(const TempDirGuard&) = delete;
-
- private:
-  std::string dir_;
-};
+// TempDirGuard 搬进了 node_process_harness.hpp(task-5:多个节点级测试文件
+// 复用同一份 RAII 清理逻辑),这里不再本地定义。
 
 // review round 1:同样的道理,两个自己起 rclcpp 的用例原来在函数体末尾显式
 // rclcpp::shutdown(),ASSERT_* 提前 return 时跳过,下一个用例开头的 rclcpp::init()
