@@ -48,11 +48,15 @@ B 用当天更早的星历补上,用来区分"链路问题"和"星历缺失"。
 `ros2 bag info` 与各日志尾部。
 
 **开始时刻**:`field_replay.py` 等 `rtcm_bridge` 连上两个端口之后,还要等 rtkrcv 在 rtkrcv_node 的本机端口
-(`corr_port`/`obs_port`,默认 15041/15042)上**新建立**一次连接才开始发数据(`--wait-fresh-ports`)。原因:
+(`corr_port`/`obs_port`,默认 15041/15042)上**新建立**一次连接才开始发数据(`--wait-fresh-ports`,
+最多等 `--downstream-timeout` 25 s)。原因:
 rtkrcv 的 tcpcli 输入 10 s 没数据就断开、10 s 后才重连(RTKLIB `misc-timeout`/`misc-reconnect` 默认值,
 `rtkrcv.conf` 没覆盖),rtkrcv_node 在断开期间收到的字节直接丢弃。不等的话,`rtcm_bridge` 的连接退避
 (1+2+4+8 s)正好让回放从第 15 s 开始、落在断开窗口里——2026-09-16 dryB 试跑开头 5 s 数据与第一次星历
 注入全部丢失,rtkrcv 到第二次注入(+30 s)才有解;加上等待后第 2 个历元就出解。
+
+残留进程检查的模式锚定在程序名上(脚本自身、grep/tail 日志的 shell 不算),`run_field_integration.sh --print-proc-pat`
+打印模式,`tests/test_proc_pattern.py` 用样例命令行校验漏报/误报。
 
 排查:`RTKRCV_TRACE_LEVEL=3 run_field_integration.sh dryB <seg> 50` 给 rtkrcv 加 `-t 3`,
 trace 写在 `rtkrcv/rtkrcv_*.trace`(level 3 约 1 MB / 50 s)。
@@ -102,14 +106,17 @@ run_<mode>/
 field_replay.py --rtcm <base.rtcm3> --obs <cgi610.dat> [--can-log <log>] [--nav-rtcm <eph.rtcm3>] \
   [--corr-port 15031] [--obs-port 15032] [--can-iface vcan0] [--can-log-iface can7] \
   [--speed 1.0] [--connect-timeout 60] [--reconnect-timeout 30] [--leap 18] \
-  [--wait-fresh-ports 15041,15042] [--downstream-timeout 60] [--duration-s N] [--tail-clock-s 10]
+  [--wait-fresh-ports 15041,15042] [--downstream-timeout 25] [--duration-s N] [--tail-clock-s 10]
 ```
 
 - 发的是**文件原始字节**,按文件顺序:每块 = 上一帧末尾之后到本帧末尾的全部字节(`cgi610.dat`
   里夹带的 `\n` 与 RTCM3 帧随下一条 NovAtel 帧一起发);块时刻 = 截至本帧的帧时间最大值
   (RANGECMPB 时间最多往回 190 ms)。整段回放结束时打印"已发字节 = 文件大小 + 注入星历字节"。
-- `t0` = 三路里最早的数据时刻;两个端口都被 `rtcm_bridge` 连上时记 `W0`;
-  `/clock = t0 + (monotonic − W0)·speed`。
+- `t0` = 三路里最早的数据时刻。`W0` 的时刻:两个端口都被 `rtcm_bridge` 连上之后;给了 `--wait-fresh-ports`
+  (`run_field_integration.sh` 总是给)时,还要再等这些本机端口上各出现一次新建立的连接,那一刻才记 `W0`。
+  `/clock` 从 `W0` 开始发布,`/clock = t0 + (monotonic − W0)·speed`。
+- `--downstream-timeout` 默认 25 s,必须小于 `rtcm_bridge` 的 `idle_timeout_s`(30 s):等待期间两个上游连接上
+  一个字节都没有,超过 30 s bridge 会因空闲断开。超时退出码 3。
 - 退出码:0 正常;2 输入/端口错误;3 `rtcm_bridge` 未连接或 `--wait-fresh-ports` 超时;4 断线后未重连;
   5 canplayer 异常;130 信号。
 - `--speed` 只影响 TCP 与 `/clock`,canplayer 没有倍速,带 CAN 时应保持 1×。

@@ -31,6 +31,21 @@ set -o pipefail
 # 注意:不开 set -u —— /opt/ros/humble/setup.bash 引用未定义变量
 
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+# 进程残留检查。控制者给的检查式是
+#   pgrep -af "rtkrcv|rtcm_bridge|pos_writer|gnss_diag|gnss_chcnav|canplayer|ros2 bag|field_replay"
+# 但它会命中任何命令行里恰好带这些词的无关进程(本脚本自身的路径就含 field_replay,
+# 别的终端里 grep/tail 这些日志的 shell 也会中招,2026-09-16 dryB 试跑就误报过一次)。
+# 这里改成锚定在程序名上:命令行第一个词(或 python 解释器后的脚本/ros2 子命令)是这些程序才算。
+# Fix round 1:原模式漏掉 rtkrcv_node(`rtkrcv( |$)` 不认 rtkrcv_node)、gnss_cleanup_node、
+# 不带解释器前缀的 `ros2 bag record`、python3.10 这类解释器名。样例见 tests/test_proc_pattern.py。
+PROC_PAT='^(\S*/)?(rtkrcv|rtkrcv_node|rtcm_bridge|pos_writer|gnss_diag_node|gnss_cleanup_node|gnss_chcnav_can|canplayer)( |$)'
+PROC_PAT+='|^(\S*/)?python[0-9.]*( -u)? (\S*/)?(ros2 (bag|launch|run)|field_replay\.py)( |$)'
+PROC_PAT+='|^(\S*/)?ros2 (bag|launch|run)( |$)'
+leftovers() { pgrep -af "$PROC_PAT" || true; }
+
+# 自检用:打印上面的模式后退出(不需要 ROS),tests/test_proc_pattern.py 拿它对样例命令行跑 grep -E
+if [[ "${1:-}" == --print-proc-pat ]]; then printf '%s\n' "$PROC_PAT"; exit 0; fi
 MODE="${1:-}"
 SEG="${2:-}"
 DUR_ARG="${3:-}"
@@ -66,14 +81,6 @@ done
 if [[ $NAV == 1 && ! -r "$RNX_NAV" ]]; then echo "缺输入文件: $RNX_NAV" >&2; exit 2; fi
 [[ -d "$INTEG" ]] || { echo "缺目录 $INTEG(数据段只读,产物只写这里,需先建好)" >&2; exit 2; }
 
-# 进程残留检查。控制者给的检查式是
-#   pgrep -af "rtkrcv|rtcm_bridge|pos_writer|gnss_diag|gnss_chcnav|canplayer|ros2 bag|field_replay"
-# 但它会命中任何命令行里恰好带这些词的无关进程(本脚本自身的路径就含 field_replay,
-# 别的终端里 grep/tail 这些日志的 shell 也会中招,2026-09-16 dryB 试跑就误报过一次)。
-# 这里改成锚定在程序名上:命令行第一个词(或 python3 解释器后的脚本/ros2 子命令)是这些程序才算。
-PROC_PAT='^(\S*/)?(rtkrcv|rtcm_bridge|pos_writer|gnss_diag_node|gnss_chcnav_can|canplayer)( |$)'
-PROC_PAT+='|^\S*python3?( -u)? \S*(/ros2 (bag|launch|run) |field_replay\.py)'
-leftovers() { pgrep -af "$PROC_PAT" || true; }
 
 # ---------- 前置检查 ----------
 if ip link show vcan0 2>/dev/null | grep -q "UP"; then :; else

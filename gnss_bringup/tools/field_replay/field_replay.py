@@ -273,8 +273,10 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
                     help="逗号分隔的本机端口(如 rtkrcv_node 的 corr_port/obs_port 15041,15042):"
                          "两个上游端口连上后,再等这些端口上各出现一次新建立的连接才开始(W0),"
                          "避开 rtkrcv tcpcli 无数据 10 s 断开、10 s 后重连的空窗,见 replay_plan.py")
-    ap.add_argument("--downstream-timeout", type=float, default=60.0,
-                    help="--wait-fresh-ports 最多等多少秒")
+    # 25 s < rtcm_bridge 的 idle_timeout_s(30 s):两个上游端口连上后到 W0 之间一个字节都不发,
+    # 等太久 bridge 会因空闲主动断开,之后第一次 sendall 可能写进一条对端已关闭的连接
+    ap.add_argument("--downstream-timeout", type=float, default=25.0,
+                    help="--wait-fresh-ports 最多等多少秒(默认 25,须小于 rtcm_bridge idle_timeout_s=30)")
     ap.add_argument("--duration-s", type=float, default=None, help="只放前 N 数据秒(试跑)")
     ap.add_argument("--tail-clock-s", type=float, default=10.0, help="发完后 /clock 再走的墙钟秒数")
     a = ap.parse_args(argv)
