@@ -226,6 +226,7 @@ install(PROGRAMS
   tools/field_replay/field_replay.py
   tools/field_replay/run_field_integration.sh
   tools/field_replay/can_sigma_patch.py
+  tools/field_replay/field_eval.py
   DESTINATION lib/${PROJECT_NAME})
 install(FILES
   tools/field_replay/replay_plan.py

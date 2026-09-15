@@ -142,9 +142,12 @@ field_replay.py --rtcm <base.rtcm3> --obs <cgi610.dat> [--can-log <log>] [--nav-
 
 ```bash
 source /opt/ros/humble/setup.bash; source ~/glim_ws/install/setup.bash; source ~/driver_ws/install/setup.bash   # 读录包要用
-field_eval.py --run <seg>/integration_20260916/run_B --ref <seg>/gnss/rtk_check.pos \
-  --out <seg>/integration_20260916/eval/B.md [--bag <run>/bags/gnss_*] [--label B] [--pair-tol 0.1]
+ros2 run gnss_bringup field_eval.py --run $INTEG/run_B --ref <seg>/gnss/rtk_check.pos \
+  --out $INTEG/eval/B.md [--bag <run>/bags/gnss_*] [--label B] [--pair-tol 0.1]
+# 不 source ROS 时直接用源码树里的脚本:python3 gnss_bringup/tools/field_replay/field_eval.py …(航向退回 can.pos 航迹向)
 ```
+
+- 退出码:0 已写出;2 输入不可用(例如 `--ref` 里一条可解析的记录都没有),不写输出文件。
 
 - `.pos` 两种时间列都认:pos_writer 的"日期 时间"(头部 `time=GPST`)和 rnx2rtkp 默认的"GPS 周 周内秒"。
   GPST 一律减 18 s 换成 UTC 再配对。注意 `gnss_core` 的 `read_pos`(因而 `calibrate_sigma_scale`)

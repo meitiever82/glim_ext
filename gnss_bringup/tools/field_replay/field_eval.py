@@ -559,6 +559,10 @@ def nearest_index(ts: List[float], t: float, tol: float) -> Optional[int]:
     return best
 
 
+class EvalInputError(Exception):
+    """输入不可用(例如 ref 没有记录):main() 打印原因并返回 2,不输出半截报告。"""
+
+
 def evaluate(run: str, ref_path: str, bag_path: Optional[str], out_path: str, label: str, tol: float) -> str:
     L: List[str] = []
     can_path = find_one(os.path.join(run, "pos", "*", "can.pos"))
@@ -572,6 +576,10 @@ def evaluate(run: str, ref_path: str, bag_path: Optional[str], out_path: str, la
         bag_path = bags[0] if len(bags) == 1 else None
 
     ref = read_pos(ref_path)
+    if not ref.records:
+        # 后面的配对、首次固定、数据起止时刻都以 ref 为基准;没有记录时直接报清楚,不要在中途抛 IndexError
+        raise EvalInputError(f"ref 文件里没有可解析的解算记录: {ref_path}"
+                             "(只支持经纬高格式、日期时间列或 GPS 周 + 周内秒列的 .pos)")
     can = read_pos(can_path) if can_path else None
     rtk = read_pos(rtk_path) if rtk_path else None
     srcs = OrderedDict([("can", can), ("rtkrcv", rtk), ("ref", ref)])
@@ -979,7 +987,11 @@ def main(argv=None) -> int:
     ap.add_argument("--pair-tol", type=float, default=0.1)
     a = ap.parse_args(argv)
     label = a.label or os.path.basename(os.path.normpath(a.run))
-    evaluate(a.run, a.ref, a.bag, a.out, label, a.pair_tol)
+    try:
+        evaluate(a.run, a.ref, a.bag, a.out, label, a.pair_tol)
+    except EvalInputError as e:
+        print(f"field_eval.py: {e}", file=sys.stderr)
+        return 2
     print(f"written {a.out}")
     return 0
 

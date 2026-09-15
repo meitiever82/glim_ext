@@ -385,5 +385,30 @@ class OffsetClassificationTest(unittest.TestCase):
         self.assertEqual(fe.classify_offset(de[:10], dn[:10], hdgs[:10])[0], "too_few")
 
 
+class EmptyRefTest(unittest.TestCase):
+    """ref 没有记录(空文件/只有头部/格式不认识)时:清楚的报错、退出码 2、不写半截报告。"""
+
+    def test_ref_without_records_exits_2_without_traceback(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            ref = os.path.join(d, "rtk_check.pos")
+            with open(ref, "w") as f:
+                f.write("% program   : RTKLIB-EX 2.5.1\n% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,2:float)\n")
+            run = os.path.join(d, "run_X")
+            # 带一条固定解的 rtkrcv.pos:修复前"首次固定相对数据起点"一行拿 None 做减法,抛 TypeError
+            os.makedirs(os.path.join(run, "pos", "20260915"))
+            with open(os.path.join(run, "pos", "20260915", "rtkrcv.pos"), "w") as f:
+                f.write(POS_WRITER_GPST)
+            out = os.path.join(d, "eval.md")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = fe.main(["--run", run, "--ref", ref, "--out", out])
+            self.assertEqual(rc, 2)
+            self.assertIn("没有可解析的解算记录", err.getvalue())
+            self.assertIn(ref, err.getvalue())
+            self.assertFalse(os.path.exists(out))
+
+
 if __name__ == "__main__":
     unittest.main()
