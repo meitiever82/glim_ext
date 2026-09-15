@@ -14,6 +14,7 @@ find_package(gnss_msgs REQUIRED)
 list(APPEND CMAKE_MODULE_PATH "/usr/share/cmake/geographiclib")
 find_package(gnss_core REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 # 不依赖 ROS 的 I/O 与进程管理,便于单测
 add_library(gnss_bringup_io SHARED
@@ -47,6 +48,14 @@ add_executable(pos_writer src/pos_writer_node.cpp)
 target_link_libraries(pos_writer gnss_bringup_io gnss_core::gnss_core)
 ament_target_dependencies(pos_writer rclcpp gnss_msgs)
 install(TARGETS pos_writer DESTINATION lib/${PROJECT_NAME})
+
+add_executable(gnss_diag_node src/gnss_diag_node.cpp)
+target_link_libraries(gnss_diag_node gnss_core::gnss_core)
+# diag_node_support.hpp / rtk_fix_mapping.hpp 在本包 include/ 下;本目标不链接
+# gnss_bringup_io(不需要 TCP/进程管理),所以没有从别处间接拿到这条 include 路径。
+target_include_directories(gnss_diag_node PRIVATE include)
+ament_target_dependencies(gnss_diag_node rclcpp gnss_msgs diagnostic_msgs std_srvs)
+install(TARGETS gnss_diag_node DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -148,6 +157,18 @@ if(BUILD_TESTING)
     RTKRCV_NODE_PATH="$<TARGET_FILE:rtkrcv_node>"
     RTKRCV_FAKETIME_WRAPPER="${CMAKE_CURRENT_SOURCE_DIR}/test/rtkrcv_faketime.sh"
     GNSS_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/data")
+
+  # gnss_diag_node 节点级测试:起子进程,本进程用 rclcpp 喂数据/收诊断/调服务/发 /clock。
+  # 1005 帧构造复用 gnss_core 的测试夹具(同一仓库的兄弟包,只在测试里引用)。
+  find_package(rosgraph_msgs REQUIRED)
+  ament_add_gtest(test_gnss_diag_node_process test/test_gnss_diag_node_process.cpp TIMEOUT 240)
+  target_link_libraries(test_gnss_diag_node_process gnss_core::gnss_core)
+  target_include_directories(test_gnss_diag_node_process PRIVATE include test
+    ${CMAKE_CURRENT_SOURCE_DIR}/../gnss_core/test)
+  ament_target_dependencies(test_gnss_diag_node_process rclcpp gnss_msgs diagnostic_msgs std_srvs rosgraph_msgs)
+  add_dependencies(test_gnss_diag_node_process gnss_diag_node)
+  target_compile_definitions(test_gnss_diag_node_process PRIVATE
+    GNSS_DIAG_NODE_PATH="$<TARGET_FILE:gnss_diag_node>")
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
