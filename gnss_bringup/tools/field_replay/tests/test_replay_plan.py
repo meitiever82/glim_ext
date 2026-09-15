@@ -189,29 +189,22 @@ class EstablishedPortsTest(unittest.TestCase):
         self.assertEqual(rp.established_local_ports(PROC_NET_TCP.splitlines()[0]), {})
 
 
-class FreshConnectionWaiterTest(unittest.TestCase):
-    def test_already_connected_is_not_fresh_until_it_drops_and_comes_back(self):
-        # rtkrcv 的 tcpcli 无数据 10 s 就断、再过 10 s 重连:开始发数据必须落在一次新连接之后
-        w = rp.FreshConnectionWaiter([15041, 15042])
-        self.assertFalse(w.observe({15041: 1, 15042: 1}))
-        self.assertFalse(w.observe({}))
-        self.assertTrue(w.observe({15041: 1, 15042: 1}))
+class PortsAllConnectedTest(unittest.TestCase):
+    # Task 6 F2 之后 rtkrcv conf 写 misc-timeout=0:tcpcli 连上就不会因空闲断开,
+    # 已经连着的连接直接可用,不再需要等"先断后连"(旧 FreshConnectionWaiter 在新 conf 下永远等不到)
+    def test_already_connected_at_start_is_ready(self):
+        self.assertTrue(rp.ports_all_connected([15041, 15042], {15041: 1, 15042: 1}))
 
-    def test_starts_down_then_both_up(self):
-        w = rp.FreshConnectionWaiter([15041, 15042])
-        self.assertFalse(w.observe({}))
-        self.assertFalse(w.observe({15041: 1}))
-        self.assertTrue(w.observe({15041: 1, 15042: 2}))
+    def test_waits_until_every_port_has_a_connection(self):
+        self.assertFalse(rp.ports_all_connected([15041, 15042], {}))
+        self.assertFalse(rp.ports_all_connected([15041, 15042], {15041: 1}))
+        self.assertTrue(rp.ports_all_connected([15041, 15042], {15041: 1, 15042: 2, 9999: 1}))
 
-    def test_drop_after_fresh_resets(self):
-        w = rp.FreshConnectionWaiter([15041, 15042])
-        w.observe({})
-        w.observe({15041: 1})
-        self.assertFalse(w.observe({15042: 1}))   # 15041 又断了
-        self.assertTrue(w.observe({15041: 1, 15042: 1}))
+    def test_zero_count_is_not_connected(self):
+        self.assertFalse(rp.ports_all_connected([15041], {15041: 0}))
 
     def test_no_ports_is_immediately_ready(self):
-        self.assertTrue(rp.FreshConnectionWaiter([]).observe({}))
+        self.assertTrue(rp.ports_all_connected([], {}))
 
 
 if __name__ == "__main__":

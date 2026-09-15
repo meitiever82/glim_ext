@@ -132,13 +132,12 @@ def data_time(wall: float, t0: float, w0: float, speed: float) -> float:
 
 # ---------- 等下游(rtkrcv)连上再开始 ----------
 #
-# rtkrcv 的 tcpcli 输入流在 10 s 没有数据时断开、再过 10 s 才重连(RTKLIB rtkrcv.c 的
-# misc-timeout / misc-reconnect 默认 10000 ms,rtkrcv_conf 没有覆盖)。回放开始前没有任何数据,
-# 所以 rtkrcv 与 rtkrcv_node 本机端口的连接是"连 10 s、断 10 s"地循环;rtkrcv_node 的
-# LocalReserver 对没有连接的时段直接丢字节。2026-09-16 dryB 试跑:rtcm_bridge 第 15 s 才连上
-# (退避 1+2+4+8 s),正好落在断开窗口里,开头 5 s 的观测和第一次星历注入全部丢失,rtkrcv 直到
-# 第二次注入(+30 s)才有解。所以要等到一次"新建立"的连接之后再开始发——新连接之后 10 s 内
-# 数据一定能到,之后数据不断,连接就不会再因空闲断开。
+# rtkrcv_node 的 LocalReserver 对没有连接的时段直接丢字节,所以回放要等 rtkrcv 的两路 tcpcli 连上
+# rtkrcv_node 的本机端口(corr_port/obs_port)才开始发。
+# 历史:2026-09-16 dryB 试跑时 conf 还没写 misc-timeout,rtkrcv 用默认 10 s 空闲断开、10 s 重连,
+# 连接"连 10 s、断 10 s"循环,回放开头落在断开窗口里丢了 5 s 观测和第一次星历注入,当时这里改成
+# 等一次"先断后连"的新连接。gnss_bringup Task 6 F2 给 conf 写了 misc-timeout=0 之后连接不再空闲断开,
+# 旧的等法永远等不到新连接(实测 dryB 等满 25 s 退出 3),改为只要求"此刻已连着"。
 
 _TCP_ESTABLISHED = 0x01
 
@@ -160,24 +159,11 @@ def established_local_ports(proc_net_tcp: str) -> Dict[int, int]:
     return counts
 
 
-class FreshConnectionWaiter:
-    """等每个端口都出现一次"先观察到没有连接、之后出现连接"的新连接。
+def ports_all_connected(ports: Iterable[int], established_counts: Dict[int, int]) -> bool:
+    """ports 里每个端口都至少有一条 ESTABLISHED 连接时返回 True(空列表为 True)。
 
-    启动时就已经连着的不算(不知道它在 10 s 空闲窗口里还剩多久),必须等它断一次再连上;
-    某个端口在"已新连上"之后又断开,则重新等。所有端口都处于新连接状态时 observe 返回 True。
+    用来等下游 rtkrcv 的 tcpcli 连上 rtkrcv_node 的本机端口再开始回放。rtkrcv conf 写了
+    misc-timeout=0(gnss_bringup Task 6 F2),连上之后不会因为回放开始前没有数据而空闲断开,
+    所以"此刻已连着"就够了。(此前 conf 用 RTKLIB 默认 10 s 空闲断开,这里曾经要等一次"先断后连"。)
     """
-
-    def __init__(self, ports: Iterable[int]):
-        self.ports = list(ports)
-        self._seen_down = {p: False for p in self.ports}
-        self._fresh = {p: False for p in self.ports}
-
-    def observe(self, established_counts: Dict[int, int]) -> bool:
-        for p in self.ports:
-            if established_counts.get(p, 0) > 0:
-                if self._seen_down[p]:
-                    self._fresh[p] = True
-            else:
-                self._seen_down[p] = True
-                self._fresh[p] = False
-        return all(self._fresh.values())
+    return all(established_counts.get(p, 0) > 0 for p in ports)

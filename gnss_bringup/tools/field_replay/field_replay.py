@@ -10,14 +10,14 @@
 - 可选 `--nav-rtcm`:在差分流第一块之前注入一遍星历电文,之后每 30 数据秒重发(方案 B)。
 
 时间基准:t0 = min(差分首块, 观测首块, CAN 首帧) 的 unix UTC 秒;两个端口都连上(给了
---wait-fresh-ports 时再等下游 rtkrcv 新连上)时记 W0 = monotonic(),数据时刻 t 的块在
+--wait-connected-ports 时再等下游 rtkrcv 连上)时记 W0 = monotonic(),数据时刻 t 的块在
 W0 + (t − t0)/speed 发出。
 
 退出码:
   0   正常结束(全部发完、canplayer 退出、/clock 再走 --tail-clock-s 秒)
   2   参数/输入文件错误(文件读不了、没有可切分的帧、找不到 canplayer)
-  3   rtcm_bridge 在 --connect-timeout 秒内没有把两个端口都连上;或 --wait-fresh-ports 的
-      本机端口在 --downstream-timeout 秒内没有出现新连接
+  3   rtcm_bridge 在 --connect-timeout 秒内没有把两个端口都连上;或 --wait-connected-ports 的
+      本机端口在 --downstream-timeout 秒内没有全部连上
   4   连接断开后 --reconnect-timeout 秒内没有重连
   5   canplayer 启动失败或非正常退出(不是被本程序停掉的)
   130 收到 SIGINT/SIGTERM
@@ -146,16 +146,15 @@ def read_established_ports() -> dict:
     return counts
 
 
-def wait_fresh_ports(ports: List[int], timeout_s: float, stop: threading.Event) -> bool:
-    """等 ports 上各出现一次新建立的连接(见 replay_plan.FreshConnectionWaiter)。"""
-    waiter = rp.FreshConnectionWaiter(ports)
+def wait_connected_ports(ports: List[int], timeout_s: float, stop: threading.Event) -> bool:
+    """等 ports 上都有 ESTABLISHED 连接(见 replay_plan.ports_all_connected)。"""
     start = time.monotonic()
-    log("等待本机端口 %s 上出现新建立的连接(rtkrcv 的 tcpcli),最多 %.0f s" % (ports, timeout_s))
+    log("等待本机端口 %s 上有连接(rtkrcv 的 tcpcli),最多 %.0f s" % (ports, timeout_s))
     while time.monotonic() - start < timeout_s:
         if stop.is_set():
             raise Stopped()
-        if waiter.observe(read_established_ports()):
-            log("端口 %s 已新连上,等待 %.1f s" % (ports, time.monotonic() - start))
+        if rp.ports_all_connected(ports, read_established_ports()):
+            log("端口 %s 已连上,等待 %.1f s" % (ports, time.monotonic() - start))
             return True
         time.sleep(0.05)
     return False
@@ -269,14 +268,14 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     ap.add_argument("--connect-timeout", type=float, default=60.0)
     ap.add_argument("--reconnect-timeout", type=float, default=30.0)
     ap.add_argument("--leap", type=int, default=18, help="GPST−UTC 闰秒")
-    ap.add_argument("--wait-fresh-ports", default="",
+    ap.add_argument("--wait-connected-ports", default="",
                     help="逗号分隔的本机端口(如 rtkrcv_node 的 corr_port/obs_port 15041,15042):"
-                         "两个上游端口连上后,再等这些端口上各出现一次新建立的连接才开始(W0),"
-                         "避开 rtkrcv tcpcli 无数据 10 s 断开、10 s 后重连的空窗,见 replay_plan.py")
+                         "两个上游端口连上后,再等这些端口上都有连接(rtkrcv 已连入)才开始(W0),"
+                         "rtkrcv_node 对无人连接时收到的字节直接丢弃,见 replay_plan.py")
     # 25 s < rtcm_bridge 的 idle_timeout_s(30 s):两个上游端口连上后到 W0 之间一个字节都不发,
     # 等太久 bridge 会因空闲主动断开,之后第一次 sendall 可能写进一条对端已关闭的连接
     ap.add_argument("--downstream-timeout", type=float, default=25.0,
-                    help="--wait-fresh-ports 最多等多少秒(默认 25,须小于 rtcm_bridge idle_timeout_s=30)")
+                    help="--wait-connected-ports 最多等多少秒(默认 25,须小于 rtcm_bridge idle_timeout_s=30)")
     ap.add_argument("--duration-s", type=float, default=None, help="只放前 N 数据秒(试跑)")
     ap.add_argument("--tail-clock-s", type=float, default=10.0, help="发完后 /clock 再走的墙钟秒数")
     a = ap.parse_args(argv)
@@ -285,9 +284,9 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     if a.duration_s is not None and not a.duration_s > 0:
         ap.error("--duration-s 必须 > 0")
     try:
-        a.wait_fresh_ports = [int(x) for x in a.wait_fresh_ports.split(",") if x.strip()]
+        a.wait_connected_ports = [int(x) for x in a.wait_connected_ports.split(",") if x.strip()]
     except ValueError:
-        ap.error("--wait-fresh-ports 必须是逗号分隔的端口号")
+        ap.error("--wait-connected-ports 必须是逗号分隔的端口号")
     return a
 
 
@@ -389,10 +388,10 @@ def run(a: argparse.Namespace) -> int:
                 log("rtcm_bridge 未连接(%s 端口 %d 在 %.0f s 内无人连接)" % (p.name, p.port, a.connect_timeout))
                 return EXIT_NO_CONNECT
 
-        if a.wait_fresh_ports:
-            if not wait_fresh_ports(a.wait_fresh_ports, a.downstream_timeout, stop):
-                log("下游未连接(本机端口 %s 在 %.0f s 内没有出现新连接;rtkrcv_node/rtkrcv 没起来?)"
-                    % (a.wait_fresh_ports, a.downstream_timeout))
+        if a.wait_connected_ports:
+            if not wait_connected_ports(a.wait_connected_ports, a.downstream_timeout, stop):
+                log("下游未连接(本机端口 %s 在 %.0f s 内没有全部连上;rtkrcv_node/rtkrcv 没起来?)"
+                    % (a.wait_connected_ports, a.downstream_timeout))
                 return EXIT_NO_CONNECT
 
         clock = ClockPublisher(t0, a.speed)

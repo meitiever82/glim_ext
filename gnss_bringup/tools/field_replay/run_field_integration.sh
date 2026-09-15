@@ -262,10 +262,10 @@ sleep 5
 for name in bringup gnss_diag gnss_chcnav record; do
   group_alive "${PIDS[$name]}" || say "警告:$name 在回放开始前就退出了,见 logs/$name.log"
 done
-# rtkrcv 的 tcpcli 无数据 10 s 就断、10 s 后才重连:等它新连上 rtkrcv_node 的本机端口再开始,
-# 否则开头几秒的数据(和 B 的第一次星历注入)在断开窗口里被丢掉(见 replay_plan.py)
+# rtkrcv_node 对没有 rtkrcv 连入时收到的字节直接丢弃:等 rtkrcv 连上它的本机端口再开始
+# (conf 写了 misc-timeout=0,连上之后不会空闲断开;见 replay_plan.py)
 RTKRCV_PORTS="$(python3 -c 'import sys, yaml; p = yaml.safe_load(open(sys.argv[1]))["rtkrcv_node"]["ros__parameters"]; print("%d,%d" % (p["corr_port"], p["obs_port"]))' "$RUN/params.yaml")"
-REPLAY_ARGS=(--rtcm "$RTCM" --obs "$OBS" --can-log "$RUN/can_with_sigma.log" --wait-fresh-ports "$RTKRCV_PORTS")
+REPLAY_ARGS=(--rtcm "$RTCM" --obs "$OBS" --can-log "$RUN/can_with_sigma.log" --wait-connected-ports "$RTKRCV_PORTS")
 [[ -n "$NAV_RTCM" ]] && REPLAY_ARGS+=(--nav-rtcm "$NAV_RTCM")
 [[ -n "$DUR" ]] && REPLAY_ARGS+=(--duration-s "$DUR")
 say "回放: field_replay.py ${REPLAY_ARGS[*]}"
