@@ -56,11 +56,46 @@ std::string all_day_files(const std::string& root, const std::string& filename) 
   }
   return out;
 }
+
+// review round 1:原来每个用例末尾显式 fs::remove_all(dir),但 ASSERT_* 失败时
+// gtest 会在那一行直接 return,末尾的清理代码整段跳不到,临时目录就漏删了。改成
+// RAII——构造顺序必须在 NodeProcess 之前,这样它的析构(删除目录)一定晚于
+// NodeProcess 的析构(SIGKILL+waitpid,保证子进程已经退出、不会再往目录里写东西),
+// LIFO 析构顺序自动保证"先等子进程死透,再删目录",不需要额外的先后协调。
+class TempDirGuard {
+ public:
+  explicit TempDirGuard(std::string dir) : dir_(std::move(dir)) {}
+  ~TempDirGuard() {
+    if (!dir_.empty()) fs::remove_all(dir_);
+  }
+  TempDirGuard(const TempDirGuard&) = delete;
+  TempDirGuard& operator=(const TempDirGuard&) = delete;
+
+ private:
+  std::string dir_;
+};
+
+// review round 1:同样的道理,两个自己起 rclcpp 的用例原来在函数体末尾显式
+// rclcpp::shutdown(),ASSERT_* 提前 return 时跳过,下一个用例开头的 rclcpp::init()
+// 就会抛 "context is already initialized"——桩阶段的 RED 就复现过这个级联,
+// 那时是刻意的(桩本来就不该让 5 个用例都真正各自失败),但在 GREEN 之后的真实
+// 场景里,这个级联会让下一个用例的失败原因文不对题(明明是它自己没问题,却被
+// 上一个用例的失败连累报错)。用析构函数兜底。
+class RclcppGuard {
+ public:
+  RclcppGuard() = default;
+  ~RclcppGuard() {
+    if (rclcpp::ok()) rclcpp::shutdown();
+  }
+  RclcppGuard(const RclcppGuard&) = delete;
+  RclcppGuard& operator=(const RclcppGuard&) = delete;
+};
 }  // namespace
 
 TEST(GnssDiagNodeProcess, RefusesToStartOnInvalidConfig) {
   const auto dir = make_temp_dir("diag_node_bad_");
   ASSERT_FALSE(dir.empty());
+  TempDirGuard dir_guard(dir);
   const auto expect_refused = [&](const std::vector<std::string>& args, const std::string& needle) {
     NodeProcess node(GNSS_DIAG_NODE_PATH, args, dir + "/node.log", isolated_env(dir));
     EXPECT_EQ(node.wait_exit(20.0), 1) << node.log();
@@ -71,12 +106,12 @@ TEST(GnssDiagNodeProcess, RefusesToStartOnInvalidConfig) {
   expect_refused(diag_args(dir + "/r", 0.0, {"control_points.names:=['K1']"}), "control_points");
   expect_refused(diag_args(dir + "/r", 0.0, {"diagnosis.divergence_sigma_max_m:=0.01"}), "divergence_sigma_max_m");
   expect_refused(diag_args(dir + "/r", 0.0, {"clock_jump_tolerance_s:=0.0"}), "clock_jump_tolerance_s");
-  fs::remove_all(dir);
 }
 
 TEST(GnssDiagNodeProcess, NoInputOpensNoDataAndShutdownClosesIt) {
   const auto dir = make_temp_dir("diag_node_nodata_");
   ASSERT_FALSE(dir.empty());
+  TempDirGuard dir_guard(dir);
   const std::string root = dir + "/diag";
   NodeProcess node(GNSS_DIAG_NODE_PATH, diag_args(root, 0.0), dir + "/node.log", isolated_env(dir));
   ASSERT_TRUE(wait_until([&] { return all_day_files(root, "events.log").find(" OPEN warning no_data ") != std::string::npos; }, 20.0))
@@ -87,12 +122,12 @@ TEST(GnssDiagNodeProcess, NoInputOpensNoDataAndShutdownClosesIt) {
   EXPECT_NE(ev.find(" CLOSE warning no_data "), std::string::npos) << ev;
   EXPECT_NE(ev.find("reason=shutdown"), std::string::npos) << "停机必须先写关闭行再关文件\n" << ev;
   EXPECT_EQ(count_occurrences(ev, "% gnss_core events.log"), 1u) << ev;
-  fs::remove_all(dir);
 }
 
 TEST(GnssDiagNodeProcess, StartupGraceDelaysTheFirstJudgement) {
   const auto dir = make_temp_dir("diag_node_grace_");
   ASSERT_FALSE(dir.empty());
+  TempDirGuard dir_guard(dir);
   const std::string root = dir + "/diag";
   NodeProcess node(GNSS_DIAG_NODE_PATH, diag_args(root, 5.0), dir + "/node.log", isolated_env(dir));
   ASSERT_TRUE(wait_until([&] { return node.log().find("gnss_diag 已启动") != std::string::npos; }, 20.0)) << node.log();
@@ -102,17 +137,18 @@ TEST(GnssDiagNodeProcess, StartupGraceDelaysTheFirstJudgement) {
       << node.log();
   node.interrupt();
   EXPECT_EQ(node.wait_exit(20.0), 0) << node.log();
-  fs::remove_all(dir);
 }
 
 TEST(GnssDiagNodeProcess, WiresInputsToDiagnosticsBaseHistoryAndTheResetService) {
   const auto dir = make_temp_dir("diag_node_wire_");
   ASSERT_FALSE(dir.empty());
+  TempDirGuard dir_guard(dir);
   const std::string root = dir + "/diag";
   NodeProcess node(GNSS_DIAG_NODE_PATH, diag_args(root, 0.0, {"diagnosis.base_warmup_s:=1.0"}), dir + "/node.log",
                    isolated_env(dir));
   join_isolated_domain(dir);
   rclcpp::init(0, nullptr);
+  RclcppGuard rclcpp_guard;
   {
     auto n = std::make_shared<rclcpp::Node>("diag_node_test_driver");
     const auto qos = rclcpp::QoS(100).reliable();
@@ -176,20 +212,20 @@ TEST(GnssDiagNodeProcess, WiresInputsToDiagnosticsBaseHistoryAndTheResetService)
     const auto resp = fut.get();
     EXPECT_TRUE(resp->success) << resp->message;
   }
-  rclcpp::shutdown();
   node.interrupt();
   EXPECT_EQ(node.wait_exit(20.0), 0) << node.log();
-  fs::remove_all(dir);
 }
 
 TEST(GnssDiagNodeProcess, BackwardClockJumpClosesOpenEventsAndRebuildsTheEngine) {
   const auto dir = make_temp_dir("diag_node_jump_");
   ASSERT_FALSE(dir.empty());
+  TempDirGuard dir_guard(dir);
   const std::string root = dir + "/diag";
   NodeProcess node(GNSS_DIAG_NODE_PATH, diag_args(root, 0.0, {"use_sim_time:=true"}), dir + "/node.log",
                    isolated_env(dir));
   join_isolated_domain(dir);
   rclcpp::init(0, nullptr);
+  RclcppGuard rclcpp_guard;
   {
     auto n = std::make_shared<rclcpp::Node>("diag_clock_driver");
     auto clock = n->create_publisher<rosgraph_msgs::msg::Clock>("/clock", rclcpp::ClockQoS());
@@ -211,12 +247,17 @@ TEST(GnssDiagNodeProcess, BackwardClockJumpClosesOpenEventsAndRebuildsTheEngine)
         << node.log();
     sim -= 100.0;
     EXPECT_TRUE(run_clock_until([&] { return node.log().find("时钟回跳") != std::string::npos; }, 15.0)) << node.log();
-    EXPECT_NE(all_day_files(root, "events.log").find("reason=shutdown"), std::string::npos) << all_day_files(root, "events.log");
+    // review round 1(flake 源):engine_time() 里 RCLCPP_WARN("时钟回跳") 在
+    // write_transitions()/events_->append() 之前——看到日志的那一刻,关闭行不一定
+    // 已经落盘。不能看到日志就立刻断言文件内容,改成 run_clock_until 顺带继续喂
+    // /clock、轮询等到写完(而不是用不发布 /clock 的 wait_until——万一子进程当时
+    // 还需要更多拍才能把这次 tick 处理完,继续推进 sim time 更稳妥)。
+    EXPECT_TRUE(run_clock_until(
+        [&] { return all_day_files(root, "events.log").find("reason=shutdown") != std::string::npos; }, 5.0))
+        << all_day_files(root, "events.log");
     EXPECT_TRUE(run_clock_until([&] { return count_occurrences(all_day_files(root, "events.log"), " OPEN warning no_data ") >= 2; }, 15.0))
         << "重建后的引擎重新判定\n" << all_day_files(root, "events.log");
   }
-  rclcpp::shutdown();
   node.interrupt();
   EXPECT_EQ(node.wait_exit(20.0), 0) << node.log();
-  fs::remove_all(dir);
 }
