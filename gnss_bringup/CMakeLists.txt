@@ -204,6 +204,11 @@ if(BUILD_TESTING)
   add_dependencies(test_gnss_cleanup_node_process gnss_cleanup_node)
   target_compile_definitions(test_gnss_cleanup_node_process PRIVATE
     GNSS_CLEANUP_NODE_PATH="$<TARGET_FILE:gnss_cleanup_node>")
+
+  # 现场回放工具的纯函数(unittest,不用 pytest:开发机 pytest 与 launch_testing 插件冲突)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME test_field_replay_py
+    COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/tools/field_replay/tests -v)
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
