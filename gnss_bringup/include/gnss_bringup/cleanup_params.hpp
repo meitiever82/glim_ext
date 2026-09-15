@@ -4,7 +4,8 @@
 //     各自可为空(不清),不能都空。
 //   - 先扫录包根目录再扫 pos 根目录:两者通常在同一块盘上共用水位,录包占盘大,先删它。
 //   - 根目录不存在(比如还没录过包)视为跳过,不算错误;存在但遍历失败(比如是个普通文件)才是错误。
-//   - 每个根目录清完后复查所在盘的用量,仍高于水位由调用方报警(最新一项与今天的数据永不删)。
+//   - 每个根目录清完后复查所在盘的用量,仍高于水位由调用方报警(最新一项与今天的数据永不删);
+//     查不到用量(fs::space 失败)时这一轮实际只按保留天数删,也由调用方报警。
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -34,7 +35,10 @@ inline void validate_cleanup_params(const CleanupParams& p) {
   if (!std::isfinite(p.watermark_pct) || p.watermark_pct <= 0.0 || p.watermark_pct > 100.0) {
     throw std::invalid_argument("watermark_pct 必须在 (0, 100]");
   }
-  if (!std::isfinite(p.interval_s) || p.interval_s < 1.0) throw std::invalid_argument("interval_s 必须 >= 1");
+  // 上限 7 天:节点把 interval_s 换算成毫秒存 int64,过大的值换算时会溢出
+  if (!std::isfinite(p.interval_s) || p.interval_s < 1.0 || p.interval_s > 7 * 86400.0) {
+    throw std::invalid_argument("interval_s 必须在 [1, 604800]");
+  }
 }
 
 struct RootCleanupResult {
@@ -42,7 +46,7 @@ struct RootCleanupResult {
   std::string root;
   bool missing = false; // 根目录不存在,本轮跳过
   gnss_core::CleanupReport report;
-  std::optional<double> used_pct_after;   // 清完后所在盘的用量;查不到为空
+  std::optional<double> used_pct_after;   // 清完后所在盘的用量;查不到为空(节点打 WARN)
 };
 
 inline std::vector<RootCleanupResult> run_cleanup_pass(

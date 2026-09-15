@@ -32,7 +32,11 @@ void run_pass(rclcpp::Node& node, const gnss_bringup::CleanupParams& p) {
       RCLCPP_INFO(node.get_logger(), "已删除 %s/%s", r.root.c_str(), name.c_str());
     }
     deleted += r.report.deleted.size();
-    if (gnss_bringup::over_watermark(r, p.watermark_pct)) {
+    if (!r.used_pct_after) {
+      RCLCPP_WARN(node.get_logger(),
+                  "%s 所在磁盘用量查不到,本轮只按保留天数(%d 天)清理,水位 %.1f%% 不起作用",
+                  r.root.c_str(), p.retention_days, p.watermark_pct);
+    } else if (gnss_bringup::over_watermark(r, p.watermark_pct)) {
       RCLCPP_WARN(node.get_logger(),
                   "%s 所在磁盘清理后仍占用 %.1f%%(水位 %.1f%%)——今天的数据与最新一项不删,需要人工处理",
                   r.root.c_str(), *r.used_pct_after, p.watermark_pct);

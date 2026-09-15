@@ -41,6 +41,8 @@ TEST(CleanupParams, ValidatesEveryField) {
   p = ok; p.watermark_pct = 100.5;   EXPECT_TRUE(rejected(p, "watermark_pct"));
   p = ok; p.watermark_pct = std::numeric_limits<double>::quiet_NaN(); EXPECT_TRUE(rejected(p, "watermark_pct"));
   p = ok; p.interval_s = 0.5;        EXPECT_TRUE(rejected(p, "interval_s"));
+  p = ok; p.interval_s = 1e300;      EXPECT_TRUE(rejected(p, "interval_s")) << "上限 7 天,防止换算毫秒时 int64 溢出";
+  p = ok; p.interval_s = 7 * 86400.0; EXPECT_NO_THROW(validate_cleanup_params(p));
 }
 
 TEST(CleanupPass, BagRootFirstThenPosRootAndEmptyRootsAreSkipped) {
