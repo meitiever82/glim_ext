@@ -244,7 +244,8 @@ rtcm_bridge:
 **不是参数、固定写进 conf 的两项**:`misc-timeout =0`(rtkrcv 的两路本机 tcpcli 输入不做空闲断开)、
 `misc-reconnect =1000`(对端关闭后 1 s 重连)。RTKLIB 默认各 10000 ms:差分中断 10 s 就断开、再过
 10 s 才重连,这段时间 `rtkrcv_node` 收到的字节没有人接收、被直接丢弃——隧道里 ≥10 s 的差分中断是
-常态。
+常态。上行字节没有任何 rtkrcv 连接接收时,`rtkrcv_node` 每 10 s 打一条 WARN(带累计丢弃字节数);
+rtkrcv 启动/重启的头几秒出现属正常。
 
 完整参数表见 `config/gnss_bringup.yaml` 里的注释——文件本身就是文档,每个参数
 旁边都带着来源(哪个节点声明、默认值多少)。

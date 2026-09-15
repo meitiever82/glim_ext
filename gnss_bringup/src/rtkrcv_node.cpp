@@ -588,13 +588,24 @@ private:
         corr_topic_, rclcpp::QoS(100).reliable(),
         [this](const gnss_msgs::msg::RawStream::SharedPtr msg) {
           if (!msg->data.empty()) last_uplink_ns_.store(steady_now_ns());
-          corr_reserver_.broadcast(msg->data.data(), msg->data.size());
+          if (corr_reserver_.broadcast(msg->data.data(), msg->data.size()) == 0 && !msg->data.empty()) {
+            corr_dropped_bytes_ += msg->data.size();
+            // 节流:rtkrcv 启动/重启的头几秒没连上属正常;持续出现说明 rtkrcv 连不上本机端口
+            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 10000,
+                                 "corrections 上行没有 rtkrcv 连入 corr_port=%d,字节被丢弃(累计 %llu 字节)",
+                                 conf_.corr_port, static_cast<unsigned long long>(corr_dropped_bytes_));
+          }
         });
     obs_sub_ = node_->create_subscription<gnss_msgs::msg::RawStream>(
         obs_topic_, rclcpp::QoS(100).reliable(),
         [this](const gnss_msgs::msg::RawStream::SharedPtr msg) {
           if (!msg->data.empty()) last_uplink_ns_.store(steady_now_ns());
-          obs_reserver_.broadcast(msg->data.data(), msg->data.size());
+          if (obs_reserver_.broadcast(msg->data.data(), msg->data.size()) == 0 && !msg->data.empty()) {
+            obs_dropped_bytes_ += msg->data.size();
+            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 10000,
+                                 "raw_obs 上行没有 rtkrcv 连入 obs_port=%d,字节被丢弃(累计 %llu 字节)",
+                                 conf_.obs_port, static_cast<unsigned long long>(obs_dropped_bytes_));
+          }
         });
     RCLCPP_INFO(node_->get_logger(), "订阅上行: %s -> corr, %s -> obs",
                 corr_topic_.c_str(), obs_topic_.c_str());
@@ -734,6 +745,9 @@ private:
   // 路径下的停止顺序由上面手写的析构函数体决定,不依赖这里的排列。
   LocalReserver corr_reserver_;
   LocalReserver obs_reserver_;
+  // 两个上行订阅回调各自写各自的计数(无人接收而丢弃的累计字节),只用于告警文案
+  uint64_t corr_dropped_bytes_ = 0;
+  uint64_t obs_dropped_bytes_ = 0;
   std::unique_ptr<TcpStream> sol_stream_;
   std::unique_ptr<ProcessSupervisor> supervisor_;
 

@@ -195,7 +195,7 @@ size_t LocalReserver::client_count() const {
   return clients_.size();
 }
 
-void LocalReserver::broadcast(const uint8_t* data, size_t len) {
+size_t LocalReserver::broadcast(const uint8_t* data, size_t len) {
   // fix round 1 追加修复(ThreadSanitizer 在 60 次 shuffled 跑里稳定复现出
   // 的真实竞态,大约 8/30 次命中):只把"摘除 fd"这个列表操作放进
   // std::lock_guard 是不够的。accept_loop 会独立地(靠自己的 recv()==0
@@ -237,6 +237,7 @@ void LocalReserver::broadcast(const uint8_t* data, size_t len) {
   // 修法:把这次 write() 挪进和上面摘除逻辑同一把锁里,并让 stop() 也在
   // 持有同一把锁的情况下才去 close() wake_wr_——两边永远不会交叠。
   bool should_wake = false;
+  size_t delivered = 0;
   {
     std::lock_guard<std::mutex> lock(m_);
     for (auto it = clients_.begin(); it != clients_.end();) {
@@ -257,6 +258,7 @@ void LocalReserver::broadcast(const uint8_t* data, size_t len) {
         to_drop_.push_back(c);
         should_wake = true;
       } else {
+        ++delivered;
         ++it;
       }
     }
@@ -269,6 +271,7 @@ void LocalReserver::broadcast(const uint8_t* data, size_t len) {
       }
     }
   }
+  return delivered;
 }
 
 void LocalReserver::accept_loop() {
