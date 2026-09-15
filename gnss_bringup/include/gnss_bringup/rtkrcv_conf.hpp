@@ -15,6 +15,11 @@ struct RtkrcvConfParams {
   std::string pos_mode = "kinematic";
   int navsys = 63;
   double elmask = 10.0;
+  // 参与模糊度固定的卫星高度角门限(pos2-arelmask,度)。低于它、高于 elmask 的卫星照样参与
+  // 浮点解,只是不参与固定。RTKLIB 自身默认 0(不限制)。取 15 的依据:红沙泉 2026-09-15
+  // seg_164931_165748 实测 elmask 10 不限制时 0/498 固定,加 arelmask 15 后 490/498。
+  // 取值 [0,90];小于 elmask 时不起作用(那些卫星本就不在解里),合法但没有意义。
+  double ar_elmask = 15.0;
   std::string ar_mode = "continuous";
   // 基准站坐标来源(ant2-postype)。"rtcm":取差分流里的 RTCM 1005/1006;"single":
   // 基准站观测的单点解。不写这个键时 rtkrcv 默认 llh 0,0,0,RTK 一条解都不输出。

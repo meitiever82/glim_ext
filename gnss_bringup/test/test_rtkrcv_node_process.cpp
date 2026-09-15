@@ -131,6 +131,23 @@ TEST(RtkrcvNodeProcess, WrittenConfTakesTheBasePositionFromRtcm) {
   std::filesystem::remove_all(dir);
 }
 
+TEST(RtkrcvNodeProcess, ArElmaskParameterReachesTheWrittenConf) {
+  // Task 6 F1:ar_elmask 是节点参数,必须真的写进 conf 的 pos2-arelmask(ROS 对未声明的参数静默忽略)
+  const std::string dir = make_temp_dir("rtkrcv_node_arelmask_");
+  ASSERT_FALSE(dir.empty());
+  std::filesystem::create_directories(dir + "/run");
+  auto args = node_args(dir, fake(), pick_free_port(), "live");
+  args.insert(args.end(), {"-p", "ar_elmask:=12.5"});
+  NodeProcess node(node_exe(), args, dir + "/node.log", isolated_env(dir));
+  const std::string conf = dir + "/run/rtkrcv.conf";
+  ASSERT_TRUE(wait_until([&] { return std::filesystem::exists(conf); }, 20.0)) << node.log();
+  ASSERT_TRUE(wait_ready(node)) << node.log();
+  EXPECT_NE(read_file(conf).find("pos2-arelmask =12.5\n"), std::string::npos) << read_file(conf);
+  node.interrupt();
+  EXPECT_EQ(node.wait_exit(20.0), 0) << node.log();
+  std::filesystem::remove_all(dir);
+}
+
 TEST(RtkrcvNodeProcess, InterruptDuringStartupIsNotAConfigError) {
   // 回归:构造函数还没走完(rtkrcv 已派生,但话题/定时器还没建好)时收到 SIGINT,
   // rclcpp 的信号处理器先把 context 置为无效,后面的 create_subscription 抛

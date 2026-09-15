@@ -225,6 +225,7 @@ private:
     conf_.pos_mode = node_->declare_parameter<std::string>("pos_mode", conf_.pos_mode);
     conf_.navsys = static_cast<int>(node_->declare_parameter<int>("navsys", conf_.navsys));
     conf_.elmask = node_->declare_parameter<double>("elmask", conf_.elmask);
+    conf_.ar_elmask = node_->declare_parameter<double>("ar_elmask", conf_.ar_elmask);
     conf_.ar_mode = node_->declare_parameter<std::string>("ar_mode", conf_.ar_mode);
     conf_.base_pos_type = node_->declare_parameter<std::string>("base_pos_type", conf_.base_pos_type);
     conf_.bds_ar_mode = node_->declare_parameter<std::string>("bds_ar_mode", conf_.bds_ar_mode);

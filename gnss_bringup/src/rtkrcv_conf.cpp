@@ -106,6 +106,13 @@ std::string render_rtkrcv_conf(const RtkrcvConfParams& p) {
                                 std::to_string(p.elmask));
   }
 
+  // 模糊度固定高度角门限:同 elmask 的范围;允许小于 elmask(不起作用,但不是错误——
+  // RTKLIB-EX 2.5.1 rtkpos.c 只在挑选参与固定的卫星时拿它比较)
+  if (!std::isfinite(p.ar_elmask) || p.ar_elmask < 0.0 || p.ar_elmask > 90.0) {
+    throw std::invalid_argument("ar_elmask 必须是 [0, 90] 内的有限值(度),收到 " +
+                                std::to_string(p.ar_elmask));
+  }
+
   std::ostringstream oss;
 
   // Input stream 1 (observations)
@@ -133,6 +140,8 @@ std::string render_rtkrcv_conf(const RtkrcvConfParams& p) {
   oss << "pos1-elmask =" << format_double_without_trailing_zeros(p.elmask)
       << "\n";
   oss << "pos2-armode =" << p.ar_mode << "\n";
+  // 键名已对照 RTKLIB-EX 2.5.1 src/options.c sysopts[](见 test_rtkrcv_conf 的键名表用例)
+  oss << "pos2-arelmask =" << format_double_without_trailing_zeros(p.ar_elmask) << "\n";
   oss << "pos1-navsys =" << p.navsys << "\n";
   oss << "pos2-gloarmode =" << p.glo_ar_mode << "\n";
   oss << "pos2-bdsarmode =" << p.bds_ar_mode << "\n";
