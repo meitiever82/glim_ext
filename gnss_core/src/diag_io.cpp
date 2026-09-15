@@ -28,12 +28,15 @@ std::string single_line(std::string s) {
   return s;
 }
 
-// 取下一个以空格/制表符分隔的词,pos 前进到词尾
+bool is_separator(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+// 取下一个以空白分隔的词,pos 前进到词尾。'\r' '\n' 也算分隔符:CRLF 文件 getline 后行尾留着 '\r',
+// 调用方(比如 gnss_bringup 的 read_last_base_history)不一定先剥掉。
 bool next_token(const std::string& s, size_t& pos, std::string& tok) {
-  while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t')) ++pos;
+  while (pos < s.size() && is_separator(s[pos])) ++pos;
   if (pos >= s.size()) return false;
   const size_t start = pos;
-  while (pos < s.size() && s[pos] != ' ' && s[pos] != '\t') ++pos;
+  while (pos < s.size() && !is_separator(s[pos])) ++pos;
   tok = s.substr(start, pos - start);
   return true;
 }
@@ -185,6 +188,7 @@ std::optional<EventLogLine> parse_event_line(const std::string& line) {
   // format_event_line 用一个空格把结论接在最后;结论可以为空(行尾只剩这个空格或什么都没有)
   if (pos < line.size() && line[pos] == ' ') ++pos;
   e.message = line.substr(pos);
+  while (!e.message.empty() && (e.message.back() == '\r' || e.message.back() == '\n')) e.message.pop_back();
   return e;
 }
 

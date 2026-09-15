@@ -190,6 +190,34 @@ TEST(BaseHistoryParsing, RoundTripsAndRejectsBrokenLines) {
   EXPECT_FALSE(parse_base_history_line("2026/09/14 08:00:00.500  nan 2 3").has_value());
 }
 
+// final review Important:在 Windows 上拷过、或经 CRLF 转换的 events.log / base.pos,行尾带 '\r'。
+// gnss_bringup 的 read_last_base_history 直接 getline 后交给 parse_base_history_line,不会先剥 '\r'。
+TEST(DiagLineParsing, CrlfLineEndingsParseForBothFormats) {
+  for (const char* eol : {"\r", "\r\n"}) {
+    const auto open = parse_event_line(format_event_line(open_event()) + eol);
+    ASSERT_TRUE(open.has_value());
+    EXPECT_EQ(open->message, "差分中断 10s——5G 链路或平台转发问题") << "结论里不能带着 \\r";
+
+    const auto close = parse_event_line(format_event_line(close_event_with_peak()) + eol);
+    ASSERT_TRUE(close.has_value());
+    EXPECT_EQ(close->message, "差分中断 10s——5G 链路或平台转发问题");
+    EXPECT_NEAR(close->peak.at("sats_min"), 4.0, 1e-9);
+
+    EventTransition quiet = close_event_with_peak();
+    quiet.message.clear();
+    const auto empty_msg = parse_event_line(format_event_line(quiet) + eol);
+    ASSERT_TRUE(empty_msg.has_value());
+    EXPECT_EQ(empty_msg->message, "");
+
+    const Ecef p{-2148744.1, 4426641.2, 4044655.9};
+    const auto base = parse_base_history_line(format_base_history_line(1789372800.25, p) + eol);
+    ASSERT_TRUE(base.has_value());
+    EXPECT_NEAR(base->second.z, p.z, 1e-4);
+    EXPECT_FALSE(parse_base_history_line(std::string("2026/09/14 08:00:00.500  1 2 3 4") + eol).has_value())
+        << "多余字段仍然拒绝";
+  }
+}
+
 TEST(LineAppender, WritesHeaderOnceAndAppendsAcrossReopen) {
   TempDir dir;
   ASSERT_FALSE(dir.path().empty());
