@@ -224,7 +224,12 @@ rtcm_bridge:
 - **`ar_elmask`(默认 15.0 度)**——参与模糊度固定的卫星高度角门限,对应 conf 的
   `pos2-arelmask`(RTKLIB 自身默认 0,即不限制)。`elmask`(10°)以上、`ar_elmask` 以下的卫星
   参与浮点解但不参与固定。红沙泉 2026-09-15 实测:不设此项 0/498 历元固定,设 15 后 490/498。
-  取值 [0,90];小于 `elmask` 时不起作用。
+  取值 [0,90];小于 `elmask` 时不起作用。15° 只在这一段约 8 分钟的开阔天空数据上测过,换场景要复测。
+  **副作用(未修,待定)**:设了 `pos2-arelmask` 后,rtkrcv 在某历元不尝试模糊度固定时(例如
+  `ar_elmask` 以上卫星不够——半遮挡、洞口过渡区常见)把 ratio 写成 0;`gnss_diag` 把 ratio ≤ 0
+  当作"源不提供"(`diag_node_support.hpp`),于是 `ambiguity` 规则在这些历元不会触发。该段原样回放
+  修复前有 2 次 ambiguity 事件、修复后 0 次。证据与可选修法见 glim_underground
+  `docs/gnss/field/2026-09-16-hongshaquan-seg164931-integration.md` §7 问题 16。诊断规则本身没有改。
 - **`leap_seconds`(默认 18)**——GPST 与 UTC 之间的闰秒偏移量。这个值不是常量,
   IERS 每次宣布插入新闰秒后都需要手动更新;`rtkrcv_node` 用它把解算历元
   (GPST)换算成 UTC。
