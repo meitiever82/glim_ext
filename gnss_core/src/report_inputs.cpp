@@ -48,6 +48,16 @@ bool read_lines(const fs::path& path, std::vector<std::string>& lines) {
 
 bool is_content_line(const std::string& line) { return !line.empty() && line[0] != '%'; }
 
+// 文件里是否有非注释、非空白的行(只在 read_pos 读出 0 条时才调用)
+bool has_content_line(const fs::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  for (std::string line; std::getline(in, line);) {
+    const size_t first = line.find_first_not_of(" \t\r");
+    if (first != std::string::npos && line[first] != '%') return true;
+  }
+  return false;
+}
+
 // t0 之前时刻最大的一条有效行并入 best(没有则不动)
 void keep_latest_before(double t, const Ecef& p, double t0, std::optional<BaseSample>& best) {
   if (t < t0 && (!best || t > best->t)) best = BaseSample{t, p};
@@ -118,9 +128,22 @@ ReportInputs load_report_inputs(const std::string& root, const ReportWindow& win
       for (const auto& p : pos_files) {
         try {
           auto records = read_pos(p.string(), pos_options);
+          if (records.empty() && has_content_line(p)) {
+            // 有数据行却一条都读不出:多半是不认识的格式,不能让这个源在报告里安静地消失
+            in.warnings.push_back(p.string() + " 有内容但读出 0 条记录(时间列或列数不是 RTKLIB .pos 格式?)");
+          }
           auto& dst = in.sources[p.stem().string()];
+          int out_of_range = 0;
           for (auto& r : records) {
+            if (!(std::abs(r.lat) <= 90.0) || !(std::abs(r.lon) <= 180.0)) {
+              ++out_of_range;
+              continue;
+            }
             if (in_window(r.stamp, window)) dst.push_back(std::move(r));
+          }
+          if (out_of_range > 0) {
+            in.warnings.push_back(p.string() + " 中 " + std::to_string(out_of_range) +
+                                  " 条记录的经纬度超出范围(|纬度|>90 或 |经度|>180),已丢弃");
           }
         } catch (const std::exception& e) {
           in.warnings.push_back("读取 " + p.string() + " 失败: " + e.what());

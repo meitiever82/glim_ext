@@ -211,6 +211,32 @@ TEST(ReportInputs, BaseBeforeWindowIsTheLastValidRowFoundScanningOlderDayDirsBac
   EXPECT_FALSE(load_report_inputs(empty.path(), kDay).base_before_window.has_value());
 }
 
+// final fix wave:有内容行却一条记录都读不出的 .pos(比如不认识的时间格式)不能安静地消失;
+// 经纬度越界的记录丢弃并计数报警告。
+TEST(ReportInputs, PosFilesWithContentButNoRecordsAndOutOfRangeCoordinatesAreWarned) {
+  TempDir root;
+  ASSERT_FALSE(root.path().empty());
+  write_text(root.path() + "/20260915/odd.pos",
+             "% program : something\n2026-09-15T00:00:01 44.5 90.28 600 1 20 0.01 0.01 0.02\n");
+  write_text(root.path() + "/20260915/empty.pos", "% program : nothing yet\n\n");   // 只有注释:不报
+  write_pos(root.path() + "/20260915/can.pos",
+            {rec(T + 1.0), rec(T + 2.0, 1, 95.0, 90.28), rec(T + 3.0, 1, 44.5, -181.0), rec(T + 4.0)});
+  const auto in = load_report_inputs(root.path(), kDay);
+  ASSERT_EQ(in.sources.count("can"), 1u);
+  EXPECT_EQ(in.sources.at("can").size(), 2u) << "越界的两条丢弃";
+  bool odd_warned = false, range_warned = false;
+  for (const auto& w : in.warnings) {
+    if (w.find("odd.pos") != std::string::npos && w.find("0 条记录") != std::string::npos) odd_warned = true;
+    if (w.find("can.pos") != std::string::npos && w.find("2 条") != std::string::npos &&
+        w.find("超出范围") != std::string::npos) {
+      range_warned = true;
+    }
+    EXPECT_EQ(w.find("empty.pos"), std::string::npos) << w;
+  }
+  EXPECT_TRUE(odd_warned);
+  EXPECT_TRUE(range_warned);
+}
+
 TEST(ReportInputs, UnreadablePosFileIsAWarningNotAFailure) {
   if (::geteuid() == 0) GTEST_SKIP() << "root 无视文件权限,无法构造读失败";
   TempDir root;
