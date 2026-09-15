@@ -195,6 +195,8 @@ TEST(ReportCli, ABaseMoveOnTheReportDayIsVisibleAgainstThePreviousDaysRow) {
   EXPECT_NE(base.find("<b>0.500 m</b>"), std::string::npos) << base;
   EXPECT_NE(base.find("基站坐标可能变动"), std::string::npos) << base;
   EXPECT_NE(base.find("2026/09/14 08:00:00.000"), std::string::npos) << "说明基准取自哪条记录\n" << base;
+  EXPECT_NE(base.find("0 点即该基准"), std::string::npos) << base;
+  EXPECT_NE(base.find("时间窗内共 1 条记录"), std::string::npos) << base;
 }
 
 TEST(ReportCli, DefaultOutputNameEncodesTheWindowInTheCurrentDirectory) {

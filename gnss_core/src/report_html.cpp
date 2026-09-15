@@ -340,9 +340,12 @@ std::string section_base(const ReportStats& s) {
   opt.threshold = s.params.base_shift_m;
   opt.threshold_label = "告警阈值 " + fmt("%.3f", s.params.base_shift_m) + " m";
   o += svg_line_chart({series}, opt);
+  const std::string how = s.base.reference_before_window
+                              ? "曲线在时间窗起点处的 0 点即该基准。"
+                              : "数据目录里找不到时间窗开始前的记录，只能以时间窗内第一条为基准，窗口开头之前发生的变动看不出来。";
   o += note("时间窗内共 " + std::to_string(s.base.series.size() - (s.base.reference_before_window ? 1 : 0)) +
-            " 条记录。base.pos 只在基站坐标变化超过 1 mm 时才记一条，所以基准取时间窗开始前的最后一条"
-            "（往前逐日查找）；曲线在时间窗起点处的 0 点即该基准。");
+            " 条记录。base.pos 只在基站坐标变化超过 1 mm 时才记一条，所以基准优先取时间窗开始前的最后一条"
+            "（往前逐日查找）；" + how);
   return o + "</section>";
 }
 

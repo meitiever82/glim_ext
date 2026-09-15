@@ -129,6 +129,9 @@ TEST(ReportHtml, StatusLinesFollowTheThresholds) {
   auto html = render_report_html(compute_report(in, p), ReportMeta{"/r", T});
   EXPECT_NE(section(html, "absref", "divergence").find("全矿整体平移嫌疑"), std::string::npos);
   EXPECT_NE(section(html, "base", "events").find("基站坐标可能变动"), std::string::npos);
+  EXPECT_EQ(section(html, "base", "events").find("0 点即该基准"), std::string::npos)
+      << "没有窗口前的记录时,不能说基准取自窗口之前";
+  EXPECT_NE(section(html, "base", "events").find("之前没有更早的记录"), std::string::npos);
 
   p.abs_ref_max_m = 5.0;
   p.base_shift_m = 1.0;
