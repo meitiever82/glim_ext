@@ -9,11 +9,12 @@
 #include <vector>
 
 #include "gnss_bringup/diag_node_support.hpp"
-#include "node_process_harness.hpp"   // make_temp_dir、read_file、count_occurrences
+#include "node_process_harness.hpp"   // make_temp_dir、TempDirGuard、read_file、count_occurrences
 using namespace gnss_bringup;
 using gnss_bringup_test::count_occurrences;
 using gnss_bringup_test::make_temp_dir;
 using gnss_bringup_test::read_file;
+using gnss_bringup_test::TempDirGuard;
 namespace fs = std::filesystem;
 
 namespace {
@@ -120,6 +121,7 @@ TEST(DiagnosticStatus, StartupGraceIsOk) {
 TEST(DayFileAppender, WritesTheHeaderOnceAndRollsOverAtUtcMidnight) {
   const auto root = make_temp_dir("day_appender_");
   ASSERT_FALSE(root.empty());
+  TempDirGuard guard(root);
   {
     DayFileAppender out(root, "events.log", "% header\n");
     EXPECT_TRUE(out.append(1789257599.0, "a"));   // 2026-09-12 23:59:59 UTC
@@ -134,12 +136,12 @@ TEST(DayFileAppender, WritesTheHeaderOnceAndRollsOverAtUtcMidnight) {
     EXPECT_TRUE(again.append(1789257601.0, "c"));
   }
   EXPECT_EQ(count_occurrences(read_file(root + "/20260913/events.log"), "% header"), 1u);
-  fs::remove_all(root);
 }
 
 TEST(DayFileAppender, FailureIsReportedAndTheNextLineRetries) {
   const auto base = make_temp_dir("day_appender_fail_");
   ASSERT_FALSE(base.empty());
+  TempDirGuard guard(base);
   const std::string root = base + "/root";
   std::ofstream(root) << "a regular file where the root directory should be";
   DayFileAppender out(root, "events.log", "% header\n");
@@ -148,7 +150,6 @@ TEST(DayFileAppender, FailureIsReportedAndTheNextLineRetries) {
   fs::create_directories(root);
   EXPECT_TRUE(out.append(1789208626.0, "kept"));
   EXPECT_EQ(read_file(root + "/20260912/events.log"), "% header\nkept\n");
-  fs::remove_all(base);
 }
 
 TEST(BaseHistory, ParsesDataLinesOnly) {
@@ -164,6 +165,7 @@ TEST(BaseHistory, ParsesDataLinesOnly) {
 TEST(BaseHistory, ReadsTheLastValidLineOfTheNewestDayThatHasOne) {
   const auto root = make_temp_dir("base_history_");
   ASSERT_FALSE(root.empty());
+  TempDirGuard guard(root);
   const auto write = [&root](const std::string& rel, const std::string& text) {
     fs::create_directories(fs::path(root + "/" + rel).parent_path());
     std::ofstream(root + "/" + rel) << text;
@@ -181,7 +183,6 @@ TEST(BaseHistory, ReadsTheLastValidLineOfTheNewestDayThatHasOne) {
   EXPECT_DOUBLE_EQ(last->x, 7.0);
   EXPECT_DOUBLE_EQ(last->z, 9.0);
   EXPECT_FALSE(read_last_base_history(root + "/absent").has_value());
-  fs::remove_all(root);
 }
 
 TEST(MonotonicClockGuard, ClampsSmallJitterAndReportsLargeBackwardJumps) {
