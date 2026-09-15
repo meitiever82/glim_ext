@@ -57,6 +57,14 @@ target_include_directories(gnss_diag_node PRIVATE include)
 ament_target_dependencies(gnss_diag_node rclcpp gnss_msgs diagnostic_msgs std_srvs)
 install(TARGETS gnss_diag_node DESTINATION lib/${PROJECT_NAME})
 
+add_executable(gnss_cleanup_node src/gnss_cleanup_node.cpp)
+target_link_libraries(gnss_cleanup_node gnss_core::gnss_core)
+# 与 gnss_diag_node 同样的道理:cleanup_params.hpp 在本包 include/ 下,本目标没有链接
+# gnss_bringup_io(不需要 TCP/进程管理),没有从别处间接拿到这条 include 路径。
+target_include_directories(gnss_cleanup_node PRIVATE include)
+ament_target_dependencies(gnss_cleanup_node rclcpp)
+install(TARGETS gnss_cleanup_node DESTINATION lib/${PROJECT_NAME})
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_tcp_stream test/test_tcp_stream.cpp)
@@ -184,6 +192,18 @@ if(BUILD_TESTING)
   add_dependencies(test_gnss_diag_node_process gnss_diag_node)
   target_compile_definitions(test_gnss_diag_node_process PRIVATE
     GNSS_DIAG_NODE_PATH="$<TARGET_FILE:gnss_diag_node>")
+
+  # cleanup_params.hpp:清理节点的参数校验与一轮清理(先录包根目录,再 .pos 根目录)
+  ament_add_gtest(test_cleanup_params test/test_cleanup_params.cpp)
+  target_link_libraries(test_cleanup_params gnss_core::gnss_core)
+  target_include_directories(test_cleanup_params PRIVATE include test)
+
+  ament_add_gtest(test_gnss_cleanup_node_process test/test_gnss_cleanup_node_process.cpp TIMEOUT 120)
+  target_link_libraries(test_gnss_cleanup_node_process gnss_core::gnss_core)
+  target_include_directories(test_gnss_cleanup_node_process PRIVATE include test)
+  add_dependencies(test_gnss_cleanup_node_process gnss_cleanup_node)
+  target_compile_definitions(test_gnss_cleanup_node_process PRIVATE
+    GNSS_CLEANUP_NODE_PATH="$<TARGET_FILE:gnss_cleanup_node>")
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
