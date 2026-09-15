@@ -347,7 +347,7 @@ bash src/glim_ext/gnss_bringup/scripts/record_gnss.sh
 ## 诊断节点 `gnss_diag_node`
 
 订阅差分裸流、rtkrcv 独立解(`/rtkrcv_node/rtk_fix`)、610 融合解(`/gnss_cgi610/rtk_fix`)与 rtkrcv `$SAT` 流
-(`/rtkrcv_node/stat`),每秒按九条规则判定一次(规则与阈值见 `gnss_core/diagnosis.hpp`)。
+(`/rtkrcv_node/stat`),每秒按规则链(spec C1–C10)判定一次(规则与阈值见 `gnss_core/diagnosis.hpp`)。
 
 | 输出 | 位置 |
 | --- | --- |
@@ -357,8 +357,21 @@ bash src/glim_ext/gnss_bringup/scripts/record_gnss.sh
 | 状态 | `/gnss/diagnostics`(`diagnostic_msgs/DiagnosticArray`,`name: gnss_diag`) |
 
 - **启动宽限期** `startup_grace_s`(60 s):开机或时钟回跳后先只收数据,避免 rtkrcv 收敛前每次记一条 `no_solution`。
-- **时间**:判定与落盘用 ROS 时间;回放 bag 时加 `use_sim_time:=true`。ROS 时间回退超过 1 s 时,已开事件以
-  `reason=shutdown` 关闭、引擎重建。
+- **时间**:判定与落盘用 ROS 时间。ROS 时间回退超过 1 s 时,已开事件以 `reason=shutdown` 关闭、引擎重建。
+- **校时后再启动**:整套节点应在系统校时(NTP/PTP)完成后启动;开机后时钟大幅向前跳会立刻结束宽限期、
+  事件落到错误日期目录,录包目录名也会带错日期(向前跳不做回跳处理)。
+- **回放 bag**:launch 不声明也不转发 `use_sim_time`,按默认 launch 回放会把 `events.log`/`base.pos`/`base_baseline`
+  写进生产 `root`,`pos_root` 清理还可能删掉仍在写的日文件——**不要用默认 launch 回放**。单独起诊断节点、
+  另给一个目录,并让 `ros2 bag play` 发布 `/clock`:
+
+  ```bash
+  ros2 run gnss_bringup gnss_diag_node --ros-args -p use_sim_time:=true -p root:=/tmp/gnss_diag_replay
+  ros2 bag play <bag> --clock
+  ```
+
+  不加 `--clock` 时节点的 `now()` 一直为 0,所有输入被静默丢弃,只会每 10 s 打一条
+  "等待 /clock——回放时 ros2 bag play 需要加 --clock" 的 WARN。确实要用 launch 时,至少 `enable_cleanup:=false`,
+  并另给 `params_file` 把各节点的 `root` 改到单独目录(`use_sim_time` 仍需另外设置)。
 - **基站搬迁**:确认基站确实搬了之后,`ros2 service call /gnss_diag/reset_base_baseline std_srvs/srv/Trigger`
   以最近一次 1005/1006 坐标为新基线。
 - **偏差规则 `device_divergence`** 只用两路都 FIXED 的样本学习正常偏差水平,学到的 σ 最多 0.10 m
@@ -369,8 +382,19 @@ bash src/glim_ext/gnss_bringup/scripts/record_gnss.sh
 
 启动时清一轮,之后每 `interval_s`(3600 s)一轮:先 `bag_root`(录包,占盘大)再 `pos_root`;超过
 `retention_days`(14 天)的删除,所在盘高于 `watermark_pct`(85%)时从最旧的继续删。今天的数据与每个根目录下
-最新的一项永不删;清完仍高于水位会打 WARN,需要人工处理。`bag_root` 由 launch 参数给(默认
-`$GNSS_BAG_ROOT` → `$HOME/gnss_bags`),与 `record_gnss.sh` 一致。不需要时 `enable_cleanup:=false`。
+最新的一项永不删;清完仍高于水位会打 WARN,需要人工处理;查不到所在盘用量时这一轮只按保留天数删,同样打 WARN。
+不需要时 `enable_cleanup:=false`。
+
+`pos_root` 取 yaml;`bag_root` 由 launch 在启动时按下面的顺序解析(与 `record_gnss.sh` 的
+`${GNSS_BAG_ROOT:-$HOME/gnss_bags}` 一致,空值与未设置同样处理):
+
+1. launch 参数 `bag_root:=<目录>` 非空 → 用它;
+2. 否则环境变量 `GNSS_BAG_ROOT` 非空 → 用它;
+3. 否则 `HOME` 已设置且非空 → `$HOME/gnss_bags`;
+4. 否则为空:清理节点只清 `pos_root`,launch 打一条 "bag_root 未能确定" 的提示。
+
+systemd 系统单元不带 `User=` 时通常没有 `HOME`,此时请在单元里设置 `GNSS_BAG_ROOT`(录包脚本同样依赖它),
+或给 launch 传 `bag_root:=`;缺 `HOME` 不会让整个 launch 失败。
 
 ## `rtkrcv_node` 健康话题
 
@@ -381,9 +405,17 @@ bash src/glim_ext/gnss_bringup/scripts/record_gnss.sh
 ## `RtkFix` 增加 `ratio`(2026-09 轮 3b)
 
 `gnss_msgs/RtkFix` 末尾加了 `float32 ratio`(RTKLIB AR ratio,0 = 源不提供,610 驱动为 0)。
-- **`glim_ws` 与 `driver_ws` 都要重编** `gnss_msgs` 及其下游(`glim_ws`:`gnss_bringup`、`glim_ext`;`driver_ws`:`gnss_CGI610`。
-  `gnss_msgs` 是两边共用的符号链接,改一处两边都变);
-  只重编一边会在话题上出现类型哈希不一致、收不到消息。
+- **`gnss_msgs` 的全部下游都要重编**(`gnss_msgs` 本体在 finder_ros,`glim_ws` 与 `driver_ws` 里都是指向它的符号链接,
+  改一处两边都变):
+  - `glim_ws`:`gnss_bringup`、`glim_ext`;
+  - `driver_ws`:`gnss_CGI610`,以及 `timesync_infra`(`ptp_monitor_node.py` 是 rclpy 节点,也订阅 `RtkFix`——
+    Python 消息类在 `gnss_msgs` 的安装目录里,需要重编 `gnss_msgs` 后重新 `source`);
+  - finder_ros:`dataset_tools/timesync_diag` 自带一份 vendored 的 `RtkFix.msg`(用 rosbags 读 bag),已同步更新为新定义;
+    用它读改动之前录的 bag 时需要换回旧定义。
+- **只重编一边时的现象**(Humble 没有类型哈希,REP-2011 的类型哈希从 Iron 才有,DDS 类型名相同照样匹配上):
+  旧定义的发布者 → 新定义的订阅者:每条消息都反序列化失败,rclcpp 每条都打
+  "executor taking a message … unexpectedly failed",订阅回调一次都不进;
+  新定义的发布者 → 旧定义的 C++ 订阅者:静默可用,末尾多出的 `ratio` 字节被忽略。
 - **旧 bag 不兼容**:改动之前录的含 `RtkFix` 的 bag,用新定义回放时反序列化失败(CDR 末尾少 4 字节)。
   需要回放旧 bag 时,切回改动前的 `gnss_msgs` 构建。
 

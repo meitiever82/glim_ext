@@ -234,7 +234,8 @@ gnss_diag:
 
 gnss_cleanup:
   ros__parameters:
-    # bag_root 由 launch 注入(默认 $GNSS_BAG_ROOT,未设置时 $HOME/gnss_bags,与 record_gnss.sh 一致)。
+    # bag_root 由 launch 注入(bag_root 参数 → $GNSS_BAG_ROOT → $HOME/gnss_bags,与 record_gnss.sh 一致;
+    # 都为空时为空,只清 pos_root)。
     # .pos 与诊断文件的根目录,与 pos_writer.root / gnss_diag.root 相同
     pos_root: "/data/gnss/pos"
     # 超过这么多天的日期目录/录包删除;今天的、以及每个根目录下最新的一项永不删
