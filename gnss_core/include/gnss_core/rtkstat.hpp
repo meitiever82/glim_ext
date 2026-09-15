@@ -55,6 +55,7 @@ private:
 };
 
 // 解析 rtkrcv 的 llh 解流一行(列序与 RTKLIB .pos 数据行相同)。
+// 时间列可以是 "YYYY/MM/DD HH:MM:SS.sss" 或 "WWWW SSSSSS.SSS"(GPS 周 + 周内秒)。
 // 输出 out.stamp 为 UTC unix 秒:opt.default_time_system=GPST 时减闰秒。
 // 注释行(以 % 开头)、空行、列数不足返回 false。
 bool parse_llh_solution(const std::string& line, PosRecord& out, const PosReadOptions& opt = {});

@@ -30,8 +30,13 @@ struct PosReadOptions {
   PosTimeSystem default_time_system = PosTimeSystem::GPST;
 };
 
+// "YYYY/MM/DD" + "HH:MM:SS.sss" 按 UTC 日历合成 unix 秒(timegm,不受本机 TZ 影响);
+// 字段读不出来返回 false。.pos、events.log、base.pos 的时间列共用。
+bool parse_utc_date_time(const std::string& date, const std::string& time, double& out);
+
 // 读取 .pos:跳过 % 注释行(但扫描其中 time=GPST/UTC);
-// 数据列 "YYYY/MM/DD HH:MM:SS.sss lat lon height Q ns sdn sde sdu sdne sdeu sdun age ratio"。
+// 数据列 "YYYY/MM/DD HH:MM:SS.sss lat lon height Q ns sdn sde sdu sdne sdeu sdun age ratio";
+// 时间列也可以是 RTKLIB 的 "WWWW SSSSSS.SSS"(GPS 周 + 周内秒,rnx2rtkp 默认),同样按表头时间系统换算。
 // 列数不足 10(到 sdu)的行跳过;age/ratio 缺省为 0。文件打不开抛
 // std::runtime_error;读到一半真的撞上 I/O 错误(std::getline 内部把流
 // 设成 badbit,这种情况下 libstdc++ 不会抛异常)也会抛同一个
@@ -41,10 +46,6 @@ struct PosReadOptions {
 // 调用因此会在这种情况下悄悄丢失去重保护,而 calibrate_sigma_scale /
 // estimate_lever_arm 这些直接调用 read_pos() 的离线工具会悄悄拿到被
 // 截断的数据自己却毫无察觉。现在两者都会看到异常。
-// "YYYY/MM/DD" + "HH:MM:SS.sss" 按 UTC 日历合成 unix 秒(timegm,不受本机 TZ 影响);
-// 字段读不出来返回 false。.pos、events.log、base.pos 的时间列共用。
-bool parse_utc_date_time(const std::string& date, const std::string& time, double& out);
-
 std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& opt = {});
 
 // 从任意输入流读 .pos(语义与按路径读取相同)。读错误(流上出现 badbit)抛

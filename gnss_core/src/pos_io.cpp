@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -566,6 +567,24 @@ void PosWriter::close() {
   if (out_.is_open()) out_.close();
 }
 
+namespace {
+// RTKLIB 的"GPS 周 + 周内秒"时间列(rnx2rtkp 默认输出,"%4d %10.3f"):week 为 1–4 位非负整数,
+// tow 为 [0, 604800) 内的有限小数(不含 ':')。按日历直接相加,不做闰秒——闰秒由调用方按时间系统统一减。
+// 315964800 = GPS 历元 1980-01-06 00:00:00 的 unix 秒。
+bool parse_week_tow(const std::string& week_s, const std::string& tow_s, double& out) {
+  if (week_s.empty() || week_s.size() > 4) return false;
+  for (char c : week_s) {
+    if (c < '0' || c > '9') return false;
+  }
+  if (tow_s.empty() || tow_s.find(':') != std::string::npos) return false;
+  char* end = nullptr;
+  const double tow = std::strtod(tow_s.c_str(), &end);
+  if (end != tow_s.c_str() + tow_s.size() || !std::isfinite(tow) || tow < 0.0 || tow >= 604800.0) return false;
+  out = 315964800.0 + std::stod(week_s) * 604800.0 + tow;
+  return true;
+}
+}  // namespace
+
 bool parse_llh_solution(const std::string& line, PosRecord& out, const PosReadOptions& opt) {
   // 空行 / 全空白 / 注释行不是数据
   const size_t first = line.find_first_not_of(" \t\r\n");
@@ -584,7 +603,7 @@ bool parse_llh_solution(const std::string& line, PosRecord& out, const PosReadOp
   ss >> sdne_ >> sdeu_ >> sdun_ >> r.age >> r.ratio;
 
   double stamp = 0.0;
-  if (!parse_utc_date_time(date, time, stamp)) return false;
+  if (!parse_utc_date_time(date, time, stamp) && !parse_week_tow(date, time, stamp)) return false;
   if (opt.default_time_system == PosTimeSystem::GPST) stamp -= static_cast<double>(opt.leap_seconds);
   r.stamp = stamp;
   out = r;

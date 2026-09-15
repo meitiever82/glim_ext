@@ -6,6 +6,7 @@
 #include <sstream>
 #include <string>
 #include "gnss_core/pos_io.hpp"
+#include "gnss_core/rtkstat.hpp"
 #include "gnss_core/pos_io_test_hooks.hpp"
 #include "failing_streambuf.hpp"
 using namespace gnss_core;
@@ -166,6 +167,55 @@ TEST(PosIo, ColumnHeaderLineIdentifiesTimeSystem) {
   ASSERT_EQ(gpst.size(), 1u);
   EXPECT_NEAR(gpst[0].stamp, 1788431025.0 - 18.0, 1e-6);   // GPST 头:减闰秒
   std::remove(p_utc.c_str()); std::remove(p_gpst.c_str());
+}
+
+// round 4a final fix wave:rnx2rtkp 默认的时间列是 GPS 周 + 周内秒("%4d %10.3f"),
+// 以前 parse_utc_date_time 读不出来,整份 rtk_check.pos 安静地变成 0 条记录。
+// 表头取自现场 hongshaquan/20260915/seg_164931_165748/gnss/rtk_check.pos。
+TEST(PosIo, ReadsRtklibWeekAndTimeOfWeekColumns) {
+  const std::string header =
+      "% program   : rnx2rtkp ver.EX 2.5.1\n"
+      "% inp file  : rover.obs\n"
+      "% obs start : 2026/09/15 08:49:49.0 GPST (week2436 204589.0s)\n"
+      "% obs end   : 2026/09/15 08:58:06.0 GPST (week2436 205086.0s)\n"
+      "% ref pos   :  44.519819020   90.259104320   615.0870\n"
+      "%\n"
+      "% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,2:float,3:sbas,4:dgps,5:single,6:ppp,ns=# of satellites)\n"
+      "%  GPST          latitude(deg) longitude(deg)  height(m)   Q  ns   sdn(m)   sde(m)   sdu(m)  sdne(m)  sdeu(m)  sdun(m) age(s)  ratio\n";
+  const std::string rows =
+      "2436 204589.000   44.470303520   90.294603461   613.3524   2  21   0.9212   0.8230   2.5620   0.3087  -0.5878  -0.7088   0.00    0.0\n"
+      "2436 205086.500   44.470257133   90.294514984   613.1000   1  22   0.0100   0.0100   0.0200   0.0000   0.0000   0.0000   1.00   12.5\n";
+  double start_gpst = 0.0;
+  ASSERT_TRUE(parse_utc_date_time("2026/09/15", "08:49:49.0", start_gpst));
+  PosReadOptions opt;
+  opt.default_time_system = PosTimeSystem::UTC;   // 表头的 GPST 优先于默认值
+  std::istringstream in(header + rows);
+  const auto recs = read_pos(in, opt);
+  ASSERT_EQ(recs.size(), 2u);
+  EXPECT_NEAR(recs[0].stamp, start_gpst - 18.0, 1e-6) << "GPST 周秒换算到 UTC 要减闰秒";
+  EXPECT_NEAR(recs[1].stamp, start_gpst - 18.0 + 497.5, 1e-6);
+  EXPECT_EQ(recs[0].q, 2);
+  EXPECT_NEAR(recs[0].lat, 44.470303520, 1e-9);
+  EXPECT_NEAR(recs[1].ratio, 12.5, 1e-9);
+
+  // 表头声明 UTC 时不减闰秒
+  std::istringstream utc_in("%  UTC  latitude(deg) longitude(deg)\n" + rows);
+  const auto utc = read_pos(utc_in);
+  ASSERT_EQ(utc.size(), 2u);
+  EXPECT_NEAR(utc[0].stamp, start_gpst, 1e-6);
+
+  // 日历格式照旧
+  PosRecord r;
+  ASSERT_TRUE(parse_llh_solution(
+      "2026/09/15 08:49:49.000 44.5 90.2 600.0 1 20 0.01 0.01 0.02 0 0 0 1.0 5.0", r, PosReadOptions{}));
+  EXPECT_NEAR(r.stamp, start_gpst - 18.0, 1e-6);
+
+  // 周秒列损坏的行跳过
+  const char* tail = " 44.5 90.2 600.0 1 20 0.01 0.01 0.02 0 0 0 1.0 5.0";
+  for (const std::string bad : {"24x6 204589.000", "2436 -1.000", "2436 604800.000", "2436 12:00:00", "-1 204589.0",
+                                "2436 204589.0abc", "2436.5 204589.0", "12345 204589.0"}) {
+    EXPECT_FALSE(parse_llh_solution(bad + tail, r, PosReadOptions{})) << bad;
+  }
 }
 
 // ---------- PosDecimator(1 Hz 抽稀, spec §5.3) ----------
