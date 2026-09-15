@@ -125,6 +125,17 @@ std::string render_rtkrcv_conf(const RtkrcvConfParams& p) {
   oss << "inpstr2-path =127.0.0.1:" << p.corr_port << "\n";
   oss << "inpstr2-format =" << p.corr_format << "\n";
 
+  // 输入流空闲断开与重连(键在 RTKLIB-EX 2.5.1 app/consapp/rtkrcv/rtkrcv.c rcvopts[]:
+  // misc-timeout / misc-reconnect,默认各 10000 ms,经 strsetopt() 设给 stream.c 的 toinact/ticonnect)。
+  // 不做成参数:两个输入都是本机回环连到 rtkrcv_node 的 LocalReserver,不存在需要靠空闲检测发现的
+  // 半开连接——对端真的关闭时 recv 返回 0/出错,readtcpcli 会立刻断开并按重连间隔重连。
+  // - misc-timeout =0:stream.c waittcpcli() 只在 toinact>0 时做空闲检查,strsetopt() 对 0 原样保留
+  //   (0<值<1000 才抬到 1000)。默认 10 s 会让隧道里 ≥10 s 的差分中断变成"断开 10 s 再重连",
+  //   中间 LocalReserver 没有客户端,链路恢复后的前 ≤10 s 数据被丢掉(Task 3 dryB trace 实测)。
+  // - misc-reconnect =1000:对端关闭后 1 s 重连;strsetopt() 的下限就是 1000。
+  oss << "misc-timeout =" << 0 << "\n";
+  oss << "misc-reconnect =" << 1000 << "\n";
+
   // Output stream 1 (solution)
   oss << "outstr1-type =" << "tcpsvr" << "\n";
   oss << "outstr1-path =:" << p.sol_port << "\n";

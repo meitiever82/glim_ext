@@ -348,3 +348,22 @@ TEST(RtkrcvConf, EveryRenderedKeyResolvesToItselfInRtklibEx251OptionTables) {
   }
   EXPECT_GT(n, 0);  // 防止空串让本用例空转
 }
+
+// ---------- Task 6 F2:输入流空闲断开 / 重连间隔(misc-timeout / misc-reconnect)----------
+
+TEST(RtkrcvConf, InputStreamsAreNeverDroppedForBeingIdle) {
+  // 现场回归(Task 3 dryB,rtkrcv -t 3):conf 不写 misc-timeout 时 rtkrcv 用默认 10000 ms,
+  // tcpcli 输入 10 s 无字节就 "waittcpcli: inactive timeout" 断开,10 s 后才重连;这 10 s 里
+  // LocalReserver 没有客户端,差分/观测被直接丢掉。隧道里差分中断 ≥10 s 是常态,
+  // 每次恢复都会白丢最多 10 s。RTKLIB-EX 2.5.1 stream.c:waittcpcli 只在 toinact>0 时检查空闲,
+  // strsetopt 把 0 原样保留(0<opt[0]<1000 才抬到 1000),所以 0 = 关闭空闲断开。
+  const auto c = render_rtkrcv_conf(RtkrcvConfParams{});
+  EXPECT_TRUE(has_line(c, "misc-timeout =0")) << c;
+}
+
+TEST(RtkrcvConf, InputStreamsReconnectAfterOneSecond) {
+  // 对端(LocalReserver)真的关掉连接时(节点重启、写不动被摘除),rtkrcv 1 s 后重连,
+  // 而不是默认的 10 s。strsetopt 把小于 1000 的值抬到 1000,1000 已是下限。
+  const auto c = render_rtkrcv_conf(RtkrcvConfParams{});
+  EXPECT_TRUE(has_line(c, "misc-reconnect =1000")) << c;
+}
