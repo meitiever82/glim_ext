@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -200,6 +202,67 @@ TEST(ReportHtml, HourlyTableListsOnlyHoursWithData) {
   EXPECT_NE(hourly.find("<td>03:00</td>"), std::string::npos);
   EXPECT_EQ(hourly.find("<td>02:00</td>"), std::string::npos);
   EXPECT_NE(hourly.find("只列出有数据的小时"), std::string::npos);
+}
+
+// 所有 polyline 的顶点数之和
+size_t polyline_vertices(const std::string& svg) {
+  size_t n = 0;
+  for (size_t p = svg.find("<polyline"); p != std::string::npos; p = svg.find("<polyline", p + 1)) {
+    const size_t a = svg.find("points=\"", p) + 8;
+    n += count(svg.substr(a, svg.find('"', a) - a), ",");
+  }
+  return n;
+}
+
+// final review 压力回归:31 天窗口(评审实测 4 源 1 Hz 生成 41 MB HTML)。单元测试里用轻一些但同形态的数据:
+// 1 个源、5 s 一条、每 10 条夹一个 11 s 的断点(> track_gap_s,约 5 万段),轨迹是半径 500 m、
+// 每小时一圈、经过控制点的环线(每天 23 趟经过),每天第一个小时停在控制点旁(abs-ref 样本约 2 万),
+// 每 20 分钟有 2 分钟浮点解,每天 4 条事件、4 条基站记录。
+// 上限的依据:轨迹 ≤ 4000 点、两条曲线各 ≤ 2×681 顶点、31 组日柱,分小时表 744 行(约 60 KB)、
+// 事件表 124 行(约 50 KB)——都与样本数无关;1 MB 给这些固定开销留出数倍余量,
+// 同时比修复前小一个数量级以上(修复前同一数据:HTML 6.1 MB、轨迹 95658 点、abs-ref 曲线 20336 顶点、744 组柱;修复后约 256 KB)。
+TEST(ReportHtml, ThirtyOneDayWindowStaysBoundedInSizeAndPointCounts) {
+  const double r_m = 500.0;
+  const double m_per_deg_lon = 111320.0 * std::cos(kLat * M_PI / 180.0);
+  ReportInputs in;
+  auto& can = in.sources["can"];
+  double t = T;
+  for (int i = 0; t < T + 31 * 86400.0; ++i) {
+    const double theta = 2.0 * M_PI * std::fmod(t - T, 3600.0) / 3600.0;
+    PosRecord r = rec(t, std::fmod(t - T, 1200.0) < 120.0 ? 2 : 1, north(r_m * (1.0 - std::cos(theta))));
+    r.lon = kLon + r_m * std::sin(theta) / m_per_deg_lon;
+    if (std::fmod(t - T, 86400.0) < 3600.0) {   // 每天第一个小时停在控制点旁(abs-ref 样本密集)
+      r = rec(t, 1, north(0.5 * std::sin(t)));
+    }
+    can.push_back(r);
+    t += (i % 10 == 9) ? 11.0 : 5.0;
+  }
+  for (int d = 0; d < 31; ++d) {
+    for (int k = 0; k < 4; ++k) {
+      const double t_open = T + d * 86400.0 + k * 21600.0 + 100.0;
+      in.events.push_back(event("corr_outage", t_open, t_open + 30.0, "recovered"));
+      in.base_history.push_back(BaseSample{t_open, Ecef{-2148744.0 + 1e-3 * k, 4426641.0, 4044655.0}});
+    }
+  }
+  ReportParams p;
+  p.window = ReportWindow{T, T + 31 * 86400.0};
+  p.control_points = {ControlPoint{"K1", kLat, kLon}};
+  const auto stats = compute_report(in, p);
+  ASSERT_GT(stats.abs_ref.samples.size(), 10000u) << "abs-ref 样本要远多于曲线的顶点上限,才测得出抽稀";
+  size_t track_points = 0;
+  for (const auto& seg : stats.tracks.at(0).segments) track_points += seg.size();
+  EXPECT_LE(track_points, p.max_track_points) << can.size() << " 条记录";
+
+  const auto html = render_report_html(stats, ReportMeta{"/r", T});
+  EXPECT_LT(html.size(), 1024u * 1024u) << "can " << can.size() << " 条, abs-ref " << stats.abs_ref.samples.size();
+  const std::string absref = section(html, "absref", "divergence");
+  EXPECT_LE(polyline_vertices(absref), 2u * (760u - 64u - 16u + 1u));
+  const std::string base = section(html, "base", "events");
+  EXPECT_LE(polyline_vertices(base), 2u * (760u - 64u - 16u + 1u));
+  const std::string hourly = section(html, "hourly", "track");
+  EXPECT_EQ(count(hourly.substr(0, hourly.find("</svg>")), "<rect class=\"bar\""), 31u);
+  std::printf("[ stress   ] can %zu 条, abs-ref %zu 样本, 轨迹 %zu 点, HTML %zu 字节\n", can.size(),
+              stats.abs_ref.samples.size(), track_points, html.size());
 }
 
 TEST(ReportHtml, EmptyInputsRenderPlaceholdersInsteadOfFailing) {
