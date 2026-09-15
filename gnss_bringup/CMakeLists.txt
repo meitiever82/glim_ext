@@ -219,5 +219,20 @@ install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 # (`ros2 run` 只在 lib/<package> 下查找可执行文件)。
 install(PROGRAMS scripts/record_gnss.sh DESTINATION lib/${PROJECT_NAME})
 
+# 现场数据回放工具(tools/field_replay/README.md):可执行脚本与它们 import 的纯函数模块装在
+# 同一目录,`ros2 run gnss_bringup run_field_integration.sh <A|B|dry|dryB> <seg>` 可直接用;
+# rnx_nav_to_rtcm.c 由 run_field_integration.sh 在运行时编译(依赖 RTKLIB 源码树,不进 CMake 构建)。
+install(PROGRAMS
+  tools/field_replay/field_replay.py
+  tools/field_replay/run_field_integration.sh
+  tools/field_replay/can_sigma_patch.py
+  DESTINATION lib/${PROJECT_NAME})
+install(FILES
+  tools/field_replay/replay_plan.py
+  tools/field_replay/stream_timing.py
+  tools/field_replay/candump_log.py
+  tools/field_replay/rnx_nav_to_rtcm.c
+  DESTINATION lib/${PROJECT_NAME})
+
 ament_export_targets(gnss_bringup-targets HAS_LIBRARY_TARGET)
 ament_package()
