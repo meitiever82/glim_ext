@@ -29,6 +29,7 @@ inline gnss_msgs::msg::RtkFix to_rtk_fix(const gnss_core::PosRecord& r) {
   m.heading = 0.0f;
   m.heading_sigma = 0.0f;
   m.heading_valid = false;               // rtkrcv 单天线解无双天线航向
+  m.ratio = static_cast<float>(r.ratio); // RTKLIB AR ratio,供诊断的 ambiguity 规则使用
   return m;
 }
 
@@ -57,9 +58,7 @@ inline int quality_to_q(gnss_core::Quality quality) {
 // 选对日期目录已经够用,所以这里退化为用 header.stamp,而不是让纪元零点
 // 原样流入 stamp。
 //
-// ratio(AR ratio)在 RtkFix 里没有对应字段——rtkrcv 的 .pos 有 ratio,
-// 但经 RtkFix 中转会丢失,这是消息定义的既有取舍,不在本任务修改范围,
-// 这里显式填 0 并在此说明,而不是留一个看似"忘了填"的默认值。
+// ratio 为 0 表示源不提供(RtkFix.msg 字段注释),原样写进 .pos。
 inline gnss_core::PosRecord to_pos_record(const gnss_msgs::msg::RtkFix& m) {
   gnss_core::PosRecord r;
   if (m.gnss_time != 0.0) {
@@ -75,7 +74,7 @@ inline gnss_core::PosRecord to_pos_record(const gnss_msgs::msg::RtkFix& m) {
   r.ns = m.sats_used;
   r.sdne = Eigen::Vector3d(m.sigma_enu[1], m.sigma_enu[0], m.sigma_enu[2]);  // N,E,U
   r.age = m.diff_age;
-  r.ratio = 0.0;  // RtkFix 不携带 AR ratio,见上面注释
+  r.ratio = m.ratio;   // 0 表示源不提供
   return r;
 }
 

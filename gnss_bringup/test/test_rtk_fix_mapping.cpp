@@ -104,7 +104,8 @@ TEST(ToPosRecord, NormalizedQualityMapsBackToRtklibQ) {
 
 TEST(ToPosRecord, RoundTripsThroughToRtkFix) {
   // 两个方向必须互逆 —— 这是防止某一侧悄悄改了顺序的最强约束
-  const auto original = fix_sample();
+  auto original = fix_sample();
+  original.ratio = 12.5f;
   const auto back = to_rtk_fix(to_pos_record(original));
   EXPECT_NEAR(back.latitude, original.latitude, 1e-9);
   EXPECT_NEAR(back.longitude, original.longitude, 1e-9);
@@ -115,6 +116,7 @@ TEST(ToPosRecord, RoundTripsThroughToRtkFix) {
   EXPECT_DOUBLE_EQ(back.sigma_enu[1], original.sigma_enu[1]);
   EXPECT_DOUBLE_EQ(back.sigma_enu[2], original.sigma_enu[2]);
   EXPECT_NEAR(back.diff_age, original.diff_age, 1e-6);
+  EXPECT_FLOAT_EQ(back.ratio, original.ratio);
 }
 
 TEST(ToPosRecord, UsesGnssTimeAsTheEpochWhenPresent) {
@@ -131,12 +133,19 @@ TEST(ToPosRecord, PositionAndAgeAndSatsAreCopied) {
   EXPECT_EQ(r.ns, 38);
 }
 
-TEST(ToPosRecord, RatioHasNoCounterpartInRtkFixSoItIsZero) {
-  // RtkFix 不携带 AR ratio(rtkrcv .pos 里有,过 RtkFix 中转会丢失)——
-  // 这是消息定义的既有取舍,不在本任务修改范围,这里只确认丢失的方式是
-  // "写 0",而不是残留上一次调用的垃圾值或者未初始化。
-  const auto r = to_pos_record(fix_sample());
-  EXPECT_DOUBLE_EQ(r.ratio, 0.0);
+TEST(RtkFixMapping, RatioIsCarriedIntoRtkFix) {
+  EXPECT_FLOAT_EQ(to_rtk_fix(sample()).ratio, 20.5f);
+}
+
+TEST(ToPosRecord, RatioIsCarriedBackFromRtkFix) {
+  auto m = fix_sample();
+  m.ratio = 7.25f;
+  EXPECT_DOUBLE_EQ(to_pos_record(m).ratio, 7.25);
+}
+
+TEST(ToPosRecord, SourcesWithoutRatioStayZero) {
+  // 610 板卡不提供 ratio,消息默认值 0 原样落进 .pos 的 ratio 列
+  EXPECT_DOUBLE_EQ(to_pos_record(fix_sample()).ratio, 0.0);
 }
 
 TEST(ToPosRecord, ZeroGnssTimeFallsBackToHeaderStampNotEpoch) {
