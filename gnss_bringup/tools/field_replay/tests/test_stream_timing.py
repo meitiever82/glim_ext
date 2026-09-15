@@ -129,6 +129,28 @@ class Crc24qTest(unittest.TestCase):
         self.assertNotEqual(a, b)
         self.assertEqual(a & ~0xFFFFFF, 0)
 
+    def test_ascii_check_value(self):
+        # CRC-24Q(poly 0x1864CFB,init 0)对 ASCII "123456789" 的标准校验值。
+        self.assertEqual(st.crc24q(b"123456789"), 0xCDE703)
+
+
+class NovatelCrc32Test(unittest.TestCase):
+    def test_ascii_input_differs_from_standard_crc32(self):
+        # RTKLIB rtk_crc32(NovAtel 用的变体)初值 0、不做最终异或,不是标准
+        # CRC-32/zlib(init=xorout=0xFFFFFFFF,标准校验值 0xCBF43926)。这里
+        # 显式记录两者不同,避免以后有人假设它符合标准 CRC-32 校验值。
+        self.assertNotEqual(st.novatel_crc32(b"123456789"), 0xCBF43926)
+
+    def test_known_value_from_real_frame_bytes(self):
+        # `<seg>/raw/cgi610.dat` 的第一条真实短头帧(52 字节头+体,字面量
+        # 内嵌,不依赖数据集是否存在),接收机自己算出的 CRC 就是这个值,
+        # RTKLIB 的变体应当与之吻合。
+        frame_and_crc = bytes.fromhex(
+            "aa44132845018409c8c7310c840900000000000068f908417725000085fb"
+            "00002d0200007dffffffccffffff0d000000fcffffff46986236")
+        frame, stored_crc = frame_and_crc[:-4], frame_and_crc[-4:]
+        self.assertEqual(st.novatel_crc32(frame), int.from_bytes(stored_crc, "little"))
+
 
 class Rtcm3FramingTest(unittest.TestCase):
     def test_gps_msm4_1074(self):
@@ -191,6 +213,29 @@ class Rtcm3FramingTest(unittest.TestCase):
         self.assertEqual(f.msg_type, 1005)
         self.assertIsNone(st.rtcm3_epoch_gpst_tow(f))
 
+    def test_bds_tow_wraps_into_next_week(self):
+        # BDT tow = 604790 s,+14s 闰秒差 = 604804 s,超出一周(604800s),
+        # 必须折回 604804 - 604800 = 4.0,而不是原样返回 604804.0。
+        payload = build_msm_payload(1124, station_id=1, tow_field=604790000)
+        f = list(st.iter_rtcm3_frames(build_rtcm3_frame(payload)))[0]
+        self.assertEqual(st.rtcm3_epoch_gpst_tow(f), 4.0)
+
+    def test_glonass_wraps_into_previous_week_near_sunday_midnight(self):
+        # 星期 0(周日)、莫斯科时间 01:00(尚未到 GPST 周起点):
+        # GPST 日内秒 = 3600 - 3h + 18s = -7182,总数 -7182 落在上一周,
+        # 折回 604800 - 7182 = 597618.0(而不是原样返回负数)。
+        tod_ms = 3600 * 1000
+        payload = build_msm_payload(1084, station_id=1, tow_field=tod_ms, tow_bits=27, dow_field=0)
+        f = list(st.iter_rtcm3_frames(build_rtcm3_frame(payload)))[0]
+        self.assertEqual(st.rtcm3_epoch_gpst_tow(f), 597618.0)
+
+    def test_glonass_dow_unknown_returns_none(self):
+        # DF416:星期字段值 7 表示"未知",没有星期就没法算出周内秒,
+        # 只能返回 None,交给 schedule() 的继承规则处理。
+        payload = build_msm_payload(1084, station_id=1, tow_field=0, tow_bits=27, dow_field=7)
+        f = list(st.iter_rtcm3_frames(build_rtcm3_frame(payload)))[0]
+        self.assertIsNone(st.rtcm3_epoch_gpst_tow(f))
+
 
 class NovatelFramingTest(unittest.TestCase):
     def test_long_header_inspvaxb(self):
@@ -227,6 +272,33 @@ class NovatelFramingTest(unittest.TestCase):
         self.assertEqual([f.msg_id for f in frames], [1465, 325])
         self.assertEqual(frames[1].offset, len(long_f))
 
+    def test_false_sync_with_oversized_length_does_not_skip_next_valid_frame(self):
+        # 一个"假同步"(AA 44 12 出现在别处,声明的长度域是随机数据)如果
+        # CRC 不过时仍按声明的 total_len 前跳,会把紧跟其后的真帧整个跳过去。
+        # 这里把一条完整合法帧紧接在假头部后面,声明的消息体长度刚好覆盖
+        # 假头部+这条真帧+尾部填充,凑成一个内容对不上、CRC 必然不过的
+        # "巨大"候选帧;修复后应按 1 字节前跳重新同步,找到内嵌的真帧。
+        valid = build_novatel_long(msg_id=140, week=2436, ms=1000)
+        header = bytearray(28)
+        header[0:3] = bytes([0xAA, 0x44, 0x12])
+        header[3] = 28
+        declared_body_len = 200
+        header[8:10] = declared_body_len.to_bytes(2, "little")
+        header[14:16] = (2436).to_bytes(2, "little")
+        header[16:20] = (999).to_bytes(4, "little")
+        total_len = 28 + declared_body_len + 4
+        body_and_pad = valid + b"\x00" * (declared_body_len - len(valid))
+        fake_crc = b"\x00\x00\x00\x00"
+        data = bytes(header) + body_and_pad + fake_crc
+        self.assertEqual(len(data), total_len)
+
+        frames = list(st.iter_novatel_frames(data))
+        self.assertFalse(frames[0].crc_ok)  # 假帧本身 CRC 必然不过
+        self.assertIn(140, [f.msg_id for f in frames])
+        found = [f for f in frames if f.msg_id == 140]
+        self.assertTrue(found[0].crc_ok)
+        self.assertEqual(found[0].offset, 28)
+
 
 class GpstToUnixUtcTest(unittest.TestCase):
     def test_known_value(self):
@@ -261,7 +333,12 @@ class RealBaseRtcm3Test(unittest.TestCase):
         with open(os.path.join(SEG, "gnss", "base.rtcm3"), "rb") as f:
             data = f.read()
         frames = list(st.iter_rtcm3_frames(data))
-        self.assertTrue(all(f.crc_ok for f in frames))
+        # iter_rtcm3_frames 对 CRC 不过的候选帧从不产出,所以
+        # `all(f.crc_ok for f in frames)` 永远为真(空集合也满足),
+        # 是个自我验证式的空判断;改成检查产出的帧首尾相接、无缝覆盖整个
+        # 文件字节数——这才是"没有漏检/误判"的有意义证据(该文件里确认
+        # 帧与帧之间没有间隙,`sum(len(raw))` 应精确等于文件长度)。
+        self.assertEqual(sum(len(f.raw) for f in frames), len(data))
         counts = {}
         for f in frames:
             counts[f.msg_type] = counts.get(f.msg_type, 0) + 1

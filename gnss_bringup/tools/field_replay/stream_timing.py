@@ -112,9 +112,18 @@ def rtcm3_epoch_gpst_tow(frame: Rtcm3Frame) -> Optional[float]:
     DF002 消息号(12 位)+ DF003 测站 ID(12 位)+ 历元时间。
     GPS/Galileo/QZSS/SBAS 历元时间是 30 位周内毫秒,直接除 1000。
     BDS 历元时间是 30 位 BDT 周内毫秒,BDT = GPST - 14s,故 GPST = BDT + 14。
-    GLONASS 历元时间是 3 位"莫斯科日内星期"+ 27 位日内毫秒(莫斯科时间);
+    GLONASS 历元时间是 3 位 DF416"莫斯科日内星期"+ 27 位日内毫秒(莫斯科时间);
     莫斯科时间 = UTC + 3h,GPST = UTC + 18s(闰秒),所以
     GPST 日内秒 = 莫斯科日内秒 - 3h + 18s,GPST 周内秒 = 星期 * 86400 + 上式。
+    DF416 里星期字段值 7 表示"未知"(没有星期就没法算周内秒),此时返回
+    None——按无时间帧处理,交给 schedule() 的继承规则去补时间。
+
+    所有分支的结果都按 % 604800 折回 [0, 604800) 周内秒:
+    BDS/GPS/Galileo/QZSS/SBAS 的原始字段本身理论上不会越界(30 位周内毫秒
+    定义域就是一周以内),但字段本身可能因为传输错误或本函数外部误用而
+    越界;GLONASS 换算(莫斯科时间 -3h+18s、以及星期*86400 的组合)在周
+    边界附近(周日凌晨前后)会产生负数或超过一周的中间值,必须折回。
+    Python 的 `%` 对浮点数取模保证结果非负(不同于 C 的 fmod)。
     """
     msg_type = frame.msg_type
     payload = frame.raw[3:-3]
@@ -122,17 +131,19 @@ def rtcm3_epoch_gpst_tow(frame: Rtcm3Frame) -> Optional[float]:
 
     if msg_type in _MSM_GLO:
         dow = _bits(payload, header_bits, 3)
+        if dow == 7:
+            return None  # DF416: 7 = 未知星期,无法定位到周内秒
         tod_ms_moscow = _bits(payload, header_bits + 3, 27)
         tod_s_gpst = tod_ms_moscow / 1000.0 - 3 * 3600.0 + 18.0
-        return dow * 86400.0 + tod_s_gpst
+        return (dow * 86400.0 + tod_s_gpst) % 604800.0
 
     if msg_type in _MSM_GPS or msg_type in _MSM_GAL or msg_type in _MSM_QZS or msg_type in _MSM_SBS:
         tow_ms = _bits(payload, header_bits, 30)
-        return tow_ms / 1000.0
+        return (tow_ms / 1000.0) % 604800.0
 
     if msg_type in _MSM_BDS:
         bdt_tow_ms = _bits(payload, header_bits, 30)
-        return bdt_tow_ms / 1000.0 + 14.0
+        return (bdt_tow_ms / 1000.0 + 14.0) % 604800.0
 
     return None
 
@@ -162,7 +173,14 @@ def novatel_crc32(data: bytes) -> int:
 def iter_novatel_frames(data: bytes) -> Iterator[NovatelFrame]:
     """按长头(AA 44 12)/短头(AA 44 13)同步分帧,CRC-32 校验结果记入 crc_ok
     (不论 CRC 是否通过都产出——两种头部都用显式长度字段定界,不像 RTCM3 那样
-    要靠重新找同步字节来防止误判,所以没有必要在 CRC 失败时丢弃整帧)。
+    完全跳过 CRC 不过的候选帧)。
+
+    但扫描位置的前进量必须看 CRC 是否通过:CRC 通过时才按声明的 total_len
+    前跳;CRC 不过时只挪 1 字节继续找同步(与 iter_rtcm3_frames 的重同步
+    策略一致)。原因:一个"假同步"(在其他数据里偶然出现的 AA 44 12/13)
+    后面跟着的长度字段本身也是随机数据,声明的 total_len 可能远大于真实
+    情况;如果无条件按 total_len 前跳,会把紧跟在假同步后面的一条真帧
+    整个跳过去,永远发现不了。
 
     长头布局核实自 RTKLIB novatel.c 的 `decode_oem4`/`input_oem4`:
     msg_id@[4:6)(u16 LE)、消息体长度@[8:10)(u16 LE)、周@[14:16)(u16 LE)、
@@ -220,9 +238,10 @@ def iter_novatel_frames(data: bytes) -> Iterator[NovatelFrame]:
         frame = data[i:i + total_len]
         crc_calc = novatel_crc32(frame[:-4])
         crc_recv = int.from_bytes(frame[-4:], "little")
+        ok = crc_calc == crc_recv
         yield NovatelFrame(offset=i, raw=bytes(frame), msg_id=msg_id, week=week, ms=ms,
-                            crc_ok=(crc_calc == crc_recv))
-        i += total_len
+                            crc_ok=ok)
+        i += total_len if ok else 1
 
 
 _GPS_EPOCH_UNIX = 315964800.0  # 1980-01-06 00:00:00 UTC
