@@ -31,6 +31,7 @@ add_library(gnss_core SHARED
   src/diag_io.cpp
   src/retention.cpp
   src/diagnosis_engine.cpp
+  src/report_inputs.cpp
 )
 target_include_directories(gnss_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -112,6 +113,7 @@ if(BUILD_TESTING)
   gnss_core_add_test(test_diag_io)
   gnss_core_add_test(test_retention)
   gnss_core_add_test(test_diagnosis_engine)
+  gnss_core_add_test(test_report_inputs)
 
   # tools/ 下的 Python 工具测试(unittest)。
   # 注意目录是 tests/(与 C++ 的 test/ 分开),必须显式注册,否则这些用例不会被 colcon test 跑到。

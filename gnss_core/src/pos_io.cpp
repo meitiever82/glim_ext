@@ -406,6 +406,13 @@ std::string format_pos_record(const PosRecord& r, PosTimeSystem time_system, int
 
 void write_pos(const std::string& path, const std::vector<PosRecord>& records,
                PosTimeSystem time_system, int leap_seconds) {
+  // 与 PosWriter::open() 一致:父目录不存在时先建好(忽略"已存在"),
+  // 调用方不必自己先 mkdir -p 再写文件。
+  std::error_code ec;
+  const std::filesystem::path fp(path);
+  const auto parent = fp.parent_path();
+  if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+
   std::ofstream out(path);
   if (!out) throw std::runtime_error("write_pos: cannot open " + path);
 

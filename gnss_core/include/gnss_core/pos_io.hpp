@@ -53,6 +53,7 @@ std::vector<PosRecord> read_pos(std::istream& in, const PosReadOptions& opt = {}
 
 // 写标准 RTKLIB .pos(头 "% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,...,time=GPST|UTC)" + 列名注释 + 14 列数据)。
 // records.stamp 为 UTC unix 秒;time_system=GPST 时写出时间加 leap_seconds。
+// 父目录不存在时先创建(与 PosWriter::open() 一致),调用方不必自己 mkdir -p。
 void write_pos(const std::string& path, const std::vector<PosRecord>& records,
                PosTimeSystem time_system = PosTimeSystem::GPST, int leap_seconds = 18);
 
