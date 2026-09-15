@@ -98,6 +98,7 @@ TickResult DiagnosisEngine::tick(double now) {
   // rtkrcv 比 610 晚 0.4 s 就是 0.6 m),所以两路都带历元时刻时一律按历元配对。
   while (!dev_buf_.empty() && !(now - dev_buf_.front().first < cfg_.sol_stale_s)) dev_buf_.pop_front();
   std::optional<double> d;
+  bool learnable = false;
   if (sol) {
     const SolutionSample* partner = nullptr;
     bool epoch_pairing = false;
@@ -120,10 +121,14 @@ TickResult DiagnosisEngine::tick(double now) {
     if (!epoch_pairing && dev && std::abs(*sol_t_ - *dev_t_) < cfg_.divergence_pair_max_dt_s) {
       partner = &*dev;
     }
-    if (partner) d = geodesic_distance_m(sol->lat, sol->lon, partner->lat, partner->lon);
+    if (partner) {
+      d = geodesic_distance_m(sol->lat, sol->lon, partner->lat, partner->lon);
+      // 只有两路都是固定解的偏差才代表"正常水平",才允许学进经验窗口(设计决定 4)
+      learnable = sol->quality == Quality::FIXED && partner->quality == Quality::FIXED;
+    }
   }
   TickResult out;
-  out.divergence = divergence_.update(now, d, sol ? std::hypot(sol->sdn, sol->sde) : 0.0);
+  out.divergence = divergence_.update(now, d, sol ? std::hypot(sol->sdn, sol->sde) : 0.0, learnable);
   in.divergence_m = out.divergence.divergence_m;
   in.divergence_since = out.divergence.since;
   in.divergence_threshold_m = out.divergence.threshold_m;

@@ -70,6 +70,8 @@ void validate_diagnosis_config(const DiagnosisConfig& c) {
   require(c.divergence_window_s > 0.0, "divergence_window_s", "必须 > 0");
   require(c.divergence_min_samples >= 2, "divergence_min_samples", "必须 >= 2");
   require(c.divergence_sigma_floor_m > 0.0, "divergence_sigma_floor_m", "必须 > 0");
+  require(c.divergence_sigma_max_m >= c.divergence_sigma_floor_m, "divergence_sigma_max_m",
+          "必须 >= divergence_sigma_floor_m");
   require(c.divergence_pair_max_dt_s > 0.0, "divergence_pair_max_dt_s", "必须 > 0");
   require(c.divergence_epoch_max_dt_s > 0.0, "divergence_epoch_max_dt_s", "必须 > 0");
   require(c.base_warmup_s >= 0.0, "base_warmup_s", "必须 >= 0");

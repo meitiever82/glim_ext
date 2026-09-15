@@ -259,6 +259,7 @@ TEST(DiagnosisConfigValidation, DefaultsAreValidAndMatchRtkMonitor) {
   EXPECT_EQ(c.min_sats, 6);
   EXPECT_DOUBLE_EQ(c.close_hysteresis_s, 10.0);
   EXPECT_DOUBLE_EQ(c.abs_ref_radius_m, 3.0);
+  EXPECT_DOUBLE_EQ(c.divergence_sigma_max_m, 0.10);
 }
 
 TEST(DiagnosisConfigValidation, RejectsNonsenseWithTheFieldName) {
@@ -277,5 +278,6 @@ TEST(DiagnosisConfigValidation, RejectsNonsenseWithTheFieldName) {
   c.low_el_deg = 91.0;          expect_rejected(c, "low_el_deg");       c = {};
   c.abs_ref_radius_m = 0.1;     expect_rejected(c, "abs_ref_radius_m"); c = {};   // 必须大于 abs_ref_max_m
   c.divergence_min_samples = 1; expect_rejected(c, "divergence_min_samples"); c = {};
-  c.divergence_epoch_max_dt_s = 0.0; expect_rejected(c, "divergence_epoch_max_dt_s");
+  c.divergence_epoch_max_dt_s = 0.0; expect_rejected(c, "divergence_epoch_max_dt_s"); c = {};
+  c.divergence_sigma_max_m = 0.04;  expect_rejected(c, "divergence_sigma_max_m");   // 低于 5 cm 下限
 }

@@ -66,6 +66,9 @@ struct DiagnosisConfig {
   double divergence_pair_max_dt_s = 2.0;    // 按到达时刻配对(任一路缺历元时刻)时,到达时刻相差 >= 此值不配对
   double divergence_epoch_max_dt_s = 0.1;   // 按历元时刻配对时,最近的历元相差超过此值不配对
   double base_warmup_s = 600.0;             // 基站基线预热时长(取中位数)
+  // 学到的 σ(窗口 RMS 与 held 基线)上限:阈值里来自学习的部分最多 divergence_sigma × 此值,
+  // 更大的持续偏差不会被学成正常。rtkrcv 当前自报 σ 不受此限。
+  double divergence_sigma_max_m = 0.10;
 };
 
 // 任何字段非法时抛 std::invalid_argument,消息以字段名开头

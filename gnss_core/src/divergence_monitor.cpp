@@ -9,10 +9,11 @@ DivergenceMonitor::DivergenceMonitor(const DiagnosisConfig& cfg)
     : sigma_mult_(cfg.divergence_sigma),
       window_s_(cfg.divergence_window_s),
       floor_m_(cfg.divergence_sigma_floor_m),
+      cap_m_(cfg.divergence_sigma_max_m),
       min_samples_(static_cast<size_t>(std::max(cfg.divergence_min_samples, 0))) {}
 
 DivergenceState DivergenceMonitor::update(double t, std::optional<double> divergence_m,
-                                          double current_sigma_m) {
+                                          double current_sigma_m, bool learnable) {
   // 用 <=(而非严格 <):恰好 window_s_ 秒前的样本已经不算"最近 window_s_ 秒内"。
   while (!window_.empty() && window_.front().first <= t - window_s_) window_.pop_front();
 
@@ -27,7 +28,7 @@ DivergenceState DivergenceMonitor::update(double t, std::optional<double> diverg
     since_.reset();
   }
 
-  // 规则 5:非有限值(NaN/inf)一律当作没配上处理——不入窗口、不影响 since、
+  // 规则 5:非有限值(NaN/inf)一律当作没配上处理——不入窗口、清零 since、
   // 也不更新 last_paired_t_(下面统一走 !divergence_m 分支)。
   if (divergence_m && !std::isfinite(*divergence_m)) divergence_m.reset();
 
@@ -43,7 +44,7 @@ DivergenceState DivergenceMonitor::update(double t, std::optional<double> diverg
     // 记成 baseline_sigma_——留着给窗口以后被剪枝耗尽时用(规则 B)。
     double sum_sq = 0.0;
     for (const auto& [ts, d] : window_) sum_sq += d * d;
-    base = std::max(floor_m_, std::sqrt(sum_sq / static_cast<double>(window_.size())));
+    base = std::min(cap_m_, std::max(floor_m_, std::sqrt(sum_sq / static_cast<double>(window_.size()))));
     baseline_sigma_ = base;
     s.empirical = true;
   } else if (!warming_up_ && baseline_sigma_) {
@@ -81,7 +82,7 @@ DivergenceState DivergenceMonitor::update(double t, std::optional<double> diverg
     } else {
       since_.reset();
     }
-    window_.emplace_back(t, *divergence_m);
+    if (learnable) window_.emplace_back(t, *divergence_m);
   } else {
     // 规则 3:预热期结束后——超限样本排除在窗口外、不重启计时;不超限则清零
     // since 并入窗口。"超限"按本拍的最终阈值判(含当前自报 σ 的抬高):独立解
@@ -92,7 +93,7 @@ DivergenceState DivergenceMonitor::update(double t, std::optional<double> diverg
       if (!since_) since_ = t;
     } else {
       since_.reset();
-      window_.emplace_back(t, *divergence_m);
+      if (learnable) window_.emplace_back(t, *divergence_m);
     }
   }
   s.since = since_;

@@ -329,3 +329,51 @@ TEST(DiagnosisEngine, ShutdownClosesEverythingOpen) {
     EXPECT_EQ(t.reason, CloseReason::Shutdown);
   }
 }
+
+// 3a 遗留 A.2:rtkrcv 掉到 FLOAT 的 90 s 里,偏差在被 σ 抬高的阈值之下,旧实现会把这些
+// 样本学进窗口,之后 0.3 m 的真实偏差报不出来。只用两路都 FIXED 的样本学习后必须报出。
+TEST(DiagnosisEngine, FloatSamplesDoNotWidenTheLearnedThreshold) {
+  auto e = make_engine();
+  const auto north = [](double m) { return 44.5 + m / 111132.0; };
+  TickResult r;
+  for (int i = 0; i < 70; ++i) {   // FIXED,两路相差 2 cm:学到 5 cm 下限
+    const double t = 100.0 + i;
+    corrections(e, t);
+    e.on_solution(t, fixed());
+    e.on_device_solution(t, fixed(north(0.02)));
+    r = e.tick(t + 0.1);
+  }
+  EXPECT_NEAR(r.divergence.threshold_m, 0.15, 1e-6);
+  for (int i = 70; i < 160; ++i) {   // rtkrcv FLOAT,σ 0.14 m → 阈值 0.42;偏差 0.3 m 不超限
+    const double t = 100.0 + i;
+    corrections(e, t);
+    SolutionSample fl = fixed();
+    fl.quality = Quality::FLOAT;
+    fl.sdn = fl.sde = 0.1;
+    e.on_solution(t, fl);
+    e.on_device_solution(t, fixed(north(0.3)));
+    r = e.tick(t + 0.1);
+    ASSERT_FALSE(r.divergence.since.has_value()) << "t=" << t;
+  }
+  for (int i = 160; i <= 170; ++i) {   // 回到 FIXED,偏差仍是 0.3 m
+    const double t = 100.0 + i;
+    corrections(e, t);
+    e.on_solution(t, fixed());
+    e.on_device_solution(t, fixed(north(0.3)));
+    r = e.tick(t + 0.1);
+  }
+  EXPECT_LT(r.divergence.threshold_m, 0.2) << "FLOAT 期间的样本不能拉宽学到的阈值";
+  EXPECT_TRUE(has_code(r, "device_divergence"));
+}
+
+TEST(DiagnosisEngine, OpenEventCodesListsWhatIsOpen) {
+  auto e = make_engine();
+  EXPECT_TRUE(e.open_event_codes().empty());
+  corrections(e, 100.0);
+  e.tick(104.0);   // 差分中断 4 s + 无解:corr_outage 与 no_solution
+  const auto codes = e.open_event_codes();
+  EXPECT_NE(std::find(codes.begin(), codes.end(), "corr_outage"), codes.end());
+  EXPECT_NE(std::find(codes.begin(), codes.end(), "no_solution"), codes.end());
+  e.shutdown(105.0);
+  EXPECT_TRUE(e.open_event_codes().empty());
+}
