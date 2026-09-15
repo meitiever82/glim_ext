@@ -17,6 +17,26 @@
 
 namespace gnss_core {
 
+// "YYYY/MM/DD" + "HH:MM:SS.sss" → 按 UTC 日历合成 unix 秒。
+// 用 timegm 而非 mktime:后者受本机 TZ 影响。
+bool parse_utc_date_time(const std::string& date, const std::string& time, double& out) {
+  int Y = 0, M = 0, D = 0, h = 0, m = 0;
+  double s = 0.0;
+  if (std::sscanf(date.c_str(), "%d/%d/%d", &Y, &M, &D) != 3) return false;
+  if (std::sscanf(time.c_str(), "%d:%d:%lf", &h, &m, &s) != 3) return false;
+  std::tm tm{};
+  tm.tm_year = Y - 1900;
+  tm.tm_mon = M - 1;
+  tm.tm_mday = D;
+  tm.tm_hour = h;
+  tm.tm_min = m;
+  tm.tm_sec = 0;
+  const std::time_t base = timegm(&tm);
+  if (base == static_cast<std::time_t>(-1)) return false;
+  out = static_cast<double>(base) + s;
+  return true;
+}
+
 namespace {
 
 // t(UTC unix 秒,已经按需加过闰秒)→ 整秒 + 毫秒,四舍五入并处理进位。
@@ -225,26 +245,6 @@ TrailingLineOutcome truncate_incomplete_trailing_line(const std::filesystem::pat
     // "打开失败返回 false、不抛"承诺要求这里必须接住,不能让它捅穿。
     return TrailingLineOutcome::kFailed;
   }
-}
-
-// "YYYY/MM/DD" + "HH:MM:SS.sss" → 按 UTC 日历合成 unix 秒。
-// 用 timegm 而非 mktime:后者受本机 TZ 影响。
-bool parse_date_time(const std::string& date, const std::string& time, double& out) {
-  int Y = 0, M = 0, D = 0, h = 0, m = 0;
-  double s = 0.0;
-  if (std::sscanf(date.c_str(), "%d/%d/%d", &Y, &M, &D) != 3) return false;
-  if (std::sscanf(time.c_str(), "%d:%d:%lf", &h, &m, &s) != 3) return false;
-  std::tm tm{};
-  tm.tm_year = Y - 1900;
-  tm.tm_mon = M - 1;
-  tm.tm_mday = D;
-  tm.tm_hour = h;
-  tm.tm_min = m;
-  tm.tm_sec = 0;
-  const std::time_t base = timegm(&tm);
-  if (base == static_cast<std::time_t>(-1)) return false;
-  out = static_cast<double>(base) + s;
-  return true;
 }
 
 }  // namespace
@@ -577,7 +577,7 @@ bool parse_llh_solution(const std::string& line, PosRecord& out, const PosReadOp
   ss >> sdne_ >> sdeu_ >> sdun_ >> r.age >> r.ratio;
 
   double stamp = 0.0;
-  if (!parse_date_time(date, time, stamp)) return false;
+  if (!parse_utc_date_time(date, time, stamp)) return false;
   if (opt.default_time_system == PosTimeSystem::GPST) stamp -= static_cast<double>(opt.leap_seconds);
   r.stamp = stamp;
   out = r;

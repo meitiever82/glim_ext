@@ -41,6 +41,10 @@ struct PosReadOptions {
 // 调用因此会在这种情况下悄悄丢失去重保护,而 calibrate_sigma_scale /
 // estimate_lever_arm 这些直接调用 read_pos() 的离线工具会悄悄拿到被
 // 截断的数据自己却毫无察觉。现在两者都会看到异常。
+// "YYYY/MM/DD" + "HH:MM:SS.sss" 按 UTC 日历合成 unix 秒(timegm,不受本机 TZ 影响);
+// 字段读不出来返回 false。.pos、events.log、base.pos 的时间列共用。
+bool parse_utc_date_time(const std::string& date, const std::string& time, double& out);
+
 std::vector<PosRecord> read_pos(const std::string& path, const PosReadOptions& opt = {});
 
 // 从任意输入流读 .pos(语义与按路径读取相同)。读错误(流上出现 badbit)抛
