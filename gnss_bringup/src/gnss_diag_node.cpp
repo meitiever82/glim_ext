@@ -6,7 +6,7 @@
 // 线程:只用 rclcpp::spin(单线程 executor),订阅回调、定时器、服务串行执行,引擎不加锁。
 // 时间:引擎与落盘都用 node->now()(回放 bag 时配 use_sim_time),经 MonotonicClockGuard 保证单调;
 //   回退超过 clock_jump_tolerance_s 时以 shutdown 关闭已开事件、重建引擎(基线从文件重读),
-//   重新开始启动宽限期。use_sim_time 下还没收到 /clock(now()==0)时整拍跳过。
+//   重新开始启动宽限期。use_sim_time 下还没收到 /clock(now()==0)时整拍跳过,并节流打 WARN。
 // 启动宽限期:前 startup_grace_s 秒只接收数据、不 tick,避免 rtkrcv 收敛前每次开机记一条 no_solution。
 // 停机:spin 返回后 shutdown(now) → 写关闭行 → 关文件。
 #include <algorithm>
@@ -33,13 +33,18 @@
 
 namespace gnss_bringup {
 
+// root 目录建不出来:不是参数写错,而是盘没挂上或没有权限,main 单独给出提示
+struct RootDirError : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
 class GnssDiagNode {
 public:
   explicit GnssDiagNode(rclcpp::Node* node) : node_(node) {
     read_params();
     std::error_code ec;
     std::filesystem::create_directories(root_, ec);
-    if (ec) throw std::invalid_argument("root 目录建不出来: " + root_ + ": " + ec.message());
+    if (ec) throw RootDirError("root 目录 " + root_ + " 无法创建(" + ec.message() + ")——检查磁盘挂载与权限");
     baseline_path_ = (std::filesystem::path(root_) / "base_baseline").string();
     events_ = std::make_unique<DayFileAppender>(root_, "events.log", gnss_core::events_log_header());
     base_history_ = std::make_unique<DayFileAppender>(root_, "base.pos", gnss_core::base_pos_header());
@@ -159,7 +164,11 @@ private:
   // 每次调用引擎前取时间。返回空:时间尚不可用。
   std::optional<double> engine_time() {
     const double now = node_->now().seconds();
-    if (!(now > 0.0)) return std::nullopt;
+    if (!(now > 0.0)) {
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), steady_clock_, 10000,
+                           "ROS 时间为 0,整拍跳过:等待 /clock——回放时 ros2 bag play 需要加 --clock");
+      return std::nullopt;
+    }
     const auto prev = clock_.last();
     const auto step = clock_.step(now);
     if (step.jumped) {
@@ -204,20 +213,24 @@ private:
     }
   }
 
-  void handle_base_update(const gnss_core::BaseUpdate& u) {
+  // 返回基线持久化是否成功;本次没有要持久化的基线时为 true
+  bool handle_base_update(const gnss_core::BaseUpdate& u) {
+    bool persisted = true;
     if (u.feed.baseline_learned) {
       const auto b = engine_->baseline();
       if (b && gnss_core::write_base_baseline(baseline_path_, *b)) {
         RCLCPP_INFO(node_->get_logger(), "基站基线已持久化: %.4f %.4f %.4f -> %s", b->x, b->y, b->z,
                     baseline_path_.c_str());
       } else {
-        RCLCPP_ERROR(node_->get_logger(), "基站基线写入失败: %s(重启后会重新预热)", baseline_path_.c_str());
+        RCLCPP_ERROR(node_->get_logger(), "基站基线写入失败: %s(重启后会重新预热或恢复旧基线)", baseline_path_.c_str());
+        persisted = false;
       }
     }
     if (u.feed.history_changed &&
         !base_history_->append(u.t, gnss_core::format_base_history_line(u.t, gnss_core::Ecef{u.coords.x, u.coords.y, u.coords.z}))) {
       RCLCPP_ERROR_THROTTLE(node_->get_logger(), steady_clock_, 10000, "base.pos 写入失败(root=%s)", root_.c_str());
     }
+    return persisted;
   }
 
   void write_transitions(const std::vector<gnss_core::EventTransition>& transitions) {
@@ -272,12 +285,18 @@ private:
       resp.message = "还没收到过 RTCM 1005/1006,无法重置基站基线";
       return;
     }
-    handle_base_update(*u);
+    const bool persisted = handle_base_update(*u);
     char buf[160];
-    std::snprintf(buf, sizeof(buf), "基站基线已重置为 %.4f %.4f %.4f", u->coords.x, u->coords.y, u->coords.z);
+    std::snprintf(buf, sizeof(buf), "%.4f %.4f %.4f", u->coords.x, u->coords.y, u->coords.z);
+    if (!persisted) {
+      resp.success = false;
+      resp.message = std::string("内存中已重置为 ") + buf + ",但写入 " + baseline_path_ + " 失败,重启后会恢复旧基线";
+      RCLCPP_ERROR(node_->get_logger(), "运维重置: %s", resp.message.c_str());
+      return;
+    }
     resp.success = true;
-    resp.message = buf;
-    RCLCPP_WARN(node_->get_logger(), "运维重置: %s", buf);
+    resp.message = std::string("基站基线已重置为 ") + buf;
+    RCLCPP_WARN(node_->get_logger(), "运维重置: %s", resp.message.c_str());
   }
 
   rclcpp::Node* node_;
@@ -315,6 +334,11 @@ int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     node = std::make_shared<rclcpp::Node>("gnss_diag");
     diag = std::make_unique<gnss_bringup::GnssDiagNode>(node.get());
+  } catch (const gnss_bringup::RootDirError& e) {
+    RCLCPP_ERROR(node->get_logger(), "启动失败: %s", e.what());
+    diag.reset();
+    if (rclcpp::ok()) rclcpp::shutdown();
+    return 1;
   } catch (const std::exception& e) {
     if (node) {
       RCLCPP_ERROR(node->get_logger(), "启动失败,配置有误: %s", e.what());
