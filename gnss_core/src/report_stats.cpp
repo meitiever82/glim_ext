@@ -69,7 +69,7 @@ DivergenceStats divergence_stats(const std::string& device, const std::vector<Po
     }
     if (it != dev.begin()) {
       const auto prev = std::prev(it);
-      if (std::abs(prev->stamp - r.stamp) < best_dt) {
+      if (std::abs(prev->stamp - r.stamp) <= best_dt) {   // |Δt| 相同取更早的历元,与 rtk-monitor 的 min() 一致
         best = &*prev;
         best_dt = std::abs(prev->stamp - r.stamp);
       }
@@ -208,10 +208,12 @@ ReportStats compute_report(const ReportInputs& in, const ReportParams& p) {
 
   // 设计决定 11:共用一个局部 ENU 原点
   std::unique_ptr<LlaToEnu> origin;
+  double origin_height = 0.0;   // 事件只有经纬度,按原点高度投影,远离原点时才不会与轨迹错开
   for (const auto& name : names) {
     const auto& recs = in.sources.at(name);
     if (recs.empty()) continue;   // 原点取第一个非空源;空源(front() 未定义行为)跳过
     origin = std::make_unique<LlaToEnu>(recs.front().lat, recs.front().lon, recs.front().height);
+    origin_height = recs.front().height;
     s.track_origin = name;
     break;
   }
@@ -253,7 +255,7 @@ ReportStats compute_report(const ReportInputs& in, const ReportParams& p) {
   for (size_t i = 0; i < in.events.size(); ++i) {
     const auto& e = in.events[i];
     if (!e.pos) continue;
-    const Eigen::Vector3d enu = origin->forward(e.pos->lat, e.pos->lon, 0.0);
+    const Eigen::Vector3d enu = origin->forward(e.pos->lat, e.pos->lon, origin_height);
     s.event_markers.push_back(EventMarker{static_cast<int>(i + 1), enu.x(), enu.y()});
   }
   return s;

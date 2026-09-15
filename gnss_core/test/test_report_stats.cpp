@@ -115,6 +115,30 @@ TEST(ReportStats, DeviceVsRtkrcvPairsTheNearestEpochWithinTolerance) {
 }
 
 // 移植 rtk-monitor test_report_can_rtk_deviation_skips_far_apart_timestamps,并覆盖 gpchc 与容差边界
+// rtk-monitor 用 min() 取最近历元,|Δt| 完全相同时取先出现(更早)的那条
+TEST(ReportStats, DivergenceTieBreakPrefersTheEarlierDeviceEpoch) {
+  ReportInputs in;
+  in.sources["rtkrcv"] = {rec(kBase + 10.0)};
+  in.sources["can"] = {rec(kBase + 9.5), rec(kBase + 10.5, 1, north(1.0))};   // 早 0.5 s 处 0 m,晚 0.5 s 处 1 m
+  const auto s = compute_report(in, params(kBase, kBase + 100.0));
+  ASSERT_EQ(s.divergence.size(), 1u);
+  EXPECT_EQ(s.divergence[0].n, 1);
+  ASSERT_TRUE(s.divergence[0].max_m.has_value());
+  EXPECT_NEAR(*s.divergence[0].max_m, 0.0, 1e-6);
+}
+
+// final review:事件标注以前按高度 0 投影,远离原点时与轨迹错开(5 km、600 m 高差约 0.5 m)
+TEST(ReportStats, EventMarkersAreProjectedAtTheOriginHeight) {
+  ReportInputs in;
+  in.sources["can"] = {rec(kBase + 1.0), rec(kBase + 2.0, 1, north(5000.0))};
+  in.events = {event("far", kBase + 2.0, std::nullopt, LatLon{north(5000.0), kLon})};
+  const auto s = compute_report(in, params(kBase, kBase + 10.0));
+  ASSERT_EQ(s.event_markers.size(), 1u);
+  const auto& pt = s.tracks.at(0).segments.at(0).back();
+  EXPECT_NEAR(s.event_markers[0].n, pt.n, 1e-3) << "同一经纬度的事件标注要落在轨迹点上";
+  EXPECT_NEAR(s.event_markers[0].e, pt.e, 1e-3);
+}
+
 TEST(ReportStats, FarApartEpochsAreNotPairedAndEachDeviceIsReported) {
   ReportInputs in;
   in.sources["rtkrcv"] = {rec(kBase + 1.0), rec(kBase + 5.0)};
