@@ -117,6 +117,16 @@ TEST(ReportCli, UsageErrorsExitOneWithAReasonAndTheUsage) {
       {{"--root", "/x", "--day", "20260915", "--abs-ref-max-m", "abc"}, "需要一个数字"},
       {{"--root", "/x", "--day", "20260915", "--pair-tol-s", "0"}, "大于 0"},
       {{"--root", "/x", "--day", "20260915", "--leap-seconds", "1.5"}, "--leap-seconds"},
+      // 越界的日期/时间字段不能被 timegm 悄悄规整成别的日子
+      {{"--root", "/x", "--day", "20261301"}, "YYYYMMDD"},
+      {{"--root", "/x", "--day", "20260931"}, "YYYYMMDD"},
+      {{"--root", "/x", "--day", "20250229"}, "YYYYMMDD"},
+      {{"--root", "/x", "--day", "20260900"}, "YYYYMMDD"},
+      {{"--root", "/x", "--from", "2026/09/15 24:00:00", "--to", "2026/09/16 01:00:00"}, "格式应为"},
+      {{"--root", "/x", "--from", "2026/09/15 23:60:00", "--to", "2026/09/16 01:00:00"}, "格式应为"},
+      {{"--root", "/x", "--from", "2026/09/15 23:00:61", "--to", "2026/09/16 01:00:00"}, "格式应为"},
+      {{"--root", "/x", "--from", "2026/02/30 00:00:00", "--to", "2026/03/03 00:00:00"}, "格式应为"},
+      {{"--root", "/x", "--from", "2026/09/15 -1:00:00", "--to", "2026/09/16 01:00:00"}, "格式应为"},
   };
   for (const auto& [args, reason] : cases) {
     std::string joined;
@@ -126,6 +136,20 @@ TEST(ReportCli, UsageErrorsExitOneWithAReasonAndTheUsage) {
     EXPECT_NE(r.err.find(reason), std::string::npos) << joined << "\n" << r.err;
     EXPECT_NE(r.err.find("用法"), std::string::npos) << joined;
     EXPECT_TRUE(r.out.empty()) << joined;
+  }
+}
+
+TEST(ReportCli, AcceptsCalendarEdgeValues) {
+  TempDir dir;
+  ASSERT_FALSE(dir.path().empty());
+  fs::create_directories(dir.path() + "/root");
+  for (const std::vector<std::string>& window :
+       {std::vector<std::string>{"--day", "20240229"},
+        std::vector<std::string>{"--from", "2026/12/31 23:59:60.500", "--to", "2027/01/01 00:00:10"}}) {
+    std::vector<std::string> args{"--root", dir.path() + "/root", "--out", dir.path() + "/r.html"};
+    args.insert(args.end(), window.begin(), window.end());
+    const auto r = run(args);
+    EXPECT_EQ(r.code, 0) << window[0] << " " << window[1] << "\n" << r.err;
   }
 }
 

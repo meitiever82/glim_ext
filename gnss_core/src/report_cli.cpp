@@ -57,10 +57,26 @@ double parse_positive(const std::string& flag, const std::string& v) {
   return x;
 }
 
+// parse_utc_date_time 交给 timegm,越界字段会被悄悄规整("2026/02/30" 变成 3 月 2 日);
+// 命令行上的时间窗必须是真实存在的日历时刻:月 1–12、日不超过当月天数、时 0–23、分 0–59、秒 [0, 61)。
+bool valid_calendar_fields(const std::string& date, const std::string& time) {
+  int Y = 0, M = 0, D = 0, h = 0, m = 0, n = 0;
+  double sec = 0.0;
+  if (std::sscanf(date.c_str(), "%d/%d/%d%n", &Y, &M, &D, &n) != 3 || static_cast<size_t>(n) != date.size()) return false;
+  n = 0;
+  if (std::sscanf(time.c_str(), "%d:%d:%lf%n", &h, &m, &sec, &n) != 3 || static_cast<size_t>(n) != time.size()) return false;
+  static const int kDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (M < 1 || M > 12) return false;
+  const bool leap = (Y % 4 == 0 && Y % 100 != 0) || Y % 400 == 0;
+  const int month_days = kDays[M - 1] + (M == 2 && leap ? 1 : 0);
+  return D >= 1 && D <= month_days && h >= 0 && h <= 23 && m >= 0 && m <= 59 && sec >= 0.0 && sec < 61.0;
+}
+
 double parse_time(const std::string& flag, const std::string& v) {
   const size_t sp = v.find(' ');
   double t = 0.0;
-  if (sp == std::string::npos || !parse_utc_date_time(v.substr(0, sp), v.substr(sp + 1), t)) {
+  if (sp == std::string::npos || !valid_calendar_fields(v.substr(0, sp), v.substr(sp + 1)) ||
+      !parse_utc_date_time(v.substr(0, sp), v.substr(sp + 1), t)) {
     throw UsageError(flag + " 的格式应为 \"YYYY/MM/DD HH:MM:SS\"(UTC),收到 \"" + v + "\"");
   }
   return t;
@@ -149,6 +165,7 @@ int run_gnss_report(const std::vector<std::string>& args, std::ostream& out, std
     if (day.empty() && !(have_from && have_to)) throw UsageError("需要 --day,或者同时给 --from 与 --to");
     if (!day.empty()) {
       if (!parse_day_dir_date(day) ||
+          !valid_calendar_fields(day.substr(0, 4) + "/" + day.substr(4, 2) + "/" + day.substr(6, 2), "00:00:00") ||
           !parse_utc_date_time(day.substr(0, 4) + "/" + day.substr(4, 2) + "/" + day.substr(6, 2), "00:00:00",
                                params.window.t0)) {
         throw UsageError("--day 的格式应为 YYYYMMDD,收到 \"" + day + "\"");
