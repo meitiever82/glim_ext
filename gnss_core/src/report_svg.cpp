@@ -132,22 +132,64 @@ std::string svg_line_chart(const std::vector<SvgLineSeries>& series, const SvgLi
     o += "<text x=\"" + px(W - R) + "\" y=\"" + px(y - 4.0) + "\" text-anchor=\"end\" fill=\"#d62728\">" +
          html_escape(opt.threshold_label) + "</text>";
   }
+  // 顶点数与样本数无关(final review:31 天 abs-ref 曲线曾有 41 MB):
+  //   - 每个像素列只留该列的最小值点与最大值点(按时间先后),尖峰不会被抽稀掉;
+  //   - 相邻样本间隔超过 max(60 s, 每 4 个像素列对应的时长) 时断开折线,分开的两趟不连成一条线。
+  // 于是每条序列最多 2×(绘图宽度+1) 个顶点。
+  const double plot_w = W - L - R;
+  const double gap_s = std::max(60.0, (opt.t1 - opt.t0) / plot_w * 4.0);
   std::vector<std::pair<std::string, std::string>> items;
   for (const auto& s : series) {
-    std::string pts;
-    size_t n = 0;
-    double last_x = 0.0, last_y = 0.0;
+    std::vector<std::vector<std::pair<double, double>>> runs;   // 每条折线的 (x, y)
+    std::vector<std::pair<double, double>> run;
+    long long col = -1;
+    std::pair<double, double> col_min, col_max, col_first, col_last;   // (t, v)
+    double last_t = 0.0;
+    bool have_last = false;
+    const auto flush_col = [&]() {
+      if (col < 0) return;
+      // 列内是平的(最小值点就是最大值点)时改留该列首尾两点,平线才画得出来
+      const bool flat = col_min == col_max;
+      const auto& a = flat ? col_first : col_min;
+      const auto& b = flat ? col_last : col_max;
+      const auto& first = a.first <= b.first ? a : b;
+      const auto& second = a.first <= b.first ? b : a;
+      run.emplace_back(X(first.first), Y(first.second));
+      if (second.first != first.first || second.second != first.second) run.emplace_back(X(second.first), Y(second.second));
+      col = -1;
+    };
+    const auto flush_run = [&]() {
+      flush_col();
+      if (!run.empty()) runs.push_back(std::move(run));
+      run.clear();
+    };
     for (const auto& [t, v] : s.points) {
       if (!usable(t, v)) continue;
-      last_x = X(t);
-      last_y = Y(v);
-      pts += (n++ ? " " : "") + px(last_x) + "," + px(last_y);
+      if (have_last && t - last_t > gap_s) flush_run();
+      last_t = t;
+      have_last = true;
+      const long long c = static_cast<long long>(std::floor(X(t) - L));
+      if (c != col) {
+        flush_col();
+        col = c;
+        col_min = col_max = col_first = col_last = {t, v};
+      } else {
+        col_last = {t, v};
+        if (v < col_min.second) col_min = {t, v};
+        if (v > col_max.second) col_max = {t, v};
+      }
     }
-    if (n == 0) continue;
+    flush_run();
+    if (runs.empty()) continue;
     items.emplace_back(s.label, s.color);
-    if (n == 1) {
-      o += "<circle cx=\"" + px(last_x) + "\" cy=\"" + px(last_y) + "\" r=\"3\" fill=\"" + html_escape(s.color) + "\"/>";
-    } else {
+    for (const auto& r : runs) {
+      if (r.size() == 1) {
+        o += "<circle cx=\"" + px(r[0].first) + "\" cy=\"" + px(r[0].second) + "\" r=\"3\" fill=\"" + html_escape(s.color) +
+             "\"/>";
+        continue;
+      }
+      std::string pts;
+      for (size_t i = 0; i < r.size(); ++i) pts += (i ? " " : "") + px(r[i].first) + "," + px(r[i].second);
       o += "<polyline fill=\"none\" stroke=\"" + html_escape(s.color) + "\" stroke-width=\"1.5\" points=\"" + pts + "\"/>";
     }
   }

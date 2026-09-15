@@ -79,6 +79,39 @@ TEST(ReportSvg, LineChartSkipsNonFiniteAndOutOfWindowPointsAndCopesWithFlatData)
   EXPECT_NE(svg_line_chart({{"s", "#000", {{T, 0.1}}}}, bad).find("无数据"), std::string::npos);
 }
 
+// 所有 polyline 的 points 属性里的顶点数之和
+size_t polyline_vertices(const std::string& svg) {
+  size_t n = 0;
+  for (size_t p = svg.find("<polyline"); p != std::string::npos; p = svg.find("<polyline", p + 1)) {
+    const size_t a = svg.find("points=\"", p) + 8;
+    const size_t b = svg.find('"', a);
+    n += count(svg.substr(a, b - a), ",");
+  }
+  return n;
+}
+
+// final review Important:31 天 abs-ref 曲线曾把每个样本都写成顶点(41 MB)。
+// 每个像素列最多留 min/max 两个点;时间间隔超过 max(60 s, 窗口/绘图宽度×4) 时断开折线。
+TEST(ReportSvg, LineChartDownsamplesToPixelColumnsAndBreaksOnTimeGaps) {
+  SvgLineChartOptions o;
+  o.t0 = T;
+  o.t1 = T + 86400.0;
+  SvgLineSeries s{"dense", "#1f77b4", {}};
+  s.points.reserve(1000000);
+  for (int i = 0; i < 1000000; ++i) {
+    const double t = T + i * 0.0864;
+    if (t >= T + 30000.0 && t < T + 40000.0) continue;   // 两趟之间停了近 3 小时
+    s.points.emplace_back(t, i == 123457 ? 5.0 : 0.01 * (i % 7));
+  }
+  const auto svg = svg_line_chart({s}, o);
+  expect_clean(svg);
+  EXPECT_LT(svg.size(), 64u * 1024u) << "输出大小与点数无关";
+  const size_t plot_columns = 760 - 64 - 16 + 1;
+  EXPECT_LE(polyline_vertices(svg), 2u * plot_columns);
+  EXPECT_EQ(count(svg, "<polyline"), 2u) << "中间的长间断不能连成一条线";
+  EXPECT_NE(svg.find(",24.0"), std::string::npos) << "列内的极值(5.0,顶格 y=24)要保留";
+}
+
 TEST(ReportSvg, RatioBarChartSkipsMissingValues) {
   const std::vector<SvgBarGroup> groups{{"00:00", {0.5, std::nullopt}}, {"01:00", {1.0, 0.25}}};
   auto svg = svg_ratio_bar_chart(groups, {"can", "rtkrcv"}, {"#1f77b4", "#ff7f0e"});
