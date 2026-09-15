@@ -261,6 +261,38 @@ TEST(ReportStats, LongTracksAreDownsampledKeepingSegmentEnds) {
   EXPECT_DOUBLE_EQ(seg.back().t, kBase + 10000.0) << "段尾必须保留";
 }
 
+// final review Important:每段首尾都保留时,稀疏多段的数据会超出 max_track_points(实测 20 倍)。
+// 10 万点、每 10 点断 6 s(1 万段、2 万个段端点):每源总点数仍不超过上限,首末点保留;真正的长间断仍断开。
+TEST(ReportStats, MaxTrackPointsIsATruePerSourceCapEvenForGappyData) {
+  ReportInputs in;
+  double t = kBase;
+  for (int i = 0; i < 100000; ++i) {
+    if (i > 0) t += (i % 10 == 0) ? 6.0 : 1.0;
+    if (i == 50000) t += 3600.0;   // 中途停了一小时
+    in.sources["can"].push_back(rec(t, i % 20 < 15 ? 1 : 2, north(i * 0.01)));
+  }
+  auto p = params(kBase, t + 1.0);
+  p.max_track_points = 4000;
+  const auto s = compute_report(in, p);
+  ASSERT_EQ(s.tracks.size(), 1u);
+  const auto& tr = s.tracks[0];
+  size_t total = 0;
+  for (const auto& seg : tr.segments) total += seg.size();
+  EXPECT_LE(total, 4000u) << "段数 " << tr.segments.size();
+  EXPECT_GE(total, 2000u) << "上限要用上,不能只剩端点";
+  ASSERT_FALSE(tr.segments.empty());
+  EXPECT_DOUBLE_EQ(tr.segments.front().front().t, kBase) << "源的首点保留";
+  EXPECT_DOUBLE_EQ(tr.segments.back().back().t, t) << "源的末点保留";
+  EXPECT_EQ(tr.segments.size(), 2u) << "6 s 的小间断在抽稀后并入,1 h 的停车仍断开";
+  EXPECT_GT(tr.gap_s, p.track_gap_s);
+
+  p.max_track_points = 2;   // 极端上限:只剩首末两点
+  const auto tiny = compute_report(in, p);
+  size_t tiny_total = 0;
+  for (const auto& seg : tiny.tracks[0].segments) tiny_total += seg.size();
+  EXPECT_EQ(tiny_total, 2u);
+}
+
 TEST(ReportStats, EventMarkersUseTheEventIndexAndSkipEventsWithoutPosition) {
   ReportInputs in;
   in.events = {event("a", kBase, kBase + 1.0, LatLon{kLat, kLon}), event("b", kBase + 2.0, std::nullopt),

@@ -83,6 +83,39 @@ DivergenceStats divergence_stats(const std::string& device, const std::vector<Po
   if (d.n > 0) d.mean_m = sum / d.n;
   return d;
 }
+
+struct TrackSplit {
+  std::vector<std::pair<size_t, size_t>> ranges;   // 每段 [首, 尾] 下标(含)
+  size_t endpoints = 0;                            // 段端点总数(单点段算 1)
+  double gap_s = 0.0;
+};
+
+TrackSplit split_with_gap(const std::vector<PosRecord>& recs, double gap_s) {
+  TrackSplit out;
+  out.gap_s = gap_s;
+  size_t a = 0;
+  while (a < recs.size()) {
+    size_t b = a;
+    while (b + 1 < recs.size() && recs[b + 1].stamp - recs[b].stamp <= gap_s) ++b;
+    out.ranges.emplace_back(a, b);
+    out.endpoints += a == b ? 1 : 2;
+    a = b + 1;
+  }
+  return out;
+}
+
+// 设计决定 11 + final review:按 track_gap_s 断段;若段端点就占掉一半以上的点数上限(稀疏、断断续续的数据),
+// 说明这个比例尺下小间断本来就画不出来——把断开间隔逐次翻倍再分段,直到端点不超过上限的一半。
+// 间隔翻倍到超过全源时长时只剩一段,循环必然结束;长时间停车(远大于最终间隔)仍然断开。
+TrackSplit split_track(const std::vector<PosRecord>& recs, double track_gap_s, size_t max_points) {
+  TrackSplit split = split_with_gap(recs, track_gap_s);
+  double gap = std::max(track_gap_s, 1.0);
+  while (split.endpoints > max_points / 2 && split.ranges.size() > 1) {
+    gap *= 2.0;
+    split = split_with_gap(recs, gap);
+  }
+  return split;
+}
 }  // namespace
 
 std::vector<std::string> ordered_source_names(const std::map<std::string, std::vector<PosRecord>>& sources) {
@@ -196,21 +229,24 @@ ReportStats compute_report(const ReportInputs& in, const ReportParams& p) {
   for (const auto& name : names) {
     const auto& recs = in.sources.at(name);
     if (recs.empty()) continue;   // 空源不产生轨迹条目
-    const size_t stride = std::max<size_t>(1, (recs.size() + max_points - 1) / max_points);
     Track track;
     track.source = name;
-    size_t a = 0;
-    while (a < recs.size()) {
-      size_t b = a;
-      while (b + 1 < recs.size() && recs[b + 1].stamp - recs[b].stamp <= p.track_gap_s) ++b;
+    const auto split = split_track(recs, p.track_gap_s, max_points);
+    track.gap_s = split.gap_s;
+    // 段端点全保留;其余点按全源统一的步长抽稀,步长按"上限减去端点数"算,总点数不超过 max_points
+    const size_t ends = split.endpoints;
+    const size_t interior = recs.size() - ends;
+    const size_t budget = max_points - ends;
+    const size_t stride = budget == 0 ? interior + 1 : std::max<size_t>(1, (interior + budget - 1) / budget);
+    size_t interior_seen = 0;
+    for (const auto& [a, b] : split.ranges) {
       std::vector<TrackPoint> seg;
       for (size_t i = a; i <= b; ++i) {
-        if (i != a && i != b && (i - a) % stride != 0) continue;
+        if (i != a && i != b && (budget == 0 || (interior_seen++ % stride) != 0)) continue;
         const Eigen::Vector3d enu = origin->forward(recs[i].lat, recs[i].lon, recs[i].height);
         seg.push_back(TrackPoint{recs[i].stamp, enu.x(), enu.y(), recs[i].q});
       }
       track.segments.push_back(std::move(seg));
-      a = b + 1;
     }
     s.tracks.push_back(std::move(track));
   }

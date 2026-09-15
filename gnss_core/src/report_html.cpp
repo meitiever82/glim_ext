@@ -189,6 +189,12 @@ std::string section_track(const ReportStats& s) {
   const std::string origin = *s.track_origin == "事件" ? "第一个带位置的事件"
                                                         : html_escape(*s.track_origin) + " 的第一条记录";
   o += note("无底图；坐标为以" + origin + "为原点的局部东/北（米），北朝上。红圈数字对应第 7 节事件表的编号，即问题路段位置。");
+  for (const auto& track : s.tracks) {
+    if (track.gap_s > s.params.track_gap_s) {
+      o += note(html_escape(track.source) + " 记录多且断续，为控制图中点数，间隔不超过 " + fmt("%.0f", track.gap_s) +
+                " s 的断点已连成一条线（默认 " + fmt("%.0f", s.params.track_gap_s) + " s）。");
+    }
+  }
   return o + "</section>";
 }
 

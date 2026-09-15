@@ -84,6 +84,7 @@ struct TrackPoint {
 struct Track {
   std::string source;
   std::vector<std::vector<TrackPoint>> segments;   // 按时间断开的折线段
+  double gap_s = 0.0;                               // 实际使用的断开间隔(点太多时会大于 track_gap_s)
 };
 
 struct EventMarker {
