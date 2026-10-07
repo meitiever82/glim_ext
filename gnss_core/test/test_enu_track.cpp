@@ -136,7 +136,8 @@ TEST(EnuTrack, ReadSkipsCommentsAndMalformedLines) {
     "1789462172.000 1.0 2.0 3.0 0.1 0.2 0.3 4\n"
     "garbage line\n"
     "1789462173.000 4.0 5.0\n"            // 列数不足
-    "1789462174.000 7.0 8.0 9.0 0.1 0.2 0.3 3\n";
+    "1789462174.000 7.0 8.0 9.0 0.1 0.2 0.3 3\n"
+    "1789462175.000 10.0 11.0 12.0 0.1 0.2 0.3 99\n";  // q 越界(不是 0..4),应跳过
   std::istringstream is(text);
   const EnuTrack t = gnss_core::read_enu_track(is);
   ASSERT_EQ(t.samples.size(), 2u);
