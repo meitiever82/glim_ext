@@ -31,6 +31,11 @@ add_library(gnss_core SHARED
   src/diag_io.cpp
   src/retention.cpp
   src/diagnosis_engine.cpp
+  src/report_inputs.cpp
+  src/report_stats.cpp
+  src/report_svg.cpp
+  src/report_html.cpp
+  src/report_cli.cpp
 )
 target_include_directories(gnss_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -60,6 +65,11 @@ install(TARGETS synth_rtk_fix DESTINATION lib/${PROJECT_NAME})
 add_executable(estimate_lever_arm tools/estimate_lever_arm.cpp)
 target_link_libraries(estimate_lever_arm gnss_core)
 install(TARGETS estimate_lever_arm DESTINATION lib/${PROJECT_NAME})
+
+# --- 报告(轮 4a,spec §3 F2/F3):按天或时间窗生成自包含 HTML,浏览器打印为 PDF ---
+add_executable(gnss_report tools/gnss_report.cpp)
+target_link_libraries(gnss_report gnss_core)
+install(TARGETS gnss_report DESTINATION lib/${PROJECT_NAME})
 
 install(PROGRAMS tools/pos_to_rtkfix_bag.py tools/run_injection_suite.sh tools/traj_rmse.py
         DESTINATION lib/${PROJECT_NAME})
@@ -112,6 +122,13 @@ if(BUILD_TESTING)
   gnss_core_add_test(test_diag_io)
   gnss_core_add_test(test_retention)
   gnss_core_add_test(test_diagnosis_engine)
+  gnss_core_add_test(test_report_inputs)
+  gnss_core_add_test(test_report_stats)
+  gnss_core_add_test(test_report_svg)
+  gnss_core_add_test(test_report_html)
+  gnss_core_add_test(test_report_cli)
+  # 可执行文件本身能起来(参数解析与报告生成由 test_report_cli 覆盖)
+  add_test(NAME gnss_report_help COMMAND gnss_report --help)
 
   # tools/ 下的 Python 工具测试(unittest)。
   # 注意目录是 tests/(与 C++ 的 test/ 分开),必须显式注册,否则这些用例不会被 colcon test 跑到。

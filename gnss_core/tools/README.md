@@ -13,6 +13,7 @@ spec §9(v2)。这些工具只依赖 `gnss_core`(纯 C++)与 Python 3,不需要 
 | `run_injection_suite.sh` | 四种注入 × huber/none 跑 `glim_rosbag` 并汇总 RMSE 表(Orin;含 `### CHECK` 标注的现场核对点) |
 | `traj_rmse.py` | 两条 TUM 轨迹按时间配对算 RMSE(`evo_ape` 的回退,只依赖 numpy;支持 `--align`、时间窗) |
 | `estimate_lever_arm.cpp` | GLIM 轨迹 + RTK `.pos` → `lever_imu`、`T_world_enu`、`time_offset`;spec §9.3,Task 14 |
+| `gnss_report.cpp` | `gnss_report --root <目录> --day YYYYMMDD [--control-point N,LAT,LON]…`:按天或时间窗生成 GNSS 定位报告(自包含 HTML,浏览器打印为 PDF);spec §3 F2/F3,轮 4a |
 
 ## 1. 数据从哪来
 
@@ -153,3 +154,21 @@ tools/run_injection_suite.sh <lidar_bag_dir> /tmp/inj_suite
 - [ ] 结果写入 `glim_ext/config/config_rtk_global.json` 的 `quality_sigma_scale`
 - [ ] Orin 上首次运行 `pos_to_rtkfix_bag.py`(短 `.pos` 试跑 + `ros2 bag info` 核对),再跑 `run_injection_suite.sh`,把 `summary.txt` 贴到本 README
 - [ ] 实车 LiDAR+IMU bag 无 GNSS 跑出 `traj_imu.txt` + 同段 `RtkFix` 导出 `.pos`,跑 `estimate_lever_arm`,结果填入 config 并把 `sigma_floor` 降到 `[0.05,0.05,0.1]`
+
+## 7. 定位报告(`gnss_report`,spec §3 F2/F3)
+
+读取 `pos_writer` / `gnss_diag_node` 写出的 `<root>/YYYYMMDD/{*.pos,events.log,base.pos}`,生成一个自包含 HTML
+(内联 CSS 与 SVG,离线可看),浏览器打开后"打印 → 另存为 PDF"。
+
+```bash
+gnss_report --root /data/gnss/pos --day 20260915 --control-point K1,44.50123456,90.28765432
+gnss_report --root /data/gnss/pos --from "2026/09/15 08:00:00" --to "2026/09/15 18:00:00" --out shift.html
+```
+
+报告内容:固定解可用率(每个数据源一行)、分小时固定率、轨迹与问题路段(按解状态着色,标出事件位置)、
+绝对基准校验(需要 `--control-point`)、610(can/gpchc)与 rtkrcv 的偏差、基站坐标稳定性、事件汇总与明细。
+口径移植自 rtk-monitor 的 `report.py`,差异见 `glim_underground/docs/gnss/plans/2026-09-16-round4a-report-tool.md`「设计决定」。
+读不了的文件与解析不了的行会在终端打"警告",并列在报告开头,不会中断生成。
+`.pos` 的时间列可以是日历格式 `YYYY/MM/DD HH:MM:SS.sss`,也可以是 rnx2rtkp 默认的 GPS 周 + 周内秒
+(`WWWW SSSSSS.SSS`),都按表头的 GPST/UTC 换算;有内容却读出 0 条记录的文件会报警告。
+基站坐标稳定性以时间窗开始前最后一条 `base.pos` 记录为基准(往前逐日查找),因为 `base.pos` 只在坐标变化时才写。

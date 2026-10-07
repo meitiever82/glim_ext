@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +17,26 @@
 #include <system_error>
 
 namespace gnss_core {
+
+// "YYYY/MM/DD" + "HH:MM:SS.sss" → 按 UTC 日历合成 unix 秒。
+// 用 timegm 而非 mktime:后者受本机 TZ 影响。
+bool parse_utc_date_time(const std::string& date, const std::string& time, double& out) {
+  int Y = 0, M = 0, D = 0, h = 0, m = 0;
+  double s = 0.0;
+  if (std::sscanf(date.c_str(), "%d/%d/%d", &Y, &M, &D) != 3) return false;
+  if (std::sscanf(time.c_str(), "%d:%d:%lf", &h, &m, &s) != 3) return false;
+  std::tm tm{};
+  tm.tm_year = Y - 1900;
+  tm.tm_mon = M - 1;
+  tm.tm_mday = D;
+  tm.tm_hour = h;
+  tm.tm_min = m;
+  tm.tm_sec = 0;
+  const std::time_t base = timegm(&tm);
+  if (base == static_cast<std::time_t>(-1)) return false;
+  out = static_cast<double>(base) + s;
+  return true;
+}
 
 namespace {
 
@@ -227,26 +248,6 @@ TrailingLineOutcome truncate_incomplete_trailing_line(const std::filesystem::pat
   }
 }
 
-// "YYYY/MM/DD" + "HH:MM:SS.sss" → 按 UTC 日历合成 unix 秒。
-// 用 timegm 而非 mktime:后者受本机 TZ 影响。
-bool parse_date_time(const std::string& date, const std::string& time, double& out) {
-  int Y = 0, M = 0, D = 0, h = 0, m = 0;
-  double s = 0.0;
-  if (std::sscanf(date.c_str(), "%d/%d/%d", &Y, &M, &D) != 3) return false;
-  if (std::sscanf(time.c_str(), "%d:%d:%lf", &h, &m, &s) != 3) return false;
-  std::tm tm{};
-  tm.tm_year = Y - 1900;
-  tm.tm_mon = M - 1;
-  tm.tm_mday = D;
-  tm.tm_hour = h;
-  tm.tm_min = m;
-  tm.tm_sec = 0;
-  const std::time_t base = timegm(&tm);
-  if (base == static_cast<std::time_t>(-1)) return false;
-  out = static_cast<double>(base) + s;
-  return true;
-}
-
 }  // namespace
 
 #ifdef GNSS_CORE_WITH_TEST_HOOKS
@@ -406,6 +407,13 @@ std::string format_pos_record(const PosRecord& r, PosTimeSystem time_system, int
 
 void write_pos(const std::string& path, const std::vector<PosRecord>& records,
                PosTimeSystem time_system, int leap_seconds) {
+  // 与 PosWriter::open() 一致:父目录不存在时先建好(忽略"已存在"),
+  // 调用方不必自己先 mkdir -p 再写文件。
+  std::error_code ec;
+  const std::filesystem::path fp(path);
+  const auto parent = fp.parent_path();
+  if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+
   std::ofstream out(path);
   if (!out) throw std::runtime_error("write_pos: cannot open " + path);
 
@@ -559,6 +567,24 @@ void PosWriter::close() {
   if (out_.is_open()) out_.close();
 }
 
+namespace {
+// RTKLIB 的"GPS 周 + 周内秒"时间列(rnx2rtkp 默认输出,"%4d %10.3f"):week 为 1–4 位非负整数,
+// tow 为 [0, 604800) 内的有限小数(不含 ':')。按日历直接相加,不做闰秒——闰秒由调用方按时间系统统一减。
+// 315964800 = GPS 历元 1980-01-06 00:00:00 的 unix 秒。
+bool parse_week_tow(const std::string& week_s, const std::string& tow_s, double& out) {
+  if (week_s.empty() || week_s.size() > 4) return false;
+  for (char c : week_s) {
+    if (c < '0' || c > '9') return false;
+  }
+  if (tow_s.empty() || tow_s.find(':') != std::string::npos) return false;
+  char* end = nullptr;
+  const double tow = std::strtod(tow_s.c_str(), &end);
+  if (end != tow_s.c_str() + tow_s.size() || !std::isfinite(tow) || tow < 0.0 || tow >= 604800.0) return false;
+  out = 315964800.0 + std::stod(week_s) * 604800.0 + tow;
+  return true;
+}
+}  // namespace
+
 bool parse_llh_solution(const std::string& line, PosRecord& out, const PosReadOptions& opt) {
   // 空行 / 全空白 / 注释行不是数据
   const size_t first = line.find_first_not_of(" \t\r\n");
@@ -577,7 +603,7 @@ bool parse_llh_solution(const std::string& line, PosRecord& out, const PosReadOp
   ss >> sdne_ >> sdeu_ >> sdun_ >> r.age >> r.ratio;
 
   double stamp = 0.0;
-  if (!parse_date_time(date, time, stamp)) return false;
+  if (!parse_utc_date_time(date, time, stamp) && !parse_week_tow(date, time, stamp)) return false;
   if (opt.default_time_system == PosTimeSystem::GPST) stamp -= static_cast<double>(opt.leap_seconds);
   r.stamp = stamp;
   out = r;

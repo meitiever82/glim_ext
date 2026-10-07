@@ -30,8 +30,13 @@ struct PosReadOptions {
   PosTimeSystem default_time_system = PosTimeSystem::GPST;
 };
 
+// "YYYY/MM/DD" + "HH:MM:SS.sss" 按 UTC 日历合成 unix 秒(timegm,不受本机 TZ 影响);
+// 字段读不出来返回 false。.pos、events.log、base.pos 的时间列共用。
+bool parse_utc_date_time(const std::string& date, const std::string& time, double& out);
+
 // 读取 .pos:跳过 % 注释行(但扫描其中 time=GPST/UTC);
-// 数据列 "YYYY/MM/DD HH:MM:SS.sss lat lon height Q ns sdn sde sdu sdne sdeu sdun age ratio"。
+// 数据列 "YYYY/MM/DD HH:MM:SS.sss lat lon height Q ns sdn sde sdu sdne sdeu sdun age ratio";
+// 时间列也可以是 RTKLIB 的 "WWWW SSSSSS.SSS"(GPS 周 + 周内秒,rnx2rtkp 默认),同样按表头时间系统换算。
 // 列数不足 10(到 sdu)的行跳过;age/ratio 缺省为 0。文件打不开抛
 // std::runtime_error;读到一半真的撞上 I/O 错误(std::getline 内部把流
 // 设成 badbit,这种情况下 libstdc++ 不会抛异常)也会抛同一个
@@ -49,6 +54,7 @@ std::vector<PosRecord> read_pos(std::istream& in, const PosReadOptions& opt = {}
 
 // 写标准 RTKLIB .pos(头 "% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,...,time=GPST|UTC)" + 列名注释 + 14 列数据)。
 // records.stamp 为 UTC unix 秒;time_system=GPST 时写出时间加 leap_seconds。
+// 父目录不存在时先创建(与 PosWriter::open() 一致),调用方不必自己 mkdir -p。
 void write_pos(const std::string& path, const std::vector<PosRecord>& records,
                PosTimeSystem time_system = PosTimeSystem::GPST, int leap_seconds = 18);
 

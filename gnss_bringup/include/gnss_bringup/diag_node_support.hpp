@@ -8,7 +8,6 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -141,16 +140,10 @@ private:
   gnss_core::LineAppender out_;
 };
 
-// base.pos 数据行:"YYYY/MM/DD HH:MM:SS.sss x y z"(gnss_core::format_base_history_line)。
-// 注释行、空行、字段不全(掉电留下的半行)、非有限坐标都返回空。
+// base.pos 数据行 → ECEF;解析规则见 gnss_core::parse_base_history_line(注释行、半行、非有限坐标返回空)。
 inline std::optional<gnss_core::Ecef> parse_base_history_line(const std::string& line) {
-  if (line.empty() || line[0] == '%') return std::nullopt;
-  std::istringstream in(line);
-  std::string date, time;
-  gnss_core::Ecef p;
-  if (!(in >> date >> time >> p.x >> p.y >> p.z)) return std::nullopt;
-  if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return std::nullopt;
-  return p;
+  if (const auto r = gnss_core::parse_base_history_line(line)) return r->second;
+  return std::nullopt;
 }
 
 // 设计决定 6:从 <root> 下日期最新、含有效数据行的 YYYYMMDD/base.pos 取最后一个有效行;
