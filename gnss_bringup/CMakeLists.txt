@@ -204,6 +204,11 @@ if(BUILD_TESTING)
   add_dependencies(test_gnss_cleanup_node_process gnss_cleanup_node)
   target_compile_definitions(test_gnss_cleanup_node_process PRIVATE
     GNSS_CLEANUP_NODE_PATH="$<TARGET_FILE:gnss_cleanup_node>")
+
+  # 现场回放工具的纯函数(unittest,不用 pytest:开发机 pytest 与 launch_testing 插件冲突)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME test_field_replay_py
+    COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/tools/field_replay/tests -v)
 endif()
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
@@ -213,6 +218,22 @@ install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 # rtcm_bridge/rtkrcv_node/pos_writer 一样直接按包名+文件名找到它
 # (`ros2 run` 只在 lib/<package> 下查找可执行文件)。
 install(PROGRAMS scripts/record_gnss.sh DESTINATION lib/${PROJECT_NAME})
+
+# 现场数据回放工具(tools/field_replay/README.md):可执行脚本与它们 import 的纯函数模块装在
+# 同一目录,`ros2 run gnss_bringup run_field_integration.sh <A|B|dry|dryB> <seg>` 可直接用;
+# rnx_nav_to_rtcm.c 由 run_field_integration.sh 在运行时编译(依赖 RTKLIB 源码树,不进 CMake 构建)。
+install(PROGRAMS
+  tools/field_replay/field_replay.py
+  tools/field_replay/run_field_integration.sh
+  tools/field_replay/can_sigma_patch.py
+  tools/field_replay/field_eval.py
+  DESTINATION lib/${PROJECT_NAME})
+install(FILES
+  tools/field_replay/replay_plan.py
+  tools/field_replay/stream_timing.py
+  tools/field_replay/candump_log.py
+  tools/field_replay/rnx_nav_to_rtcm.c
+  DESTINATION lib/${PROJECT_NAME})
 
 ament_export_targets(gnss_bringup-targets HAS_LIBRARY_TARGET)
 ament_package()

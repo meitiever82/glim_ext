@@ -1,0 +1,160 @@
+# field_replay —— 现场数据整链路回放
+
+把一段实车记录(平台差分 `base.rtcm3`、610 原始输出 `cgi610.dat`、CAN 抓包
+`can7.candump.log`)按数据自带时间 1× 实时喂进 GNSS 链路:
+
+```
+base.rtcm3 ──TCP:15031──┐
+                        ├─ rtcm_bridge ─ /gnss/rtcm_corrections, /gnss/raw_obs ─ rtkrcv_node(rtkrcv, oem4)
+cgi610.dat ──TCP:15032──┘                                                          └─ /rtkrcv_node/rtk_fix
+can_with_sigma.log ─ canplayer ─ vcan0 ─ gnss_chcnav_can(gnss_cgi610) ─ /gnss_cgi610/rtk_fix
+/clock(field_replay 50 Hz)─ gnss_diag_node(use_sim_time)
+pos_writer → pos/YYYYMMDD/{can,rtkrcv}.pos;gnss_diag → diag/;record_gnss.sh → bags/
+```
+
+## 前置条件
+
+- `vcan0` 已建好且 UP(需要 sudo,维护者操作):
+  `sudo modprobe vcan && sudo ip link add dev vcan0 type vcan && sudo ip link set up vcan0`
+- `can-utils`(`canplayer`)。
+- RTKLIB-EX 2.5.1:`/usr/local/bin/rtkrcv`、`/usr/local/lib/librtklib.so`,源码树
+  (默认 `/home/steve/Documents/GitHub/gnss-alg/RTKLIB-2.5.1`,可用 `RTKLIB_SRC` 覆盖)——方案 B
+  现场编译 `rnx_nav_to_rtcm.c` 要用它的头文件。
+- `glim_ws` 已编译 `gnss_core gnss_bringup`;`driver_ws` 已编译 `gnss_msgs gnss_chcnav`
+  (`colcon build --symlink-install --packages-select gnss_msgs gnss_chcnav`)。
+- Python 3 + PyYAML(ROS Humble 自带)。
+
+## 用法
+
+```bash
+run_field_integration.sh [--force] <A|B|dry|dryB> <seg> [duration_s]
+# 装好后也可以:ros2 run gnss_bringup run_field_integration.sh …
+```
+
+| 模式 | 差分流 | 星历注入 | 时长 | 运行目录 |
+|---|---|---|---|---|
+| `A` | `base.rtcm3` 原样 | 无 | 整段 | `$INTEG/run_A` |
+| `B` | `base.rtcm3` | `rover.nav` → RTCM3(1019/1020/1042/1045/1046),第一块之前一次、之后每 30 数据秒一次 | 整段 | `run_B` |
+| `dry` | 同 A | 无 | 前 `duration_s` 数据秒(默认 90) | `run_dry` |
+| `dryB` | 同 B | 同 B | 前 `duration_s` 数据秒(默认 90) | `run_dryB` |
+
+**产物根目录与覆盖保护**:
+
+- `INTEG` = 环境变量 `GNSS_FIELD_INTEG_DIR`;没给时,`<seg>/integration_20260916` 存在就用它(兼容 2026-09-16
+  那一轮),否则用 `<seg>/integration_<今天 YYYYMMDD>`。`INTEG` 必须事先建好(数据段只读,脚本不在数据段里建目录),
+  路径里要有 `integration_*` 这一级(清空前的名字守卫)。
+- `run_<mode>` 已存在且非空时**默认拒绝**(退出码 2),以免覆盖已有结果;确认可以丢弃时加 `--force`。
+  **2026-09-16 那一轮的 `run_A`/`run_B` 是结果文档引用的证据,重跑请换新目录**:
+  `mkdir -p <seg>/integration_$(date +%Y%m%d) && GNSS_FIELD_INTEG_DIR=<seg>/integration_$(date +%Y%m%d) run_field_integration.sh A <seg>`。
+- 工作空间:`GLIM_WS_INSTALL`(默认 `/home/steve/glim_ws/install`)、`DRIVER_WS_INSTALL`(默认
+  `/home/steve/driver_ws/install`),脚本依次 source `/opt/ros/humble`、这两个 overlay。
+
+A 的观测流里 610 没有输出 GPS 星历(只有 13 条 Galileo、1 条北斗),rtkrcv 很可能解不出;
+B 用当天更早的星历补上,用来区分"链路问题"和"星历缺失"。
+
+脚本做的事:检查运行目录(非空要 `--force`)→ 清空运行目录 → 生成补 σ 帧的 CAN 日志副本(和 B 的星历电文)→ 写 `params.yaml`
+→ 后台起 `gnss_bringup.launch.py`(`enable_rtkrcv:=true enable_diag:=false enable_cleanup:=false`)、
+`gnss_diag_node`(`use_sim_time:=true`)、`gnss_chcnav_can`(节点名 `gnss_cgi610`,`vcan0`,
+`timestamp_source:=gps`)、`record_gnss.sh` → 5 s 后前台跑 `field_replay.py` → 依次 SIGINT
+录包、诊断、驱动、launch(各等 20 s,超时 SIGKILL 并记录)→ 检查残留进程 → 打印产物清单、
+`ros2 bag info` 与各日志尾部。
+
+**开始时刻**:`field_replay.py` 等 `rtcm_bridge` 连上两个端口之后,还要等 rtkrcv 连上 rtkrcv_node 的本机端口
+(`corr_port`/`obs_port`,默认 15041/15042)才开始发数据(`--wait-connected-ports`,最多等 `--downstream-timeout` 25 s)。
+原因:rtkrcv_node 在没有 rtkrcv 连入时收到的字节直接丢弃。
+历史:2026-09-16 dryB 试跑时 `rtkrcv.conf` 还没写 `misc-timeout`,rtkrcv 的 tcpcli 输入 10 s 没数据就断开、10 s 后才重连,
+回放开头落在断开窗口里丢了 5 s 观测和第一次星历注入;当时改成等一次"先断后连"的新连接(`--wait-fresh-ports`)。
+gnss_bringup Task 6 F2 让 conf 固定写 `misc-timeout =0`、`misc-reconnect =1000` 之后连接不再空闲断开,
+旧等法永远等不到(实测等满 25 s 退出 3),改为只要求端口上此刻有连接。
+
+残留进程检查(开跑前与收尾后各一次)的模式锚定在程序名上(脚本自身、grep/tail 日志的 shell 不算):
+rtkrcv、各节点、canplayer、field_replay.py 不分 ROS domain 一律算(同名进程会抢 vcan0 与本机端口);
+通用的 `ros2 bag|launch|run` 只算环境里 `ROS_DOMAIN_ID=66` 的(读 `/proc/<pid>/environ`),别的终端里无关的
+ros2 命令不误报。收尾时若 rtkrcv 没被节点停掉,兜底只杀"rtkrcv 程序且 `-o` 正好是本次 `rtkrcv/rtkrcv.conf`"的进程。
+`--print-proc-pat`、`--print-ros2-cli-pat`、`--print-rtkrcv-pat <run>`、`--list-leftovers` 用于自检,
+`tests/test_proc_pattern.py` 用样例命令行和伪装成 `ros2 launch` 的真进程校验漏报/误报。
+
+排查:`RTKRCV_TRACE_LEVEL=3 run_field_integration.sh dryB <seg> 50` 给 rtkrcv 加 `-t 3`,
+trace 写在 `rtkrcv/rtkrcv_*.trace`(level 3 约 1 MB / 50 s)。
+
+隔离:`ROS_DOMAIN_ID=66`、`ROS_LOG_DIR=$RUN/roslog`。**跑回放时不要同时跑 `colcon test`**
+(rtkrcv 节点测试用 40–89 的 domain)。
+
+### 产物目录
+
+```
+run_<mode>/
+  params.yaml             gnss_bringup.yaml 的覆盖:obs_format=oem4、run_dir、pos/diag 根目录、
+                          sources=[can, rtkrcv]、startup_grace_s=60
+  can_with_sigma.log      CAN 日志副本 + 每周期补 0x326/0x328/0x32B 全零帧(σ 是假的!)
+  nav.rtcm3, tools/       (B/dryB)星历电文与编译出的 rnx_nav_to_rtcm
+  rtkrcv/                 rtkrcv.conf、rtkrcv_*.stat
+  pos/YYYYMMDD/           can.pos、rtkrcv.pos(日期按 gnss_time)
+  diag/YYYYMMDD/          events.log、base.pos(按 sim time,即数据日期);diag/base_baseline
+  bags/gnss_*/            录包:默认六个话题 + /gnss/diagnostics /rtkrcv_node/diagnostics /clock
+  logs/                   run.log(本脚本)、field_replay.log、bringup.log、gnss_diag.log、
+                          gnss_chcnav.log、record.log、(B)rnx_nav_to_rtcm_build.log
+  roslog/
+```
+
+## 为什么要补 σ 帧
+
+这台车的 610 CAN 输出没有 0x326/0x328/0x32B;`gnss_chcnav_can` 要求每个 50 Hz 周期 14 条报文
+齐全才发布,缺了就整周期丢弃——**实车上同样一条消息都不会发**。回放用 `can_sigma_patch.py`
+在每个周期(从 0x320 开始)最后一条原始帧之后补三条全零帧(时间戳照抄该帧),让驱动的其余链路
+能跑通。`can.pos` 的 σ 列因此没有意义。
+
+## 组件
+
+| 文件 | 作用 |
+|---|---|
+| `field_replay.py` | 编排器:两路 TCP 服务端、canplayer 调度、`/clock`、星历注入、字节核对 |
+| `replay_plan.py` | 纯函数:整文件原始字节按帧边界切块、块时刻(帧时间累计最大值)、周期注入、截断 |
+| `stream_timing.py` | 纯函数:RTCM3 / NovAtel 分帧与帧时间(Task 2) |
+| `candump_log.py` | 纯函数:candump 行解析(Task 2) |
+| `can_sigma_patch.py` | 纯函数 + CLI:CAN 日志补 σ 帧 |
+| `rnx_nav_to_rtcm.c` | RINEX 星历 → RTCM3 星历电文(运行时编译) |
+| `field_eval.py` | 一遍运行的结果评估 → Markdown(各源概况、rtkrcv/can 对 ref、杆臂、基站、事件核对、诊断话题) |
+| `tests/` | `python3 -m unittest discover -s tests`(不用 pytest) |
+
+### field_replay.py 单独使用
+
+```bash
+field_replay.py --rtcm <base.rtcm3> --obs <cgi610.dat> [--can-log <log>] [--nav-rtcm <eph.rtcm3>] \
+  [--corr-port 15031] [--obs-port 15032] [--can-iface vcan0] [--can-log-iface can7] \
+  [--speed 1.0] [--connect-timeout 60] [--reconnect-timeout 30] [--leap 18] \
+  [--wait-connected-ports 15041,15042] [--downstream-timeout 25] [--duration-s N] [--tail-clock-s 10]
+```
+
+- 发的是**文件原始字节**,按文件顺序:每块 = 上一帧末尾之后到本帧末尾的全部字节(`cgi610.dat`
+  里夹带的 `\n` 与 RTCM3 帧随下一条 NovAtel 帧一起发);块时刻 = 截至本帧的帧时间最大值
+  (RANGECMPB 时间最多往回 190 ms)。整段回放结束时打印"已发字节 = 文件大小 + 注入星历字节"。
+- `t0` = 三路里最早的数据时刻。`W0` 的时刻:两个端口都被 `rtcm_bridge` 连上之后;给了 `--wait-connected-ports`
+  (`run_field_integration.sh` 总是给)时,还要再等这些本机端口上都有连接,那一刻才记 `W0`。
+  `/clock` 从 `W0` 开始发布,`/clock = t0 + (monotonic − W0)·speed`。
+- `--downstream-timeout` 默认 25 s,必须小于 `rtcm_bridge` 的 `idle_timeout_s`(30 s):等待期间两个上游连接上
+  一个字节都没有,超过 30 s bridge 会因空闲断开。超时退出码 3。
+- 退出码:0 正常;2 输入/端口错误;3 `rtcm_bridge` 未连接或 `--wait-connected-ports` 超时;4 断线后未重连;
+  5 canplayer 异常;130 信号。
+- `--speed` 只影响 TCP 与 `/clock`,canplayer 没有倍速,带 CAN 时应保持 1×。
+
+## 结果评估 field_eval.py
+
+```bash
+source /opt/ros/humble/setup.bash; source ~/glim_ws/install/setup.bash; source ~/driver_ws/install/setup.bash   # 读录包要用
+ros2 run gnss_bringup field_eval.py --run $INTEG/run_B --ref <seg>/gnss/rtk_check.pos \
+  --out $INTEG/eval/B.md [--bag <run>/bags/gnss_*] [--label B] [--pair-tol 0.1]
+# 不 source ROS 时直接用源码树里的脚本:python3 gnss_bringup/tools/field_replay/field_eval.py …(航向退回 can.pos 航迹向)
+```
+
+- 退出码:0 已写出;2 输入不可用(例如 `--ref` 里一条可解析的记录都没有),不写输出文件。
+
+- `.pos` 两种时间列都认:pos_writer 的"日期 时间"(头部 `time=GPST`)和 rnx2rtkp 默认的"GPS 周 周内秒"。
+  GPST 一律减 18 s 换成 UTC 再配对。注意 `gnss_core` 的 `read_pos`(因而 `calibrate_sigma_scale`)
+  只认"日期 时间"列,直接喂 rnx2rtkp 默认输出会读到 0 条;要用它时让 rnx2rtkp 加 `-t` 输出日期时间。
+- 位置差 = 源 − ref,在 ref 点的当地 ENU 下计算;按时间一对一配对,容差 0.1 s。
+- 杆臂分析的航向优先取录包 `/gnss_cgi610/rtk_fix.heading`(heading_valid=true)。没有 ROS 环境或录包时,
+  退回用 can.pos 相邻历元的航迹向(速度 > 1 m/s),输出里会写明用的是哪种。
+- 事件核对只回答"事件描述的现象与原因跟同期 ref/rtkrcv/can 数据是否相符",判据写在每行的依据里;
+  multipath / cycle_slip 在 pos 层面验证不了,标"无法判定"。
+- 测试:`tests/test_field_eval.py`(合成数据:两种 .pos 格式、时间配对、分位数、ENU/车体系分解、events.log 解析)。

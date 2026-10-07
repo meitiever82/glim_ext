@@ -221,6 +221,15 @@ rtcm_bridge:
   是北斗/GLONASS 模糊度固定开关,默认值与 RTKLIB-EX 2.5.1 一致,现场按固定率调整。
   所有枚举参数在节点启动时按 RTKLIB-EX 2.5.1 的取值表校验,写错直接拒绝启动——
   rtkrcv 自己遇到非法取值只会悄悄回落到默认值继续跑。
+- **`ar_elmask`(默认 15.0 度)**——参与模糊度固定的卫星高度角门限,对应 conf 的
+  `pos2-arelmask`(RTKLIB 自身默认 0,即不限制)。`elmask`(10°)以上、`ar_elmask` 以下的卫星
+  参与浮点解但不参与固定。红沙泉 2026-09-15 实测:不设此项 0/498 历元固定,设 15 后 490/498。
+  取值 [0,90];小于 `elmask` 时不起作用。15° 只在这一段约 8 分钟的开阔天空数据上测过,换场景要复测。
+  **副作用(未修,待定)**:设了 `pos2-arelmask` 后,rtkrcv 在某历元不尝试模糊度固定时(例如
+  `ar_elmask` 以上卫星不够——半遮挡、洞口过渡区常见)把 ratio 写成 0;`gnss_diag` 把 ratio ≤ 0
+  当作"源不提供"(`diag_node_support.hpp`),于是 `ambiguity` 规则在这些历元不会触发。该段原样回放
+  修复前有 2 次 ambiguity 事件、修复后 0 次。证据与可选修法见 glim_underground
+  `docs/gnss/field/2026-09-16-hongshaquan-seg164931-integration.md` §7 问题 16。诊断规则本身没有改。
 - **`leap_seconds`(默认 18)**——GPST 与 UTC 之间的闰秒偏移量。这个值不是常量,
   IERS 每次宣布插入新闰秒后都需要手动更新;`rtkrcv_node` 用它把解算历元
   (GPST)换算成 UTC。
@@ -236,6 +245,12 @@ rtcm_bridge:
   `TcpStream` 当成"彻底关闭空闲检测"的哨兵值,而这条自愈能力
   ("`rtkrcv` 连接卡死了要能被自动发现并恢复")正是这个节点存在的核心意义,
   不允许通过配置在现场被悄悄关掉。
+
+**不是参数、固定写进 conf 的两项**:`misc-timeout =0`(rtkrcv 的两路本机 tcpcli 输入不做空闲断开)、
+`misc-reconnect =1000`(对端关闭后 1 s 重连)。RTKLIB 默认各 10000 ms:差分中断 10 s 就断开、再过
+10 s 才重连,这段时间 `rtkrcv_node` 收到的字节没有人接收、被直接丢弃——隧道里 ≥10 s 的差分中断是
+常态。上行字节没有任何 rtkrcv 连接接收时,`rtkrcv_node` 每 10 s 打一条 WARN(带累计丢弃字节数);
+rtkrcv 启动/重启的头几秒出现属正常。
 
 完整参数表见 `config/gnss_bringup.yaml` 里的注释——文件本身就是文档,每个参数
 旁边都带着来源(哪个节点声明、默认值多少)。

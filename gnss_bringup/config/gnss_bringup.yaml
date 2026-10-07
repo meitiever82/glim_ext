@@ -63,6 +63,17 @@ rtkrcv_node:
     pos_mode: "kinematic"
     navsys: 63
     elmask: 10.0
+    # 参与模糊度固定的卫星高度角门限(度,conf 的 pos2-arelmask;取值 [0,90])。高于 elmask、
+    # 低于它的卫星照样参与浮点解,只是不参与固定;小于 elmask 时等于不起作用。
+    # 依据(红沙泉 2026-09-15 seg_164931_165748,rnx2rtkp 离线复现,与实时 rtkrcv 逐历元一致):
+    # elmask 10 不设此项 → 0/498 历元固定(10–15° 的卫星伪距多路径 2–20 m,ratio 停在 1.1–1.6);
+    # elmask 10 + ar_elmask 15 → 490/498 固定,首次固定 +8 s(单改 elmask 15 为 486/498、+12 s)。
+    # 15° 这个默认值只在这一段约 8 分钟、开阔天空的数据上测过,换场景(隧道口、半遮挡)要复测。
+    # 副作用(未修,待维护者定):设了 pos2-arelmask 后,rtkrcv 在某历元不尝试模糊度固定时(如
+    # ar_elmask 以上卫星不够,半遮挡/洞口过渡区常见)把 ratio 写成 0;gnss_diag 把 ratio ≤ 0 当作
+    # "源不提供",ambiguity 规则在这些历元不会触发(该段 A 回放:A0 有 2 次 ambiguity,A 为 0 次)。
+    # 详见 glim_underground docs/gnss/field/2026-09-16-hongshaquan-seg164931-integration.md §7 问题 16。
+    ar_elmask: 15.0
     ar_mode: "continuous"
     # 基准站坐标来源(conf 的 ant2-postype)。"rtcm":取平台差分流里的 RTCM
     # 1005/1006(默认——前提是差分流带这两条电文,现场待确认);"single":用基准站

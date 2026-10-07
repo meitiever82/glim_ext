@@ -2,6 +2,7 @@
 #include <string>
 #include <cmath>
 #include <limits>
+#include <sstream>
 #include "gnss_bringup/rtkrcv_conf.hpp"
 using namespace gnss_bringup;
 
@@ -232,4 +233,137 @@ TEST(RtkrcvConf, NavsysOutsideTheSystemBitmaskIsRejected) {
   EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument);
   p.navsys = 127;
   EXPECT_NO_THROW(render_rtkrcv_conf(p));
+}
+
+// ---------- Task 6 F1:模糊度固定的高度角门限(pos2-arelmask)----------
+
+TEST(RtkrcvConf, ArElevationMaskDefaultsTo15Degrees) {
+  // 现场回归(红沙泉 2026-09-15 seg_164931_165748,rnx2rtkp 离线复现与实时一致):
+  // elmask 10、不写 arelmask 时 0/498 固定;elmask 10 + arelmask 15 时 490/498,首次固定 +8 s。
+  // 10–15° 的卫星伪距多路径大,参与浮点解无妨,参与模糊度固定会把 ratio 压在 1.1–1.6。
+  const auto c = render_rtkrcv_conf(RtkrcvConfParams{});
+  EXPECT_TRUE(has_line(c, "pos1-elmask =10")) << c;
+  EXPECT_TRUE(has_line(c, "pos2-arelmask =15")) << c;
+}
+
+TEST(RtkrcvConf, ArElevationMaskIsConfigurable) {
+  RtkrcvConfParams p;
+  p.ar_elmask = 12.5;
+  EXPECT_TRUE(has_line(render_rtkrcv_conf(p), "pos2-arelmask =12.5"));
+  p.ar_elmask = 0.0;
+  EXPECT_TRUE(has_line(render_rtkrcv_conf(p), "pos2-arelmask =0"));
+  p.ar_elmask = 90.0;
+  EXPECT_TRUE(has_line(render_rtkrcv_conf(p), "pos2-arelmask =90"));
+}
+
+TEST(RtkrcvConf, ArElevationMaskBelowElmaskIsAcceptedAsHarmless) {
+  // RTKLIB-EX 2.5.1 rtkpos.c 里 elmaskar 只在挑选参与固定的卫星时比较;低于 elmask 的卫星
+  // 本来就不在解里,所以 ar_elmask < elmask 等于不起作用,不是错误配置
+  RtkrcvConfParams p;
+  p.elmask = 15.0;
+  p.ar_elmask = 5.0;
+  EXPECT_TRUE(has_line(render_rtkrcv_conf(p), "pos2-arelmask =5"));
+}
+
+TEST(RtkrcvConf, ArElevationMaskOutOfRangeOrNonFiniteIsRejected) {
+  for (double bad : {-0.5, 90.5, std::nan(""), std::numeric_limits<double>::infinity(),
+                     -std::numeric_limits<double>::infinity()}) {
+    RtkrcvConfParams p;
+    p.ar_elmask = bad;
+    EXPECT_THROW(render_rtkrcv_conf(p), std::invalid_argument) << bad;
+  }
+}
+
+// ---------- 键名防拼错:rtkrcv 对不认识的键静默忽略 ----------
+namespace {
+// 抄自 RTKLIB-EX 2.5.1 源码(/home/steve/Documents/GitHub/gnss-alg/RTKLIB-2.5.1,
+// src/options.c sysopts[] sha256 92751e9f…,app/consapp/rtkrcv/rtkrcv.c rcvopts[] sha256 4e6d36f7…),
+// 保持表内原顺序。提取命令:grep -oP '^\s*\{"\K[^"]+(?=",\s*\d)' <file>
+const char* const kSysopts[] = {
+    "pos1-posmode", "pos1-frequency", "pos1-soltype", "pos1-elmask", "pos1-snrmask_r",
+    "pos1-snrmask_b", "pos1-snrmask_L1", "pos1-snrmask_L2", "pos1-snrmask_L5", "pos1-snrmask_L6",
+    "pos1-dynamics", "pos1-tidecorr", "pos1-ionoopt", "pos1-tropopt", "pos1-sateph",
+    "pos1-posopt1", "pos1-posopt2", "pos1-posopt3", "pos1-posopt4", "pos1-posopt5",
+    "pos1-posopt6", "pos1-exclsats", "pos1-navsys", "pos2-armode", "pos2-gloarmode",
+    "pos2-bdsarmode", "pos2-arfilter", "pos2-arthres", "pos2-arthresmin", "pos2-arthresmax",
+    "pos2-arthres1", "pos2-arthres2", "pos2-arthres3", "pos2-arthres4", "pos2-varholdamb",
+    "pos2-gainholdamb", "pos2-arlockcnt", "pos2-minfixsats", "pos2-minholdsats", "pos2-mindropsats",
+    "pos2-arelmask", "pos2-arminfix", "pos2-armaxiter", "pos2-elmaskhold", "pos2-aroutcnt",
+    "pos2-maxage", "pos2-syncsol", "pos2-slipthres", "pos2-dopthres", "pos2-rejionno",
+    "pos2-rejphase", "pos2-rejcode", "pos2-niter", "pos2-baselen", "pos2-basesig",
+    "out-solformat", "out-outhead", "out-outopt", "out-outvel", "out-timesys",
+    "out-timeform", "out-timendec", "out-degform", "out-fieldsep", "out-outsingle",
+    "out-maxsolstd", "out-height", "out-geoid", "out-solstatic", "out-nmeaintv1",
+    "out-nmeaintv2", "out-outstat", "stats-eratio1", "stats-eratio2", "stats-eratio5",
+    "stats-eratio6", "stats-errphase", "stats-errphaseel", "stats-errphasebl", "stats-errdoppler",
+    "stats-snrmax", "stats-errsnr", "stats-errrcv", "stats-stdbias", "stats-stdiono",
+    "stats-stdtrop", "stats-prnaccelh", "stats-prnaccelv", "stats-prnbias", "stats-prniono",
+    "stats-prntrop", "stats-prnpos", "stats-clkstab", "ant1-postype", "ant1-pos1",
+    "ant1-pos2", "ant1-pos3", "ant1-anttype", "ant1-antdele", "ant1-antdeln",
+    "ant1-antdelu", "ant2-postype", "ant2-pos1", "ant2-pos2", "ant2-pos3",
+    "ant2-anttype", "ant2-antdele", "ant2-antdeln", "ant2-antdelu", "ant2-maxaveep",
+    "ant2-initrst", "misc-timeinterp", "misc-sbasatsel", "misc-rnxopt1", "misc-rnxopt2",
+    "misc-pppopt", "file-satantfile", "file-rcvantfile", "file-staposfile", "file-geoidfile",
+    "file-ionofile", "file-dcbfile", "file-eopfile", "file-blqfile", "file-tempdir",
+    "file-geexefile", "file-solstatfile", "file-tracefile"};
+const char* const kRcvopts[] = {
+    "console-passwd", "console-timetype", "console-soltype", "console-solflag", "inpstr1-type",
+    "inpstr2-type", "inpstr3-type", "inpstr1-path", "inpstr2-path", "inpstr3-path",
+    "inpstr1-format", "inpstr2-format", "inpstr3-format", "inpstr1-rcvopt", "inpstr2-rcvopt",
+    "inpstr3-rcvopt", "inpstr2-nmeareq", "inpstr2-nmealat", "inpstr2-nmealon", "inpstr2-nmeahgt",
+    "outstr1-type", "outstr2-type", "outstr1-path", "outstr2-path", "outstr1-format",
+    "outstr2-format", "logstr1-type", "logstr2-type", "logstr3-type", "logstr1-path",
+    "logstr2-path", "logstr3-path", "misc-svrcycle", "misc-timeout", "misc-reconnect",
+    "misc-nmeacycle", "misc-buffsize", "misc-navmsgsel", "misc-proxyaddr", "misc-fswapmargin",
+    "misc-startcmd", "misc-stopcmd", "file-cmdfile1", "file-cmdfile2", "file-cmdfile3"};
+
+// 照搬 options.c searchopt():按表序返回第一个"表内键名包含给定键"的条目(strstr,不是全等)
+template <std::size_t N>
+const char* rtklib_searchopt(const std::string& key, const char* const (&table)[N]) {
+  for (std::size_t i = 0; i < N; ++i) {
+    if (std::string(table[i]).find(key) != std::string::npos) return table[i];
+  }
+  return nullptr;
+}
+}  // namespace
+
+TEST(RtkrcvConf, EveryRenderedKeyResolvesToItselfInRtklibEx251OptionTables) {
+  // rtkrcv 先后用 rcvopts、sysopts 两张表 loadopts 同一份 conf,查不到的键直接 continue(无任何输出)。
+  // 所以键名拼错不会报错,只是设置不生效;而且 searchopt 是子串匹配,键名还不能是别的键的子串。
+  const auto c = render_rtkrcv_conf(RtkrcvConfParams{});
+  std::istringstream in(c);
+  std::string line;
+  int n = 0;
+  while (std::getline(in, line)) {
+    const auto eq = line.find('=');
+    ASSERT_NE(eq, std::string::npos) << line;
+    std::string key = line.substr(0, eq);
+    while (!key.empty() && key.back() == ' ') key.pop_back();
+    const char* sys = rtklib_searchopt(key, kSysopts);
+    const char* rcv = rtklib_searchopt(key, kRcvopts);
+    EXPECT_TRUE(sys != nullptr || rcv != nullptr) << "RTKLIB-EX 2.5.1 不认识的键: " << key;
+    if (sys) EXPECT_EQ(std::string(sys), key) << "sysopts 会把 " << key << " 当成 " << sys;
+    if (rcv) EXPECT_EQ(std::string(rcv), key) << "rcvopts 会把 " << key << " 当成 " << rcv;
+    ++n;
+  }
+  EXPECT_GT(n, 0);  // 防止空串让本用例空转
+}
+
+// ---------- Task 6 F2:输入流空闲断开 / 重连间隔(misc-timeout / misc-reconnect)----------
+
+TEST(RtkrcvConf, InputStreamsAreNeverDroppedForBeingIdle) {
+  // 现场回归(Task 3 dryB,rtkrcv -t 3):conf 不写 misc-timeout 时 rtkrcv 用默认 10000 ms,
+  // tcpcli 输入 10 s 无字节就 "waittcpcli: inactive timeout" 断开,10 s 后才重连;这 10 s 里
+  // LocalReserver 没有客户端,差分/观测被直接丢掉。隧道里差分中断 ≥10 s 是常态,
+  // 每次恢复都会白丢最多 10 s。RTKLIB-EX 2.5.1 stream.c:waittcpcli 只在 toinact>0 时检查空闲,
+  // strsetopt 把 0 原样保留(0<opt[0]<1000 才抬到 1000),所以 0 = 关闭空闲断开。
+  const auto c = render_rtkrcv_conf(RtkrcvConfParams{});
+  EXPECT_TRUE(has_line(c, "misc-timeout =0")) << c;
+}
+
+TEST(RtkrcvConf, InputStreamsReconnectAfterOneSecond) {
+  // 对端(LocalReserver)真的关掉连接时(节点重启、写不动被摘除),rtkrcv 1 s 后重连,
+  // 而不是默认的 10 s。strsetopt 把小于 1000 的值抬到 1000,1000 已是下限。
+  const auto c = render_rtkrcv_conf(RtkrcvConfParams{});
+  EXPECT_TRUE(has_line(c, "misc-reconnect =1000")) << c;
 }

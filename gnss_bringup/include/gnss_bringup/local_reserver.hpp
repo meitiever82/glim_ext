@@ -44,7 +44,9 @@ public:
   void stop();
   int bound_port() const { return bound_port_.load(); }
   size_t client_count() const;
-  void broadcast(const uint8_t* data, size_t len);
+  // 返回完整收到这批字节的客户端数。0 表示没有任何客户端(或全部写不动被摘除),字节已丢弃——
+  // 本类不缓冲,调用方据此计数/告警(Task 6 F2:原来 rtkrcv 断开期间差分静默丢失,无任何日志)。
+  size_t broadcast(const uint8_t* data, size_t len);
 
 private:
   void accept_loop();

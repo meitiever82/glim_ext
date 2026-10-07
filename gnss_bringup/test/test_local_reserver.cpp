@@ -246,6 +246,52 @@ TEST(LocalReserver, BroadcastWithNoClientsIsANoop) {
   r.stop();
 }
 
+TEST(LocalReserver, BroadcastReportsHowManyClientsTookThePayload) {
+  // Task 6 F2:没有客户端时字节被直接丢弃,原来调用方看不出来(rtkrcv 空闲断开的 10 s 里
+  // 差分静默丢失)。返回值让 rtkrcv_node 能对"无人接收"计数并节流告警。
+  LocalReserver r;
+  ASSERT_TRUE(r.start(0));
+  const std::string payload = "RTCM";
+  const auto* data = reinterpret_cast<const uint8_t*>(payload.data());
+  EXPECT_EQ(r.broadcast(data, payload.size()), 0u);
+
+  const int c1 = connect_to(r.bound_port());
+  ASSERT_GE(c1, 0);
+  ASSERT_TRUE(wait_clients(r, 1));
+  EXPECT_EQ(r.broadcast(data, payload.size()), 1u);
+  EXPECT_EQ(recv_n(c1, payload.size()), payload);
+
+  const int c2 = connect_to(r.bound_port());
+  ASSERT_GE(c2, 0);
+  ASSERT_TRUE(wait_clients(r, 2));
+  EXPECT_EQ(r.broadcast(data, payload.size()), 2u);
+  EXPECT_EQ(recv_n(c1, payload.size()), payload);
+  EXPECT_EQ(recv_n(c2, payload.size()), payload);
+
+  ::close(c1);
+  ::close(c2);
+  r.stop();
+}
+
+TEST(LocalReserver, BroadcastDoesNotCountAClientDroppedForStalling) {
+  // 写不动被摘掉的客户端没收到这批字节,不能算进返回值——否则 rtkrcv 卡住时告警永远不触发
+  LocalReserver r;
+  ASSERT_TRUE(r.start(0));
+  const int c = connect_to(r.bound_port());
+  ASSERT_GE(c, 0);
+  ASSERT_TRUE(wait_clients(r, 1));
+  const std::string chunk(64 * 1024, 'x');  // 故意不读,灌满内核发送缓冲
+  bool dropped = false;
+  for (int i = 0; i < 2000 && !dropped; ++i) {
+    const size_t n = r.broadcast(reinterpret_cast<const uint8_t*>(chunk.data()), chunk.size());
+    dropped = r.client_count() == 0;
+    EXPECT_EQ(n, dropped ? 0u : 1u) << "第 " << i << " 次";
+  }
+  EXPECT_TRUE(dropped);
+  ::close(c);
+  r.stop();
+}
+
 TEST(LocalReserver, StopReleasesThePortAndIsIdempotent) {
   int port = 0;
   {
