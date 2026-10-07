@@ -36,6 +36,7 @@ add_library(gnss_core SHARED
   src/report_svg.cpp
   src/report_html.cpp
   src/report_cli.cpp
+  src/enu_track.cpp
 )
 target_include_directories(gnss_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -65,6 +66,11 @@ install(TARGETS synth_rtk_fix DESTINATION lib/${PROJECT_NAME})
 add_executable(estimate_lever_arm tools/estimate_lever_arm.cpp)
 target_link_libraries(estimate_lever_arm gnss_core)
 install(TARGETS estimate_lever_arm DESTINATION lib/${PROJECT_NAME})
+
+# --- .pos → 局部 ENU 轨迹文本(轮 5 Task 2,spec §12.4 的 gnss_global 输入) ---
+add_executable(pos_to_enu tools/pos_to_enu.cpp)
+target_link_libraries(pos_to_enu gnss_core)
+install(TARGETS pos_to_enu DESTINATION lib/${PROJECT_NAME})
 
 # --- 报告(轮 4a,spec §3 F2/F3):按天或时间窗生成自包含 HTML,浏览器打印为 PDF ---
 add_executable(gnss_report tools/gnss_report.cpp)
@@ -127,6 +133,7 @@ if(BUILD_TESTING)
   gnss_core_add_test(test_report_svg)
   gnss_core_add_test(test_report_html)
   gnss_core_add_test(test_report_cli)
+  gnss_core_add_test(test_enu_track)
   # 可执行文件本身能起来(参数解析与报告生成由 test_report_cli 覆盖)
   add_test(NAME gnss_report_help COMMAND gnss_report --help)
 
