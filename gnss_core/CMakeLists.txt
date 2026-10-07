@@ -144,7 +144,9 @@ if(BUILD_TESTING)
   # pytest 插件,因此在装了较新 pytest 的机器上也能跑。测试文件自身用 sys.path 定位 tools/,
   # 与 cwd 无关。
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  add_test(NAME test_export_bag_to_pos
+  # discover 整个 tests/ 目录(目前是 test_export_bag_to_pos.py 与 test_pos_to_rtkfix_bag.py),
+  # 所以名字不跟单个文件绑定。
+  add_test(NAME test_tools_python
     COMMAND ${Python3_EXECUTABLE} -m unittest discover
             -s ${CMAKE_CURRENT_SOURCE_DIR}/tests -p "test_*.py" -v)
 endif()
