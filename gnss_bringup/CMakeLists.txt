@@ -65,6 +65,25 @@ target_include_directories(gnss_cleanup_node PRIVATE include)
 ament_target_dependencies(gnss_cleanup_node rclcpp)
 install(TARGETS gnss_cleanup_node DESTINATION lib/${PROJECT_NAME})
 
+# ros_stream_adapter(geacx 真车部署用):把北云驱动已发布的 RtcmData/Oem7RawMsg
+# 适配成 gnss_msgs/RawStream,替代 rtcm_bridge 的 TCP→ROS 角色(该场景下数据
+# 已在 ROS 总线上,见 src/ros_stream_adapter.cpp 文件头)。依赖 robominer_msgs 与
+# novatel_oem7_msgs(北云驱动的消息包,不属于 glim_ws 三链包的依赖闭包)——任何
+# 一个缺失就跳过该目标:开发机纯 glim_ws 构建不受影响;车上部署工作区带上
+# robominer_msgs(novatel_oem7_msgs 走 apt)即会自动编出。注意 launch 里
+# enable_adapter:=true 而二进制不存在时,launch 会以"找不到可执行文件"报错。
+find_package(robominer_msgs QUIET)
+find_package(novatel_oem7_msgs QUIET)
+if(robominer_msgs_FOUND AND novatel_oem7_msgs_FOUND)
+  add_executable(ros_stream_adapter src/ros_stream_adapter.cpp)
+  ament_target_dependencies(ros_stream_adapter rclcpp gnss_msgs robominer_msgs novatel_oem7_msgs)
+  install(TARGETS ros_stream_adapter DESTINATION lib/${PROJECT_NAME})
+  set(GNSS_BRINGUP_HAS_ADAPTER ON)
+else()
+  message(STATUS "ros_stream_adapter 未编译:缺 robominer_msgs 或 novatel_oem7_msgs(geacx 部署才需要,见 gnss_bringup README)")
+  set(GNSS_BRINGUP_HAS_ADAPTER OFF)
+endif()
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_tcp_stream test/test_tcp_stream.cpp)
@@ -204,6 +223,17 @@ if(BUILD_TESTING)
   add_dependencies(test_gnss_cleanup_node_process gnss_cleanup_node)
   target_compile_definitions(test_gnss_cleanup_node_process PRIVATE
     GNSS_CLEANUP_NODE_PATH="$<TARGET_FILE:gnss_cleanup_node>")
+
+  # ros_stream_adapter 的节点级测试(字节原样搬运 + 空消息丢弃 + 缺配置拒绝启动),
+  # 与适配节点本体同条件:缺消息包时不编。
+  if(GNSS_BRINGUP_HAS_ADAPTER)
+    ament_add_gtest(test_ros_stream_adapter test/test_ros_stream_adapter.cpp TIMEOUT 120)
+    target_include_directories(test_ros_stream_adapter PRIVATE include test)
+    ament_target_dependencies(test_ros_stream_adapter rclcpp gnss_msgs robominer_msgs novatel_oem7_msgs)
+    add_dependencies(test_ros_stream_adapter ros_stream_adapter)
+    target_compile_definitions(test_ros_stream_adapter PRIVATE
+      ROS_STREAM_ADAPTER_PATH="$<TARGET_FILE:ros_stream_adapter>")
+  endif()
 
   # 现场回放工具的纯函数(unittest,不用 pytest:开发机 pytest 与 launch_testing 插件冲突)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)

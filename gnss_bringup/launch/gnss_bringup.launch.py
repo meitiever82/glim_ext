@@ -67,8 +67,20 @@ def generate_launch_description():
         # 录包根目录:留空时在 launch 时按 GNSS_BAG_ROOT → $HOME/gnss_bags 解析,与 record_gnss.sh 一致
         # (见 resolve_bag_root)
         DeclareLaunchArgument("bag_root", default_value=""),
+        # geacx 真车(北云)场景:差分与原始观测已经在 ROS 话题上(RtcmData /
+        # Oem7RawMsg),不需要 TCP 桥——enable_bridge:=false 关掉 rtcm_bridge,
+        # enable_adapter:=true 起 ros_stream_adapter 做话题类型适配。
+        # 注意:ros_stream_adapter 只在构建时找到 robominer_msgs 与
+        # novatel_oem7_msgs 才会编出来(见 CMakeLists.txt),enable_adapter:=true
+        # 而二进制不存在时这里会以"找不到可执行文件"报错。
+        DeclareLaunchArgument("enable_bridge", default_value="true"),
+        DeclareLaunchArgument("enable_adapter", default_value="false"),
         Node(package="gnss_bringup", executable="rtcm_bridge", name="rtcm_bridge",
-             parameters=[LaunchConfiguration("params_file")], output="screen"),
+             parameters=[LaunchConfiguration("params_file")], output="screen",
+             condition=IfCondition(LaunchConfiguration("enable_bridge"))),
+        Node(package="gnss_bringup", executable="ros_stream_adapter", name="ros_stream_adapter",
+             parameters=[LaunchConfiguration("params_file")], output="screen",
+             condition=IfCondition(LaunchConfiguration("enable_adapter"))),
         Node(package="gnss_bringup", executable="rtkrcv_node", name="rtkrcv_node",
              parameters=[LaunchConfiguration("params_file")], output="screen",
              condition=IfCondition(LaunchConfiguration("enable_rtkrcv"))),

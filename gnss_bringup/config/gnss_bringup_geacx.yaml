@@ -1,0 +1,89 @@
+# gnss_bringup 的 geacx 真车(北云接收机)覆盖配置。
+#
+# 用法(车上):
+#   ros2 launch gnss_bringup gnss_bringup.launch.py \
+#     params_file:=<本文件> enable_bridge:=false enable_adapter:=true enable_rtkrcv:=true
+#
+# 与默认 gnss_bringup.yaml 的差异全部源于"这台车的 GNSS 数据源是北云驱动
+# 已经发布到 ROS 总线上的话题,而不是裸 TCP 端点":
+#   - rtcm_bridge 不起(enable_bridge:=false),由 ros_stream_adapter 把
+#     /soft_dtu/rtcm_data(RTCM3,含 1006 基准站坐标——已实测首帧即 1006)和
+#     /bynav/oemraw(rangecmpb+星历二进制)适配成 RawStream。
+#   - 本车没有 CGI610,/gnss_cgi610/rtk_fix 无发布者:pos_writer 只接 rtkrcv
+#     一路;gnss_diag 的 device_divergence 无输入(不触发,属预期)。
+#
+# 未写在这里的参数一律回落到节点代码里的默认值(与 gnss_bringup.yaml 相同)。
+
+ros_stream_adapter:
+  ros__parameters:
+    # 输入:北云驱动的两路话题;输出:与 rtcm_bridge 默认输出同名,
+    # rtkrcv_node 的 corrections_topic/raw_obs_topic 默认值直接对上。
+    rtcm_corrections:
+      in_topic: "/soft_dtu/rtcm_data"
+      out_topic: "/gnss/rtcm_corrections"
+    raw_obs:
+      in_topic: "/bynav/oemraw"
+      out_topic: "/gnss/raw_obs"
+
+rtkrcv_node:
+  ros__parameters:
+    # RTKLIB-EX 2.5.1,车上装在用户态前缀(免 sudo),用绝对路径不依赖 PATH。
+    binary: "/home/nvidia/.local/bin/rtkrcv"
+    run_dir: "/tmp/rtkrcv_run"
+    corr_port: 15041
+    obs_port: 15042
+    sol_port: 15020
+    # 北云观测是 OEM7 二进制(rangecmpb + 星历)。RTKLIB-EX 2.5.1 的流格式名里
+    # NovAtel OEM 叫 "oem4"(覆盖 OEM4/6/7 线格式;2.5.1 没有 "nov"/"tersus"
+    # 这两个名字,节点启动校验会直接拒绝)。
+    # 注意 2.5.1 的 oem4 解码器不认北云的 gpsephemb(7)/qzssephemerisb(1336)
+    # (GPS/QZSS 星历它只收 rawephemb/qzssrawephemb,北云协议没有)——GPS/QZSS
+    # 星历必须来自差分流的 RTCM 1019/等;glo/bds/gal 星历可由观测流自带。
+    # 部署后确认差分流是否带 1019:不带的话 GPS 星不可用,把 navsys 改成
+    # 36(GLO+BDS)或评估后处理星历注入(参考红沙泉 field_replay 的做法)。
+    obs_format: "oem4"
+    corr_format: "rtcm3"
+    pos_mode: "kinematic"
+    navsys: 63
+    elmask: 10.0
+    ar_elmask: 15.0
+    ar_mode: "continuous"
+    base_pos_type: "rtcm"
+    bds_ar_mode: "off"
+    glo_ar_mode: "fix-and-hold"
+    leap_seconds: 18
+    # args 键按 README「已知问题」刻意不写(空列表会让 YAML 参数加载器崩溃)。
+
+pos_writer:
+  ros__parameters:
+    # 车上没有 /data;落在 nvidia 家目录下。磁盘已用 88%,.pos 是 1 Hz 文本
+    # (每天每路约 10 MB 量级),量小。
+    root: "/home/nvidia/gnss/pos"
+    # 本车无 can 路(CGI610 不在这台车上),只接 rtkrcv 独立解。
+    sources: ["rtkrcv"]
+    period_s: 1.0
+    time_system: "GPST"
+    leap_seconds: 18
+    silence_timeout_s: 10.0
+    rtkrcv: { topic: "/rtkrcv_node/rtk_fix" }
+
+gnss_diag:
+  ros__parameters:
+    root: "/home/nvidia/gnss/pos"
+    corrections_topic: "/gnss/rtcm_corrections"
+    solution_topic: "/rtkrcv_node/rtk_fix"
+    stat_topic: "/rtkrcv_node/stat"
+    # device_topic 保持默认值也行——本车没有设备融合解发布者,
+    # device_divergence 规则无输入不触发,其余规则正常工作。
+    device_topic: "/gnss_cgi610/rtk_fix"
+    # solver_enabled 由 launch 按 enable_rtkrcv 注入,不写。
+
+gnss_cleanup:
+  ros__parameters:
+    pos_root: "/home/nvidia/gnss/pos"
+    retention_days: 14
+    # 车上磁盘常驻 ~88%(非 GNSS 数据占用),默认水位 85 会让 cleanup 每小时
+    # 打一条"清理后仍超水位"的 WARN 而它对此无能为力——水位抬到 92,真把
+    # GNSS 数据盘撑到 92% 以上时再告警。
+    watermark_pct: 92.0
+    interval_s: 3600.0
