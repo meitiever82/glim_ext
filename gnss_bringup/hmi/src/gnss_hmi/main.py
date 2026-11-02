@@ -835,7 +835,12 @@ def build_app(cfg: Config) -> App:
 def main() -> None:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else "config.yaml")
+    import argparse
+    ap = argparse.ArgumentParser(description="gnss-hmi read-only Web HMI")
+    ap.add_argument("config", nargs="?", default="config.yaml",
+                    help="YAML config path (default: config.yaml)")
+    args = ap.parse_args()
+    cfg = load_config(args.config)
     app = build_app(cfg)
     try:
         asyncio.run(app.run_forever())
