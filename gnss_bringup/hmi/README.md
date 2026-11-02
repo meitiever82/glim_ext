@@ -59,10 +59,26 @@ docker compose up -d --build
 
 ---
 
+## 部署（systemd）
+
+```bash
+./deploy/deploy_and_start_gnss_hmi.sh user@vehicle   # rsync + venv + systemd + 自检
+systemctl status gnss-hmi
+journalctl -u gnss-hmi -f
+```
+
+底图缓存每周自动刷新（`deploy/gnss-hmi-tiles.timer`）；矿区分幅 GeoTIFF
+导入见 `docs/p1-acceptance.md`。
+
+---
+
 ## 文档导航
 
 | 文档 | 内容 |
 |---|---|
+| [P0 验收记录](docs/p0-acceptance.md) | 只读约束、自动化证据、bag 回放与真车冒烟清单 |
+| [P1 验收与演练](docs/p1-acceptance.md) | 部署、底图自动维护、GeoTIFF 导入、远程访问、现场演练 |
+| [Foxglove 旁路](docs/foxglove.md) | 可选 ROS 原生调试面板 |
 | [部署指南](docs/deploy.md) | 硬件/网络前置、610 网页配置、config.yaml 全字段说明、裸机与 Docker 两种运行方式、安全姿态、常见问题排查 |
 | [MBTiles 卫星影像集成指南](docs/tiles-howto.md) | 矿区影像 → MBTiles 三条转换路线（GeoTIFF、QGIS XYZ、SAS.Planet 下载）、坐标系要求、性能优化、故障排查 |
 | [rtkrcv 真机集成核对清单](docs/integration-rtkrcv.md) | 上车前硬件与软件核对清单、Web UI 联调验证项、rtkrcv 进程故障演练、48h 数据库观察项 |
