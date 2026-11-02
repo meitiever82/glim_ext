@@ -50,7 +50,8 @@ export class MapView {
     };
     fetch("/api/tiles_info").then((r) => r.json()).then((info) => {
       if (info && info.available) L.tileLayer("/tiles/{z}/{x}/{y}.png",
-        { maxZoom: 22, attribution: "矿区影像" }).addTo(this.map);
+        { maxZoom: 22,
+          attribution: "矿区影像" + (info.version ? " · " + info.version : "") }).addTo(this.map);
       else useOnlineFallback();
     }).catch(useOnlineFallback);
 

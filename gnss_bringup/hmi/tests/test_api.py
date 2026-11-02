@@ -143,7 +143,9 @@ def test_tiles_z_in_range_reaches_store(tmp_path):
 
 def test_tiles_info_unavailable_without_store(tmp_path):
     c, fake = _client(tmp_path)
-    assert c.get("/api/tiles_info").json() == {"available": False}
+    info = c.get("/api/tiles_info").json()
+    assert info["available"] is False
+    assert info["version"] is None
 
 
 def test_tiles_info_available_with_store(tmp_path):
@@ -153,7 +155,8 @@ def test_tiles_info_available_with_store(tmp_path):
         def get(self, z, x, y):
             raise AssertionError("tiles_info must not query the store")
     fake.tile_store = _Stub()
-    assert c.get("/api/tiles_info").json() == {"available": True}
+    info = c.get("/api/tiles_info").json()
+    assert info["available"] is True
 
 
 def test_ws_replay_roundtrip(tmp_path):

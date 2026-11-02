@@ -46,7 +46,7 @@ diagnosis:
 web:
   port: 8080
   host: 0.0.0.0
-  tiles_path: /data/gnsslog/hmi/tiles/mine.mbtiles
+  tiles_path: /data/gnsslog/hmi/tiles/current.mbtiles  # 由 tiles.manager 原子切换
   static_dir: ""
 
 ros:

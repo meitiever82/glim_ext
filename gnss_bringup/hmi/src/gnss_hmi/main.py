@@ -41,6 +41,7 @@ from gnss_hmi.storage.epochs import Epoch, EpochStore
 from gnss_hmi.storage.events import EventStore
 from gnss_hmi.storage.rawlog import RawLogWriter
 from gnss_hmi.tiles import TileStore
+from gnss_hmi.tiles.manager import resolve_tiles_path
 
 _CLEANUP_INTERVAL_S = 3600.0
 _SUPERVISE_RESTART_S = 5.0
@@ -130,8 +131,11 @@ class App:
         # Plan 3a: broadcaster for WebSocket subscribers.
         self.broadcaster = Broadcaster()
         self.last_status: dict | None = None
+        # Only serve a cache that passes its SHA-256 sidecar; a truncated
+        # current.mbtiles falls back to the newest intact version, then to grid.
+        self.tiles_path = resolve_tiles_path(cfg.web.tiles_path)
         try:
-            self.tile_store: TileStore | None = TileStore(cfg.web.tiles_path)
+            self.tile_store: TileStore | None = TileStore(self.tiles_path or "")
         except FileNotFoundError:
             self.tile_store = None
             _logger.info("tiles not configured (web.tiles_path=%r); /tiles disabled",

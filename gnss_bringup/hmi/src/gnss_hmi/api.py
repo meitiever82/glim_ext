@@ -152,7 +152,9 @@ def create_api(app) -> FastAPI:            # app: gnss_hmi.main.App (duck-typed)
         # coordinate: with a mine-only tileset, any single hardcoded tile can
         # legitimately be missing even though the store itself is populated,
         # so a fixed-tile probe would false-negative into the grid fallback.
-        return {"available": app.tile_store is not None}
+        return {"available": app.tile_store is not None,
+                "version": (Path(app.tiles_path).stem if getattr(app, "tiles_path", None)
+                            else None)}
 
     @api.get("/tiles/{z}/{x}/{y}.png")
     async def tile(z: int, x: int, y: int):
