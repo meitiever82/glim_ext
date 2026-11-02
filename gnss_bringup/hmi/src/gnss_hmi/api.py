@@ -6,6 +6,7 @@ import dataclasses
 import html
 import logging
 import math
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
@@ -16,6 +17,35 @@ from gnss_hmi.replay import replay_messages
 from gnss_hmi.report import compute_report
 
 _logger = logging.getLogger(__name__)
+
+_POS_HEAD = (
+    "% program: gnss-hmi\n"
+    "% (yyyy/mm/dd hh:mm:ss.sss, lat, lon, hgt, Q, ns, sdn, sde, sdu, age, ratio)\n"
+)
+
+
+def _pos_num(v, width: int, digits: int = 4) -> str:
+    return (" " * width) if v is None else f"{v:>{width}.{digits}f}"
+
+
+def pos_lines(rows) -> list[str]:
+    """Epoch rows -> RTKLIB `.pos` lines (UTC timestamps, blank for nulls)."""
+    out = []
+    for e in rows:
+        if e.lat is None or e.lon is None:
+            continue
+        tm = time.gmtime(e.t)
+        ms = int((e.t - int(e.t)) * 1000)
+        q = 0 if e.q is None else int(e.q)
+        ns = 0 if e.sats is None else int(e.sats)
+        out.append(
+            f"{tm.tm_year:04d}/{tm.tm_mon:02d}/{tm.tm_mday:02d} "
+            f"{tm.tm_hour:02d}:{tm.tm_min:02d}:{tm.tm_sec:02d}.{ms:03d} "
+            f"{e.lat:15.9f} {e.lon:15.9f} {_pos_num(e.alt, 10)} "
+            f"{q:2d} {ns:3d} {_pos_num(e.sdn, 8)} {_pos_num(e.sde, 8)} "
+            f"{_pos_num(e.sdu, 8)} {_pos_num(e.age, 6, 3)} {_pos_num(e.ratio, 6, 3)}\n")
+    return out
+
 
 # {"cmd":"replay","t1":9e15} used to reach replay_messages unvalidated and
 # build one status entry per second over the whole [t0, t1] range -- billions
@@ -93,6 +123,17 @@ def create_api(app) -> FastAPI:            # app: gnss_hmi.main.App (duck-typed)
         t, x, y, z = hist[-1]
         app.base_monitor.reset(t, x, y, z)
         return {"ok": True, "xyz": [x, y, z]}
+
+    @api.get("/api/pos")
+    async def pos(src: str = "app", t0: float = 0.0, t1: float = 0.0):
+        """RTKLIB-compatible .pos export for a stored epoch range."""
+        if not (math.isfinite(t0) and math.isfinite(t1) and t1 > t0):
+            raise HTTPException(400, "invalid time range")
+        rows = app.epochs.query(src, t0, t1)
+        body = _POS_HEAD + "".join(pos_lines(rows))
+        return Response(body, media_type="text/plain",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{src}-{int(t0)}-{int(t1)}.pos"'})
 
     @api.get("/api/report")
     async def report_json(t0: float, t1: float):

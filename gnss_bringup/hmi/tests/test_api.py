@@ -159,6 +159,25 @@ def test_tiles_info_available_with_store(tmp_path):
     assert info["available"] is True
 
 
+def test_pos_export(tmp_path):
+    c, fake = _client(tmp_path)
+    fake.epochs.add(Epoch(t=1000.5, src="app", q=4, sats=20, lat=44.5, lon=90.3,
+                          alt=100.0, sdn=0.01, sde=0.02, sdu=0.03, age=1.0, ratio=3.5))
+    r = c.get("/api/pos", params={"src": "app", "t0": 1000, "t1": 1001})
+    assert r.status_code == 200
+    assert r.text.startswith("% program: gnss-hmi")
+    assert "44.500000000" in r.text
+    assert "1970/01/01 00:16:40.500" in r.text   # UTC from epoch t, not dump time
+    assert "attachment" in r.headers["content-disposition"]
+
+
+def test_pos_rejects_bad_range(tmp_path):
+    c, _ = _client(tmp_path)
+    for t0, t1 in ((1, 1), (2, 1), (float("nan"), 1)):
+        r = c.get("/api/pos", params={"src": "app", "t0": t0, "t1": t1})
+        assert r.status_code == 400
+
+
 def test_ws_replay_roundtrip(tmp_path):
     c, fake = _client(tmp_path)
     fake.epochs.add(Epoch(t=100.5, src="can", q=4, lat=44.5, lon=90.2, heading=170.0, speed=5.0))
