@@ -418,3 +418,38 @@ footer {
   border-radius: 4px;
   padding: 3px 6px;
 }
+
+/* ---------- narrow screens (field tablet / phone) ---------- */
+
+@media (max-width: 900px) {
+  header#statusbar {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 10px;
+  }
+
+  main {
+    grid-template-columns: 1fr;
+    grid-template-rows: 55vh auto;
+  }
+
+  aside {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    max-height: 45vh;
+    overflow-y: auto;
+  }
+
+  #skyplot-box canvas {
+    width: 180px;
+    height: 180px;
+  }
+
+  #timelines {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .chart {
+    height: 90px;
+  }
+}
