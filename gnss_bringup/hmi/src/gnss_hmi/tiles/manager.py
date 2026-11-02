@@ -101,6 +101,59 @@ def _http_get(url: str, timeout: float) -> bytes | None:
         raise
 
 
+def refresh_due(state_path: str | os.PathLike, period_s: float,
+                now: float | None = None) -> bool:
+    """True when the last successful maintain is older than period_s (or never
+    ran). The timestamp is written only after a build succeeds."""
+    try:
+        last = float(Path(state_path).read_text().strip())
+    except (OSError, ValueError):
+        return True
+    return (now if now is not None else time.time()) - last >= period_s
+
+
+def maintain(root: str, bbox: tuple[float, float, float, float], zooms: list[int],
+             state_path: str | os.PathLike, *, period_s: float = 7 * 24 * 3600,
+             now: float | None = None, source: str = DEFAULT_SOURCE,
+             http_get=None) -> str | None:
+    """Weekly-style cache refresh: skip when not due, otherwise build and
+    stamp the state file on success so a failed run retries next check."""
+    if not refresh_due(state_path, period_s, now):
+        return None
+    out = TileManager(root, source, http_get=http_get).build(bbox, zooms)
+    if out:
+        Path(state_path).write_text(f"{now if now is not None else time.time():.0f}\n")
+    return out
+
+
+def install_cache(root: str, source_file: str | os.PathLike,
+                  name: str = "mine") -> str:
+    """Publish an already-built MBTiles (e.g. a GeoTIFF import) as the active
+    cache: hash -> version -> atomic current.mbtiles, keeping two versions."""
+    r = Path(root)
+    _versions_dir(r).mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(source_file)
+    try:
+        db.execute("SELECT COUNT(*) FROM tiles").fetchone()   # reject non-MBTiles
+    finally:
+        db.close()
+    digest = _sha256(Path(source_file))
+    stamp = int(time.time())
+    version = _versions_dir(r) / f"{name}-{stamp}.mbtiles"
+    shutil.copy2(source_file, version)
+    _write_sidecar(version, digest)
+    cur_tmp = r / ".current.tmp.mbtiles"
+    shutil.copy2(version, cur_tmp)
+    os.replace(cur_tmp, r / "current.mbtiles")
+    _write_sidecar(r / "current.mbtiles", digest)
+    versions = sorted(_versions_dir(r).glob("*.mbtiles"),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in versions[KEEP_VERSIONS:]:
+        old.unlink(missing_ok=True)
+        _sidecar(old).unlink(missing_ok=True)
+    return str(version)
+
+
 class TileManager:
     def __init__(self, root: str, source: str = DEFAULT_SOURCE, *,
                  timeout: float = 10.0, http_get=None) -> None:
@@ -214,11 +267,16 @@ def _main() -> int:
     """python -m gnss_hmi.tiles.manager --root DIR --bbox W,S,E,N --zooms 14-18"""
     import argparse
     ap = argparse.ArgumentParser(description="Build/refresh the offline MBTiles cache")
-    ap.add_argument("--root", required=True)
-    ap.add_argument("--bbox", required=True, help="west,south,east,north")
-    ap.add_argument("--zooms", default="14-18", help="e.g. 14-18 or 14,16,18")
+    ap.add_argument("--root", default=os.environ.get("GNSS_HMI_TILES_ROOT", ""),
+                    required=not os.environ.get("GNSS_HMI_TILES_ROOT"))
+    ap.add_argument("--bbox", default=os.environ.get("GNSS_HMI_TILES_BBOX"),
+                    help="west,south,east,north")
+    ap.add_argument("--zooms", default=os.environ.get("GNSS_HMI_TILES_ZOOMS", "14-18"),
+                    help="e.g. 14-18 or 14,16,18")
     ap.add_argument("--source", default=DEFAULT_SOURCE)
     args = ap.parse_args()
+    if not args.bbox:
+        ap.error("--bbox (or GNSS_HMI_TILES_BBOX) is required")
     bbox = tuple(float(v) for v in args.bbox.split(","))
     zs = ([int(v) for v in args.zooms.split("-")]
           if "-" in args.zooms else [int(v) for v in args.zooms.split(",")])

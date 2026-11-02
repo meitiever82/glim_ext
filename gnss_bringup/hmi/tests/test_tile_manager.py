@@ -1,8 +1,9 @@
 import sqlite3
 
 from gnss_hmi.tiles import TileStore
-from gnss_hmi.tiles.manager import (TileManager, lonlat_to_tile, sha_ok,
-                                    tile_range, resolve_tiles_path)
+from gnss_hmi.tiles.manager import (TileManager, lonlat_to_tile, refresh_due,
+                                    sha_ok, tile_range, resolve_tiles_path,
+                                    maintain)
 
 
 def _fake_get(url):
@@ -108,3 +109,23 @@ def test_resolve_trusts_sidecarless_mbtiles(tmp_path):
     assert resolve_tiles_path(str(p)) == str(p)
     assert resolve_tiles_path("") is None
     assert resolve_tiles_path(str(tmp_path / "missing.mbtiles")) is None
+
+
+def test_refresh_due_and_maintain(tmp_path):
+    state = tmp_path / "last_build"
+    assert refresh_due(state, 7 * 86400, now=1000)
+    state.write_text("900\n")
+    assert not refresh_due(state, 7 * 86400, now=1000)
+    assert not refresh_due(state, 3600, now=1000)
+    assert refresh_due(state, 3600, now=5000)
+
+    m = TileManager(str(tmp_path), http_get=_fake_get)
+    assert maintain(str(tmp_path), (-1, -1, 1, 1), [2], state,
+                    period_s=3600, now=1000, http_get=m._get) is None   # not due
+    assert maintain(str(tmp_path), (-1, -1, 1, 1), [2], state,
+                    period_s=3600, now=4000, http_get=m._get) is None   # not due
+    out = maintain(str(tmp_path), (-1, -1, 1, 1), [2], state,
+                   period_s=3600, now=10_000, http_get=m._get)  # due -> build + stamp
+    assert out
+    assert state.read_text().strip() == "10000"
+    assert not refresh_due(state, 3600, now=10_001)

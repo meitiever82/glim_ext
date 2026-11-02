@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the GNSS HMI offline tile cache weekly
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=3600
+
+[Install]
+WantedBy=timers.target

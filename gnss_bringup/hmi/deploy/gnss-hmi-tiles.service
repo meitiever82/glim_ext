@@ -1,0 +1,13 @@
+[Unit]
+Description=GNSS HMI offline tile cache refresh
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=GNSS_HMI_TILES_ROOT=/data/gnsslog/hmi/tiles
+# Mine-area bbox: west,south,east,north (edit for the site).
+Environment=GNSS_HMI_TILES_BBOX=-111.0,35.0,-110.0,36.0
+Environment=GNSS_HMI_TILES_ZOOMS=14-18
+WorkingDirectory=/opt/gnss-hmi
+ExecStart=/opt/gnss-hmi/.venv/bin/python -m gnss_hmi.tiles.manager
