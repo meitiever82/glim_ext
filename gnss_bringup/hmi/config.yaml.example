@@ -1,0 +1,53 @@
+data_root: /data/gnsslog
+db_path: /data/gnsslog/gnss_hmi.db
+
+corrections:      # route 1: platform RTCM broadcast
+  host: 192.168.10.1
+  port: 6001
+raw_obs:          # route 2: CGI-610 TCP Server7 (GNSS board raw data only)
+  host: 192.168.200.1
+  port: 9901
+gnss_solution:    # route 3: CGI-610 Client7 GPCHC text stream (we listen)
+  host: 0.0.0.0
+  port: 9902
+  listen: true    # true = accept connection from 610, false = connect out
+
+can_channel: can0
+
+reserve:          # local re-serve ports for rtkrcv (Plan 2)
+  corrections_port: 15010
+  raw_obs_port: 15011
+
+retention_days: 14
+disk_watermark_pct: 85.0
+
+rtkrcv:           # independent RTK solver (empty binary = disabled)
+  binary: ""
+  sol_port: 15020
+
+diagnosis: {}     # thresholds; omit keys to use spec defaults
+                  # (incl. abs_ref_max_m=0.2, abs_ref_radius_m=3.0 for the
+                  #  control-point absolute-baseline check below)
+
+# Absolute-baseline verification (§4.2 / §6): surveyed control points with known
+# WGS-84 coordinates. When the vehicle is within diagnosis.abs_ref_radius_m of a
+# point but its solution deviates past diagnosis.abs_ref_max_m, the whole-mine
+# frame has shifted — the last-resort alarm a base-station move stays green
+# through. Empty = feature off. Surveyed on-site.
+control_points: []
+# control_points:
+#   - {name: CP1, lat: 44.5012, lon: 90.2877, alt: 617.0}
+#   - {name: CP2, lat: 44.4988, lon: 90.2901, alt: 615.4}
+
+publish:          # UDP JSON Lines output (GLIM phase-2 interface)
+  enabled: false
+  host: 127.0.0.1
+  port: 15030
+
+web:              # FastAPI/WebSocket UI service
+  port: 8080
+  tiles_path: ""  # MBTiles file for offline imagery; empty = grid fallback
+  host: 0.0.0.0   # bind address
+  static_dir: ""  # static web directory; empty = repository relative web/
+
+db_retention_days: 30   # prune epochs/base_station/closed events older than this

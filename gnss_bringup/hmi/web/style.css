@@ -1,0 +1,420 @@
+/* web/style.css — dark theme for rtk-monitor SPA. Code/comments English, UI copy Chinese. */
+
+:root {
+  --bg: #101418;
+  --panel: #1a2027;
+  --panel-2: #212832;
+  --border: #2b3440;
+  --ink: #d8dee6;
+  --dim: #8b95a3;
+  --fixed: #3fb96c;
+  --float: #e0b23c;
+  --bad: #e05c4f;
+  --none: #5a6472;
+  --info: #4a90d9;
+  --warning: #e0b23c;
+  --serious: #e0834f;
+  --critical: #e05c4f;
+  --accent: #4a90d9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+h1, h2, h3, h4, p {
+  margin: 0;
+}
+
+/* ---------- banner ---------- */
+
+.banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  padding: 6px 12px;
+  text-align: center;
+  background: var(--bad);
+  color: #fff;
+  font-weight: 600;
+}
+
+.hidden {
+  display: none;
+}
+
+/* ---------- header / statusbar ---------- */
+
+header#statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-weight: 600;
+  color: #0b0e11;
+}
+
+.badge.fixed {
+  background: var(--fixed);
+}
+
+.badge.float {
+  background: var(--float);
+}
+
+.badge.bad {
+  background: var(--bad);
+  color: #fff;
+}
+
+.badge.none {
+  background: var(--none);
+  color: #fff;
+}
+
+.tag.replay {
+  display: inline-block;
+  background: var(--info);
+  color: #fff;
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.stat {
+  color: var(--dim);
+}
+
+.stat .val {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* statusbar.js mounts <div class="statusbar"> inside header#statusbar; the
+   header supplies the chrome (background/border/padding), this class does
+   the actual flex layout of its .badge/.tag/.kv children. */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.kv {
+  color: var(--dim);
+}
+
+.kv b {
+  color: var(--ink);
+}
+
+/* ---------- main layout ---------- */
+
+main {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  min-height: 0;
+}
+
+#map {
+  min-height: 0;
+  background: var(--panel-2);
+}
+
+/* leaflet vehicle-heading arrow marker */
+.veh-arrow {
+  width: 18px;
+  height: 18px;
+  transform-origin: 50% 50%;
+}
+
+.veh-arrow svg {
+  width: 100%;
+  height: 100%;
+  fill: var(--accent);
+  stroke: #0b0e11;
+  stroke-width: 1;
+}
+
+aside {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+}
+
+aside section {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+#skyplot-box {
+  flex: 0 0 auto;
+  text-align: center;
+}
+
+#skyplot-box h3, #linkcard-box h3, #eventlist-box h3 {
+  margin-bottom: 6px;
+  color: var(--dim);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: none;
+}
+
+#eventlist-box {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#eventlist {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* ---------- link card ---------- */
+
+#linkcard-box {
+  flex: 0 0 auto;
+}
+
+.linkcard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.linkcard .row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  color: var(--dim);
+}
+
+.linkcard .row b {
+  color: var(--ink);
+}
+
+.linkcard .row .sub {
+  flex: 1 1 auto;
+  text-align: right;
+  color: var(--dim);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linkcard .row.warn b, .linkcard .row.warn .sub {
+  color: var(--bad);
+}
+
+.linkcard .row.lv-warning b { color: var(--warning); }
+.linkcard .row.lv-serious b { color: var(--serious); }
+.linkcard .row.lv-critical b, .linkcard .row.lv-stale b { color: var(--bad); }
+
+.linkcard .topics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 2px;
+}
+
+.linkcard .topic {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.linkcard .topic.none {
+  color: var(--none);
+}
+
+.linkcard .topic.ok {
+  color: var(--fixed);
+}
+
+/* ---------- log window controls ---------- */
+
+.logctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.logctl button, .logctl select {
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.logctl button:hover {
+  border-color: var(--accent);
+}
+
+.logcount {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+/* ---------- event list rows ---------- */
+/* eventlist.js mounts <ul class="events"><li class="lv-*">, replacing the
+   #eventlist container's default block-list styling. */
+
+.events {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.events li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--none);
+  margin-bottom: 4px;
+  background: var(--panel-2);
+  cursor: pointer;
+}
+
+.events li:hover {
+  background: var(--panel);
+}
+
+.events li.lv-info {
+  border-left-color: var(--info);
+}
+
+.events li.lv-warning {
+  border-left-color: var(--float);
+}
+
+.events li.lv-serious {
+  border-left-color: var(--serious);
+}
+
+.events li.lv-critical {
+  border-left-color: var(--bad);
+  background: rgba(224, 92, 79, 0.12);
+}
+
+.events .et {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.events .ea {
+  white-space: nowrap;
+}
+
+.events .em {
+  flex: 1 1 auto;
+  word-break: break-word;
+}
+
+.events li.empty {
+  color: var(--dim);
+  cursor: default;
+  background: transparent;
+  border-left-color: transparent;
+}
+
+.events li.empty:hover {
+  background: transparent;
+}
+
+/* ---------- footer / timelines + replaybar ---------- */
+
+footer {
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+
+#timelines {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 1px;
+  background: var(--border);
+}
+
+.chart {
+  height: 110px;
+  background: var(--panel-2);
+}
+
+#replaybar {
+  border-top: 1px solid var(--border);
+}
+
+/* replaybar.js mounts <div class="replaybar"> inside #replaybar; this class
+   does the actual flex layout of its label/select/button children. */
+.replaybar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+}
+
+#replaybar button {
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+#replaybar button:hover {
+  border-color: var(--accent);
+}
+
+#replaybar input[type="range"] {
+  flex: 1 1 auto;
+}
+
+#replaybar select {
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+}
