@@ -419,6 +419,32 @@ footer {
   padding: 3px 6px;
 }
 
+#exportbar {
+  border-top: 1px solid var(--border);
+}
+
+/* exportbar.js mounts <div class="exportbar"> mirroring the replay row. */
+.exportbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+}
+
+.exportbar a,
+.exportbar select {
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  text-decoration: none;
+}
+
+.exportbar a:hover {
+  border-color: var(--accent);
+}
+
 /* ---------- narrow screens (field tablet / phone) ---------- */
 
 @media (max-width: 900px) {
@@ -451,5 +477,10 @@ footer {
 
   .chart {
     height: 90px;
+  }
+
+  .replaybar,
+  .exportbar {
+    flex-wrap: wrap;
   }
 }

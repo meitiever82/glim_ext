@@ -6,8 +6,8 @@
 
 | 项目 | 命令 | 结果 |
 |---|---|---|
-| Python 全量测试 | `PYTHONPATH=src python3 -m pytest -q --ignore=tests/test_docker.py` | **223 passed, 2 skipped** |
-| 前端逻辑测试 | `node --test tests_js/*.mjs` | **25 passed** |
+| Python 全量测试 | `PYTHONPATH=src python3 -m pytest -q --ignore=tests/test_docker.py` | **229 passed, 2 skipped** |
+| 前端逻辑测试 | `node --test tests_js/*.mjs` | **29 passed** |
 | ROS 采集单测 | `tests/test_ros_collector.py`（五档 quality、σ E/N/U、NaN/Inf、断块重组、$SAT 分历元、诊断级别、速率窗口） | 通过 |
 | 状态聚合单测 | `tests/test_status_ros.py`（双源/单源缺失/3 s stale/事件去重/$SAT 不进 sol） | 通过 |
 | WS 契约 | `tests/test_ws_contract.py`（live 与 replay 顶层键集同构） | 通过 |
