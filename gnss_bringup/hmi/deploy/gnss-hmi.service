@@ -1,0 +1,21 @@
+[Unit]
+Description=GNSS HMI (read-only web dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User/Group to the account that owns the ROS workspace.
+User=root
+Group=root
+WorkingDirectory=/opt/gnss-hmi
+Environment=GNSS_HMI_CONFIG=/opt/gnss-hmi/config/gnss_hmi.yaml
+Environment=ROS_DOMAIN_ID=0
+ExecStart=/opt/gnss-hmi/deploy/run_gnss_hmi.sh
+Restart=always
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
