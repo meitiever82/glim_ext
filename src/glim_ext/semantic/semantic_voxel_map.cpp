@@ -8,8 +8,6 @@ namespace glim {
 
 namespace {
 
-constexpr float kFarLevel = 1.0f;
-
 int32_t coord_index(double value, float resolution) {
   return static_cast<int32_t>(std::floor(value / static_cast<double>(resolution)));
 }

@@ -98,7 +98,9 @@ private:
     if (!frame || !frame->raw_frame || frame->raw_frame->points.empty()) {
       return;
     }
-    if (frame->stamp - last_stamp_ < min_interval_) {
+    // Decimate to the configured rate. A backwards stamp (clock reset) is processed rather
+    // than skipped, otherwise the module would stay stalled for the rest of the run.
+    if (frame->stamp > last_stamp_ && frame->stamp - last_stamp_ < min_interval_) {
       ++frames_skipped_;
       return;
     }
