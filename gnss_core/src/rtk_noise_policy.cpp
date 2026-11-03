@@ -18,7 +18,7 @@ gtsam::SharedNoiseModel RtkNoisePolicy::evaluate(const RtkFixSample& s) const {
 }
 
 Verdict RtkNoisePolicy::evaluate_verdict(const RtkFixSample& s) const {
-  const auto reject = [](RejectReason r) { return Verdict{nullptr, r}; };
+  const auto reject = [](RejectReason r) { return Verdict{nullptr, Eigen::Vector3d::Zero(), r}; };
   const int q = static_cast<int>(s.quality);
   if (q < 0 || q > 4) return reject(RejectReason::QualityOutOfRange);  // 非法值:拒绝而非越界抛异常
   if (q < cfg_.min_quality) return reject(RejectReason::BelowMinQuality);
@@ -34,13 +34,30 @@ Verdict RtkNoisePolicy::evaluate_verdict(const RtkFixSample& s) const {
   sigma(2) *= cfg_.vertical_scale;
 
   gtsam::SharedNoiseModel base = gtsam::noiseModel::Diagonal::Sigmas(sigma);
-  if (cfg_.robust_kernel == "none") return Verdict{base, RejectReason::None};
+  if (cfg_.robust_kernel == "none") return Verdict{base, sigma, RejectReason::None};
   gtsam::noiseModel::mEstimator::Base::shared_ptr m;
   if (cfg_.robust_kernel == "cauchy")
     m = gtsam::noiseModel::mEstimator::Cauchy::Create(cfg_.robust_delta);
   else
     m = gtsam::noiseModel::mEstimator::Huber::Create(cfg_.robust_delta);
-  return Verdict{gtsam::noiseModel::Robust::Create(m, base), RejectReason::None};
+  return Verdict{gtsam::noiseModel::Robust::Create(m, base), sigma, RejectReason::None};
+}
+
+gtsam::SharedNoiseModel make_diagonal_robust_model(const Eigen::VectorXd& sigmas, const NoisePolicyConfig& cfg) {
+  if (sigmas.size() == 0) throw std::invalid_argument("make_diagonal_robust_model: empty sigmas");
+  if (!sigmas.allFinite() || (sigmas.array() <= 0.0).any())
+    throw std::invalid_argument("make_diagonal_robust_model: sigmas must be finite and > 0");
+  if (cfg.robust_kernel != "none" && cfg.robust_kernel != "huber" && cfg.robust_kernel != "cauchy")
+    throw std::invalid_argument("make_diagonal_robust_model: robust_kernel must be none|huber|cauchy");
+
+  gtsam::SharedNoiseModel base = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
+  if (cfg.robust_kernel == "none") return base;
+  gtsam::noiseModel::mEstimator::Base::shared_ptr m;
+  if (cfg.robust_kernel == "cauchy")
+    m = gtsam::noiseModel::mEstimator::Cauchy::Create(cfg.robust_delta);
+  else
+    m = gtsam::noiseModel::mEstimator::Huber::Create(cfg.robust_delta);
+  return gtsam::noiseModel::Robust::Create(m, base);
 }
 
 }  // namespace gnss_core

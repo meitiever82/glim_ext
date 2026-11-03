@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 project(gnss_core)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -17,11 +17,13 @@ add_library(gnss_core SHARED
   src/rtk_fix_buffer.cpp
   src/rtk_noise_policy.cpp
   src/frame_aligner.cpp
+  src/gauge_registry.cpp
   src/trajectory_compare.cpp
   src/pos_io.cpp
   src/synth.cpp
   src/lever_arm_estimator.cpp
   src/anchor_pipeline.cpp
+  src/relative_pipeline.cpp
   src/rtcm.cpp
   src/rtkstat.cpp
   src/diagnosis.cpp
@@ -36,6 +38,7 @@ add_library(gnss_core SHARED
   src/report_svg.cpp
   src/report_html.cpp
   src/report_cli.cpp
+  src/judge.cpp
 )
 target_include_directories(gnss_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -44,11 +47,9 @@ target_include_directories(gnss_core PUBLIC
 )
 target_link_libraries(gnss_core PUBLIC Eigen3::Eigen gtsam ${GeographicLib_LIBRARIES})
 
-# round 3 review:pos_io_test_hooks.hpp 的注入点(用来在 test_pos_io.cpp 里
-# 确定性地模拟读/截断失败,替代 LD_PRELOAD)只应该在跑测试的构建里存在——
+# round 3 review:pos_io_test_hooks.hpp 的注入点(用来在 test_pos_io.cpp 里确定性地模拟读/截断失败,替代 LD_PRELOAD)只应该在跑测试的构建里存在——
 # 一个测试用的钩子函数不该出现在正式发布的 libgnss_core.so 导出符号表里。
-# pos_io.cpp 用同名宏把这段实现整体包在 #ifdef 里;BUILD_TESTING=OFF 的
-# 构建里这段代码完全不会被编译进去,符号自然也就不存在。
+# pos_io.cpp 用同名宏把这段实现整体包在 #ifdef 里;BUILD_TESTING=OFF 的构建里这段代码完全不会被编译进去,符号自然也就不存在。
 target_compile_definitions(gnss_core PRIVATE
   $<$<BOOL:${BUILD_TESTING}>:GNSS_CORE_WITH_TEST_HOOKS>)
 
@@ -113,6 +114,10 @@ if(BUILD_TESTING)
   gnss_core_add_test(test_synth)
   gnss_core_add_test(test_lever_arm_estimator)
   gnss_core_add_test(test_anchor_pipeline)
+  gnss_core_add_test(test_relative_pipeline)
+  gnss_core_add_test(test_relative_translation_factor)
+  gnss_core_add_test(test_heading_prior_factor)
+  gnss_core_add_test(test_shared_gauge)
   gnss_core_add_test(test_rtcm)
   gnss_core_add_test(test_rtkstat)
   gnss_core_add_test(test_diagnosis)
@@ -127,6 +132,7 @@ if(BUILD_TESTING)
   gnss_core_add_test(test_report_svg)
   gnss_core_add_test(test_report_html)
   gnss_core_add_test(test_report_cli)
+  gnss_core_add_test(test_judge)
   # 可执行文件本身能起来(参数解析与报告生成由 test_report_cli 覆盖)
   add_test(NAME gnss_report_help COMMAND gnss_report --help)
 

@@ -64,6 +64,7 @@ private:
   ConcurrentVector<gtsam::NonlinearFactor::shared_ptr> output_factors_;
 
   std::atomic<size_t> n_factors_added_{0};
+  std::atomic<size_t> n_heading_added_{0};
   std::atomic_bool kill_switch_{false};
   std::thread thread_;
 

@@ -28,11 +28,16 @@ struct Anchor {
 };
 
 // 一条待加入图的位置约束:天线在 world 系的位置 + 噪声模型。不含因子对象。
+// 可选附带绝对航向(阶段二新增,spec 2.1 §5.4):heading_world 已转换为 world 系 yaw(rad)。
 struct Constraint {
   long id = 0;
   double stamp = 0.0;
   Eigen::Vector3d p_world = Eigen::Vector3d::Zero();
   gtsam::SharedNoiseModel model;
+
+  bool has_heading = false;
+  double heading_world = 0.0;
+  gtsam::SharedNoiseModel heading_model;
 };
 
 enum class AnchorOutcome {
@@ -51,6 +56,14 @@ struct PipelineConfig {
   double fix_buffer_horizon = 600.0;  // 缓冲保留时长(数据时间,s)
   double fix_max_gap = 2.5;           // 插值允许的最大左右样本间隔(s)
   std::vector<double> enu_origin;     // 空 = 以首个过门限样本为原点;或 [lat, lon, alt]
+  bool shared_gauge = false;          // F1 已证伪(2026-10-19):两模块 ENU 原点不同(各自取首个 anchor
+                                      //   时刻的 fix),gauge 平移差=原点差,各自自洽——强制共享数值而不
+                                      //   统一原点会引入 R·Δorigin 的系统偏差。保留开关仅供实验。
+  int aligner_min_quality = 4;        // F2: 仅 quality >= 此值的样本参与 gauge 求解(默认 FIXED);
+                                      //     低质量样本的因子照常用(降权),只是不参与定基准
+  bool heading_enabled = true;        // 阶段二:heading_valid 样本附带绝对航向约束
+  double heading_sigma_floor_deg = 2.0;   // 航向噪声下界(deg);板卡 heading_sigma 更大时取板卡值
+  std::string name;                   // 模块名(发布 gauge 时的 owner 标注,仅日志用)
 };
 
 struct PipelineStats {
@@ -88,6 +101,11 @@ public:
   size_t deferred() const { return deferred_.size(); }
   size_t buffered_fixes() const { return buffer_.size(); }
   AnchorOutcome last_outcome() const { return last_outcome_; }   // 最近一个 anchor 的结局
+  // gauge 来源:"" 未初始化 / "local" 本地 bootstrap / "shared" 采用 GaugeRegistry
+  const std::string& gauge_source() const { return gauge_source_; }
+  // 最近一个过门限样本的质量与生效噪声(供 FusionStatus 输出);无则 NONE / 零。
+  Quality last_quality() const { return last_quality_; }
+  const Eigen::Vector3d& last_sigma() const { return last_sigma_; }
 
 private:
   struct Deferred {
@@ -95,12 +113,15 @@ private:
     double stamp;
     Eigen::Vector3d enu;
     gtsam::SharedNoiseModel model;
+    // 原始航向(deg/deg),在 make_constraint 时用已冻结的 T_world_enu 转成 world yaw。
+    bool heading_valid = false;
+    double heading_deg = 0.0;
+    double heading_sigma_deg = 0.0;
   };
 
   // 处理一个 anchor;返回 false 表示需等待(anchor 留在队列)。产生的约束追加到 out。
   bool process_one(const Anchor& a, std::vector<Constraint>& out);
-  Constraint make_constraint(long id, double stamp, const Eigen::Vector3d& enu,
-                             const gtsam::SharedNoiseModel& model);
+  Constraint make_constraint(const Deferred& d);
 
   PipelineConfig cfg_;
   RtkNoisePolicy policy_;
@@ -108,11 +129,14 @@ private:
   RtkFixBuffer buffer_;
   std::unique_ptr<LlaToEnu> lla_to_enu_;
   std::optional<std::array<double, 3>> enu_origin_;
+  std::string gauge_source_;   // ""/"local"/"shared"
 
   std::deque<Anchor> pending_;
   std::vector<Deferred> deferred_;
   PipelineStats stats_;
   AnchorOutcome last_outcome_ = AnchorOutcome::WaitingForFixes;
+  Quality last_quality_ = Quality::NONE;
+  Eigen::Vector3d last_sigma_ = Eigen::Vector3d::Zero();
 };
 
 }  // namespace gnss_core

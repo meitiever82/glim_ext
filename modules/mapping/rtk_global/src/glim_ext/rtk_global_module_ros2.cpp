@@ -12,6 +12,7 @@
 #include <glim_ext/util/config_ext.hpp>
 
 #include <gnss_core/antenna_prior_factor.hpp>
+#include <gnss_core/heading_prior_factor.hpp>
 
 namespace glim {
 
@@ -57,12 +58,13 @@ void RtkGlobal::stop_backend() {
   thread_.join();
   const auto& s = pipeline_->stats();
   logger_->info(
-    "rtk_global stats: fix_received={} fix_dropped={} fix_pushed={} anchors={} factors_added={} deferred_released={} too_old={} gap={} gated={} pending_anchors={} deferred_pending={}",
+    "rtk_global stats: fix_received={} fix_dropped={} fix_pushed={} anchors={} factors_added={} heading_factors_added={} deferred_released={} too_old={} gap={} gated={} pending_anchors={} deferred_pending={}",
     ingest_->received(),
     ingest_->dropped(),
     s.fixes,
     s.anchors,
     n_factors_added_.load(),
+    n_heading_added_.load(),
     s.deferred_released,
     s.too_old,
     s.gap,
@@ -116,12 +118,16 @@ void RtkGlobal::backend_task() {
       // body_point = lever_imu: the sample is taken at the submap origin frame (T_origin_frame = I), spec §7.3 v2.
       output_factors_.push_back(gnss_core::AntennaPriorFactor::create(X(c.id), c.p_world, cfg_.lever_imu, c.model));
       ++n_factors_added_;
-      logger_->debug("submap {}: RTK prior p_world={}", c.id, convert_to_string(c.p_world));
+      if (c.has_heading) {
+        output_factors_.push_back(gnss_core::HeadingPriorFactor::create(X(c.id), c.heading_world, c.heading_model));
+        ++n_heading_added_;
+      }
+      logger_->debug("submap {}: RTK prior p_world={} heading={}", c.id, convert_to_string(c.p_world), c.has_heading);
     }
 
     if (!bootstrap_logged_ && pipeline_->initialized()) {
       bootstrap_logged_ = true;
-      logger_->info("T_world_enu={}", convert_to_string(pipeline_->T_world_enu()));
+      logger_->info("T_world_enu={} (source={})", convert_to_string(pipeline_->T_world_enu()), pipeline_->gauge_source());
       logger_->info("released {} deferred RTK factors for submaps before bootstrap", pipeline_->stats().deferred_released);
     }
     if (!anchors.empty()) {

@@ -39,4 +39,12 @@ void FrameAligner::add(const Eigen::Vector3d& submap_xyz, const Eigen::Vector3d&
 bool FrameAligner::initialized() const { return initialized_; }
 Eigen::Isometry3d FrameAligner::T_world_enu() const { return T_world_enu_; }
 
+void FrameAligner::adopt(const Eigen::Isometry3d& T) {
+  if (initialized_) {
+    return;   // 冻结语义：已初始化（本地 bootstrap 或先前 adopt）后不再变
+  }
+  T_world_enu_ = T;
+  initialized_ = true;
+}
+
 }  // namespace gnss_core

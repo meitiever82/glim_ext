@@ -1,20 +1,11 @@
 #pragma once
-#include <gtsam/config.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
 #include <gtsam/geometry/Pose3.h>
 #include <Eigen/Core>
 
-namespace gnss_core {
+#include "gnss_core/factor_compat.hpp"
 
-// GTSAM 4.2 与 4.3 的 evaluateError 可选 Jacobian 形参类型不同:
-//   4.3: gtsam::OptionalMatrixType (= gtsam::Matrix*)
-//   4.2: boost::optional<gtsam::Matrix&>(由 NonlinearFactor.h 自身引入 boost,这里不直接 include boost)
-// 两种类型都支持 `if (H) *H = ...`,函数体通用,只有签名按版本切换。
-#if (GTSAM_VERSION_MAJOR > 4) || (GTSAM_VERSION_MAJOR == 4 && GTSAM_VERSION_MINOR >= 3)
-using OptionalMatrixArg = gtsam::OptionalMatrixType;
-#else
-using OptionalMatrixArg = boost::optional<gtsam::Matrix&>;
-#endif
+namespace gnss_core {
 
 // 带杆臂的 GNSS 位置先验因子(spec §7.3 v2)。
 //   h(X) = X.transformFrom(body_point);  残差 = h(X) - measured_world

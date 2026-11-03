@@ -35,6 +35,7 @@ constexpr size_t kRejectReasonCount = 7;
 
 struct Verdict {
   gtsam::SharedNoiseModel model;   // 通过时非空
+  Eigen::Vector3d sigma = Eigen::Vector3d::Zero();   // 生效噪声(m,E/N/U),通过时有效
   RejectReason reason = RejectReason::None;
   explicit operator bool() const { return model != nullptr; }
 };
@@ -49,5 +50,9 @@ public:
 private:
   NoisePolicyConfig cfg_;
 };
+
+// 通用对角鲁棒噪声模型(与位置因子共用同一套鲁棒核配置),供航向/相对位移因子复用。
+// sigmas 任一非有限或 ≤0、robust_kernel 非法 → std::invalid_argument。
+gtsam::SharedNoiseModel make_diagonal_robust_model(const Eigen::VectorXd& sigmas, const NoisePolicyConfig& cfg);
 
 }  // namespace gnss_core

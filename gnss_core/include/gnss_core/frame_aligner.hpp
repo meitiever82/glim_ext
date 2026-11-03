@@ -19,6 +19,9 @@ public:
   void add(const Eigen::Vector3d& submap_xyz, const Eigen::Vector3d& enu);   // 已初始化后只累积
   bool initialized() const;
   Eigen::Isometry3d T_world_enu() const;   // 未初始化返回 identity;初始化后冻结
+  // 采用外部 gauge（shared-gauge F1：GaugeRegistry 已发布时,本地不再求解,直接采用）。
+  // 语义等同本地 bootstrap：置 initialized_,之后 add() 只累积、T 冻结。
+  void adopt(const Eigen::Isometry3d& T);
 private:
   double min_baseline_;
   bool initialized_ = false;

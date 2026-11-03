@@ -20,6 +20,7 @@
 #include <glim/util/config.hpp>
 #include <glim/util/convert_to_string.hpp>
 #include <gnss_core/anchor_pipeline.hpp>
+#include <gnss_core/relative_pipeline.hpp>
 #include <gnss_core/types.hpp>
 #include <gnss_msgs/msg/rtk_fix.hpp>
 
@@ -34,6 +35,13 @@ struct ShellConfig {
   double max_stamp_skew = 5.0;
   Eigen::Vector3d lever_imu = Eigen::Vector3d::Zero();
   gnss_core::PipelineConfig pipeline;
+  gnss_core::RelativeConfig relative;   // 仅 rtk_odometry 使用
+
+  // --- status / degradation (FusionStatus, 2.1 §8) ---
+  double absolute_min_interval = 1.0;   // s; rtk_odometry 绝对因子降频(相对因子负责形状)
+  double rtk_outage_timeout = 2.0;      // s; 超过则 rtk_outage=true
+  double imu_gap_timeout = 0.2;         // s; 超过则 degraded_imu=true
+  double degraded_lo_sigma = 0.1;       // m; 水平位置 σ 超过则 degraded_lo=true(协方差可用时)
 };
 
 /// Read the common key set (spec §7.5) from `section` of `config`. Throws on invalid values.
@@ -74,6 +82,24 @@ inline ShellConfig load_shell_config(const Config& config, const std::string& se
   p.fix_buffer_horizon = config.param<double>(section, "fix_buffer_horizon", 600.0);
   p.fix_max_gap = config.param<double>(section, "fix_max_gap", 2.5);
   p.enu_origin = config.param<std::vector<double>>(section, "enu_origin", std::vector<double>{});
+  // F1/F2(2026-10-19 shared-gauge 设计):回滚开关与 gauge 求解质量门槛
+  p.shared_gauge = config.param<bool>(section, "shared_gauge", false);   // 默认关:见 PipelineConfig 注释
+  p.aligner_min_quality = config.param<int>(section, "aligner_min_quality", 4);
+  p.heading_enabled = config.param<bool>(section, "heading_enabled", true);
+  p.heading_sigma_floor_deg = config.param<double>(section, "heading_sigma_floor", 2.0);
+
+  auto& r = c.relative;
+  r.enabled = config.param<bool>(section, "relative_enabled", false);
+  r.sigma_floor = config.param<double>(section, "relative_sigma_floor", 0.05);
+  r.yaw_baseline = config.param<double>(section, "yaw_baseline", 10.0);
+  r.max_pair_gap = config.param<double>(section, "relative_max_pair_gap", p.fix_max_gap);
+
+  c.absolute_min_interval = config.param<double>(section, "absolute_min_interval", 1.0);
+  c.rtk_outage_timeout = config.param<double>(section, "rtk_outage_timeout", 2.0);
+  c.imu_gap_timeout = config.param<double>(section, "imu_gap_timeout", 0.2);
+  c.degraded_lo_sigma = config.param<double>(section, "degraded_lo_sigma", 0.1);
+
+  p.name = section;   // "rtk_odometry" / "rtk_global":发布 gauge 时的 owner 标注
   return c;
 }
 
@@ -92,6 +118,21 @@ inline void log_shell_config(spdlog::logger& logger, const ShellConfig& c) {
     c.pipeline.min_baseline,
     c.pipeline.fix_max_gap,
     c.pipeline.fix_buffer_horizon);
+  logger.info("shared_gauge={} aligner_min_quality={}", c.pipeline.shared_gauge, c.pipeline.aligner_min_quality);
+  logger.info(
+    "heading_enabled={} heading_sigma_floor={}deg relative_enabled={} relative_sigma_floor={}m yaw_baseline={}m relative_max_pair_gap={}s",
+    c.pipeline.heading_enabled,
+    c.pipeline.heading_sigma_floor_deg,
+    c.relative.enabled,
+    c.relative.sigma_floor,
+    c.relative.yaw_baseline,
+    c.relative.max_pair_gap);
+  logger.info(
+    "absolute_min_interval={}s rtk_outage_timeout={}s imu_gap_timeout={}s degraded_lo_sigma={}m",
+    c.absolute_min_interval,
+    c.rtk_outage_timeout,
+    c.imu_gap_timeout,
+    c.degraded_lo_sigma);
   if (c.lever_imu.isZero() && c.pipeline.noise.sigma_floor.minCoeff() < 0.5) {
     logger.warn(
       "T_imu_gnss is zero but sigma_floor is {} m: with an uncalibrated lever arm the robust kernel will down-weight good fixes in turns (spec §7.3 v2)",
@@ -124,6 +165,7 @@ public:
     s.diff_age = msg.diff_age;
     s.sats_used = msg.sats_used;
     s.heading = msg.heading;
+    s.heading_sigma = msg.heading_sigma;
     s.heading_valid = msg.heading_valid;
 
     ++received_;

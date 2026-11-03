@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -37,8 +38,10 @@
 
 #include <gtsam/nonlinear/NonlinearFactor.h>
 
+#include <glim_ext/fusion/fusion_types.hpp>
 #include <glim_ext/rtk/rtk_shell_common.hpp>
 #include <gnss_core/anchor_pipeline.hpp>
+#include <gnss_core/relative_pipeline.hpp>
 
 namespace glim {
 
@@ -58,6 +61,7 @@ private:
   };
 
   void rtk_fix_callback(const gnss_msgs::msg::RtkFix::ConstSharedPtr& msg);
+  void on_insert_imu(double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel);
   void on_update_new_frame(const EstimationFrame::ConstPtr& frame);
   void on_smoother_update(
     gtsam_points::IncrementalFixedLagSmootherExtWithFallback& smoother,
@@ -66,13 +70,19 @@ private:
     std::map<std::uint64_t, double>& new_stamps);
   void backend_task();
   void stop_backend();
+  void update_status_snapshot();
+  glim::FusionStatus snapshot_status() const;
 
   rtk::ShellConfig cfg_;
   double smoother_lag_ = 5.0;          // from config_odometry
   double smoother_lag_margin_ = 1.0;   // s; keep this far from the marginalization edge
   std::unique_ptr<rtk::RtkFixIngest> ingest_;
-  std::unique_ptr<gnss_core::AnchorPipeline> pipeline_;   // backend thread only
+  std::unique_ptr<gnss_core::AnchorPipeline> pipeline_;          // backend thread only
+  std::unique_ptr<gnss_core::RelativePipeline> relative_pipeline_;  // backend thread only; null when disabled
   bool bootstrap_logged_ = false;                          // backend thread only
+  bool relative_logged_ = false;                           // backend thread only
+  double last_absolute_stamp_ = -1e9;                      // backend thread only
+  double last_relative_stamp_ = -1e9;                      // backend thread only
   std::atomic_bool horizon_warned_{false};
 
   ConcurrentVector<gnss_core::RtkFixSample> input_fix_queue_;
@@ -80,10 +90,19 @@ private:
   ConcurrentVector<PendingFactor> output_;
 
   std::atomic<double> latest_frame_stamp_{0.0};   // written by the odometry thread, read by backend + odometry threads
+  std::atomic<double> latest_fix_stamp_{0.0};     // last accepted RtkFix sample (data time)
+  std::atomic<double> latest_imu_stamp_{0.0};     // last IMU sample (data time)
+  std::atomic_bool has_imu_{false};
   std::atomic<size_t> n_factors_added_{0};
-  std::atomic<size_t> n_dropped_lag_{0};   // constraints that arrived after their frame left the lag window
+  std::atomic<size_t> n_heading_added_{0};
+  std::atomic<size_t> n_relative_added_{0};
+  std::atomic<size_t> n_absolute_skipped_{0};
+  std::atomic<size_t> n_dropped_lag_{0};   // constraints/factors that arrived after their frame left the lag window
   std::atomic_bool kill_switch_{false};
   std::thread thread_;
+
+  mutable std::mutex status_mutex_;
+  glim::FusionStatus status_snapshot_;
 
   std::shared_ptr<spdlog::logger> logger_;
 };

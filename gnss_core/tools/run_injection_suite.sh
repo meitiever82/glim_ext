@@ -22,6 +22,7 @@ shift 2
 GLIM_WS=${GLIM_WS:-$HOME/glim_ws}
 DRIVER_WS=${DRIVER_WS:-$HOME/driver_ws}
 TOPIC=${TOPIC:-/gnss_cgi610/rtk_fix}
+PYTHON=${PYTHON:-/usr/bin/python3}  # 不用 Hermes venv 的 python3（无 ROS 绑定）
 GLIM_CONFIG_SRC=${GLIM_WS}/src/glim/config              ### CHECK: 现场 glim config 目录
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,9 +42,11 @@ RMSE_PY=${HERE}/traj_rmse.py
 [[ -x "$SYNTH" ]] || { echo "synth_rtk_fix not found"; exit 1; }
 
 # shellcheck disable=SC1090
+set +u  # ROS/colcon setup 脚本引用未定义变量（COLCON_TRACE/AMENT_TRACE_SETUP_FILES 等），临时关 nounset
 source "${DRIVER_WS}/install/setup.bash"
 # shellcheck disable=SC1090
 source "${GLIM_WS}/install/setup.bash"
+set -u
 
 mkdir -p "$WORK"
 cd "$WORK"
@@ -54,7 +57,7 @@ make_config() {
   local name=$1 kernel=$2 lx=$3 ly=$4 lz=$5 enable=$6
   local dir="$WORK/config_$name"
   rm -rf "$dir"; cp -r "$GLIM_CONFIG_SRC" "$dir"
-  python3 - "$dir" "$kernel" "$lx" "$ly" "$lz" "$enable" "$WORK/dump_$name" "$TOPIC" <<'PY'
+  "$PYTHON" - "$dir" "$kernel" "$lx" "$ly" "$lz" "$enable" "$WORK/dump_$name" "$TOPIC" <<'PY'
 import json, sys, os
 d, kernel, lx, ly, lz, enable, dump, topic = sys.argv[1:]
 def load(p):
@@ -89,12 +92,12 @@ PY
   echo "$dir"
 }
 
-# run_glim <config_dir> → 轨迹文件路径
+# run_glim <config_dir> <bag> → 轨迹文件路径
 run_glim() {
   local cfg=$1
-  local dump; dump=$(python3 -c "import json,sys;o=json.load(open('$cfg/config_ros.json'));print(o.get('glim_ros',o)['dump_path'])")
+  local dump="$cfg/dump_out"   # dump_path 是 glim_rosbag 的 ROS 参数（config 文件不控制它），直接用 -p 传
   rm -rf "$dump"; mkdir -p "$dump"
-  ros2 run glim_ros glim_rosbag "$2" --ros-args -p config_path:="$cfg" -p auto_quit:=true >"$dump/glim.log" 2>&1   ### CHECK: 参数名
+  ros2 run glim_ros glim_rosbag "$2" --ros-args -p config_path:="$cfg" -p dump_path:="$dump" -p auto_quit:=true >"$dump/glim.log" 2>&1
   local traj="$dump/traj_imu.txt"
   [[ -s "$traj" ]] || { echo "no traj at $traj (see $dump/glim.log)"; exit 1; }
   echo "$traj"
@@ -106,7 +109,7 @@ rmse() {
   if command -v evo_ape >/dev/null 2>&1; then
     evo_ape tum "$ref" "$est" -a --t_max_diff 0.05 2>/dev/null | awk '/rmse/{r=$2} END{print "rmse=" r}'
   else
-    python3 "$RMSE_PY" "$ref" "$est" --align "$@"
+    "$PYTHON" "$RMSE_PY" "$ref" "$est" --align "$@"
   fi
 }
 
@@ -117,13 +120,13 @@ TRAJ_REF=$(run_glim "$CFG_REF" "$BAG")
 cp "$TRAJ_REF" traj_ref.txt
 T0=$(awk '!/^#/{print $1; exit}' traj_ref.txt)
 T1=$(awk '!/^#/{t=$1} END{print t}' traj_ref.txt)
-DUR=$(python3 -c "print($T1-$T0)")
+DUR=$("$PYTHON" -c "print($T1-$T0)")
 echo "   traj_ref.txt: $(grep -vc '^#' traj_ref.txt) poses, ${DUR}s"
 
 # ---------- 2. 合成五个 .pos + 合并 bag ----------
 echo "== [2/4] synthesize"
 # 时间段用相对起点秒数('+'),取轨迹中段
-S1=$(python3 -c "print(round($DUR*0.3,1))"); S2=$(python3 -c "print(round($DUR*0.5,1))")
+S1=$("$PYTHON" -c "print(round($DUR*0.3,1))"); S2=$("$PYTHON" -c "print(round($DUR*0.5,1))")
 declare -A SYNTH_ARGS=(
   [clean]=""
   [wrong_fix]="--wrong-fix 0.05"
@@ -135,43 +138,52 @@ for name in clean wrong_fix stale float lever; do
   # shellcheck disable=SC2086
   "$SYNTH" traj_ref.txt "synth_$name.pos" ${SYNTH_ARGS[$name]} --truth "truth_$name.pos" --seed 42
   rm -rf "bag_$name"
-  python3 "$POS2BAG" "synth_$name.pos" --out "bag_$name" --topic "$TOPIC" --merge "$BAG"
+  "$PYTHON" "$POS2BAG" "synth_$name.pos" --out "bag_$name" --topic "$TOPIC" --merge "$BAG"
 done
 
 # ---------- 3. 跑 glim × {huber, none} ----------
 echo "== [3/4] glim runs"
 declare -A RES
-run_case() {   # run_case <name> <kernel> <lever_xyz…>
-  local name=$1 kernel=$2 lx=$3 ly=$4 lz=$5
-  local tag="${name}_${kernel}_${lx}${ly}${lz}"
+: > results.tsv
+run_case() {   # run_case <name> <kernel> <lever_xyz…> <rep>
+  local name=$1 kernel=$2 lx=$3 ly=$4 lz=$5 rep=$6
+  local tag="${name}_${kernel}_${lx}${ly}${lz}_r${rep}"
   local cfg; cfg=$(make_config "$tag" "$kernel" "$lx" "$ly" "$lz" 1)
   local traj; traj=$(run_glim "$cfg" "bag_$name")
   cp "$traj" "traj_$tag.txt"
   local n_rej; n_rej=$(grep -o 'n_rejected=[0-9]*' "$(dirname "$traj")/glim.log" | tail -1 || true)
-  RES[$tag]="$(rmse traj_ref.txt "traj_$tag.txt") $n_rej"
+  local r; r="$(rmse traj_ref.txt "traj_$tag.txt")"
+  RES[$tag]="$r $n_rej"
+  echo "$name $kernel $lx$ly$lz $rep $r" >> results.tsv
   echo "   $tag: ${RES[$tag]}"
 }
-for name in clean wrong_fix stale float; do
-  run_case "$name" huber 0 0 0
-  run_case "$name" none 0 0 0
-done
-# 杆臂用例:config 填 0 与填对 [0,1,0],只跑 huber
-run_case lever huber 0 0 0
-run_case lever huber 0 1 0
-
-# ---------- 4. 汇总 ----------
-echo "== [4/4] summary (RMSE vs traj_ref.txt, aligned)"
-{
-  printf '%-12s | %-40s | %-40s\n' injection huber none
-  printf -- '-------------|------------------------------------------|------------------------------------------\n'
+REPEAT=${REPEAT:-1}   # 每配置重复次数（前端 run 间方差大，>=3 才能读对比）
+for rep in $(seq 1 "$REPEAT"); do
+  echo "== repeat $rep/$REPEAT"
   for name in clean wrong_fix stale float; do
-    printf '%-12s | %-40s | %-40s\n' "$name" "${RES[${name}_huber_000]}" "${RES[${name}_none_000]}"
+    run_case "$name" huber 0 0 0 "$rep"
+    run_case "$name" none 0 0 0 "$rep"
   done
-  printf '%-12s | %-40s | %-40s\n' "lever T=0" "${RES[lever_huber_000]}" "-"
-  printf '%-12s | %-40s | %-40s\n' "lever T=010" "${RES[lever_huber_010]}" "-"
-  echo
-  echo "转弯段单独看(需自行填时间窗):python3 $RMSE_PY traj_ref.txt traj_lever_huber_000.txt --align --relative-time --from S --to E"
-  echo
-  echo "预期(spec §12.3):wrong_fix: huber≈clean / none 恶化;stale: n_rejected 增加、RMSE≈clean;"
-  echo "               float: RMSE≈clean;lever: T=010 转弯段 RMSE 明显低于 T=0"
-} | tee summary.txt
+  # 杆臂用例:config 填 0 与填对 [0,1,0],只跑 huber
+  run_case lever huber 0 0 0 "$rep"
+  run_case lever huber 0 1 0 "$rep"
+done
+
+# ---------- 4. 汇总（按 用例×核×杆臂 聚合 N 次重复：mean [min..max]） ----------
+echo "== [4/4] summary (RMSE vs traj_ref.txt, aligned)"
+"$PYTHON" - <<'PY' | tee summary.txt
+import collections, re
+rows = collections.defaultdict(list)
+for line in open("results.tsv"):
+    p = line.split()
+    if len(p) >= 5:
+        m = re.search(r"rmse=([0-9.]+)", " ".join(p[4:]))
+        if m:
+            rows[(p[0], p[1], p[2])].append(float(m.group(1)))
+print(f"{'injection':<12} | {'kernel':<6} | {'lever':<6} | {'n':>2} | mean  [min..max]")
+print("-" * 60)
+for (name, kernel, lever), v in sorted(rows.items()):
+    print(f"{name:<12} | {kernel:<6} | {lever:<6} | {len(v):>2} | {sum(v)/len(v):.3f} [{min(v):.3f}..{max(v):.3f}]")
+print()
+print("预期(spec §12.3):wrong_fix: huber≈clean / none 恶化;stale: RMSE≈clean;float: RMSE≈clean;lever: 010 转弯段明显低于 000")
+PY

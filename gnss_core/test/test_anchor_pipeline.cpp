@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "gnss_core/anchor_pipeline.hpp"
+#include "gnss_core/gauge_registry.hpp"
 #include "gnss_core/geodetic.hpp"
 #include "gnss_core/synth.hpp"
 #include "synth_fixtures.hpp"
@@ -13,6 +14,12 @@ using namespace gnss_core;
 using gnss_core::test_fixtures::straight_then_turn;
 
 namespace {
+
+// GaugeRegistry 是进程级单例（F1 shared-gauge）：每个 bootstrap 的测试前必须清空，
+// 否则先跑的测试发布的 gauge 会被后面的 pipeline 采用（adopt）而非本地求解。
+struct RegistryReset {
+  RegistryReset() { GaugeRegistry::instance().reset(); }
+};
 
 double yaw_of(const Eigen::Isometry3d& T) { return std::atan2(T.linear()(1, 0), T.linear()(0, 0)); }
 
@@ -64,6 +71,7 @@ PipelineConfig default_config() {
 // 1. 干净数据:所有 anchor 最终 Constrained(含 bootstrap 前的 deferred 补发),p_world 与真值 < 5 cm,
 //    T_world_enu 恢复真值。
 TEST(AnchorPipeline, CleanDataConstrainsEveryAnchor) {
+  RegistryReset registry_reset_;
   Scene sc;
   AnchorPipeline pl(default_config());
   for (const auto& s : sc.synth.samples) pl.push_fix(s);
@@ -109,6 +117,7 @@ TEST(AnchorPipeline, CleanDataConstrainsEveryAnchor) {
 
 // 2. fix 不够时 anchor 等待:process() 返回空、pending 不减;补上 fix 后处理。
 TEST(AnchorPipeline, AnchorsWaitUntilFixesCoverThem) {
+  RegistryReset registry_reset_;
   Scene sc(1.0);
   AnchorPipeline pl(default_config());
 
@@ -146,6 +155,7 @@ TEST(AnchorPipeline, AnchorsWaitUntilFixesCoverThem) {
 
 // 3. anchor 早于缓冲最老样本(已被 prune)→ TooOld 丢弃,不阻塞后续。
 TEST(AnchorPipeline, AnchorOlderThanBufferIsDropped) {
+  RegistryReset registry_reset_;
   Scene sc(1.0);
   PipelineConfig pc = default_config();
   pc.fix_buffer_horizon = 20.0;   // 推完 50 s 的 fix 后缓冲只剩 [30, 50]
@@ -171,6 +181,7 @@ TEST(AnchorPipeline, AnchorOlderThanBufferIsDropped) {
 
 // 4. 中间 60 s 无 fix 的段内的 anchor → Gap;段前后的 anchor 不受影响。
 TEST(AnchorPipeline, AnchorInsideFixGapIsRejected) {
+  RegistryReset registry_reset_;
   Scene sc(1.0);
   // 把 t > 30 的样本与 anchor 整体后移 60 s:形成 (30.0, 90.1) 的 60 s 空洞
   // (t=30 的 anchor 留在洞前沿,与样本 30.0 重合,可插值)
@@ -198,6 +209,7 @@ TEST(AnchorPipeline, AnchorInsideFixGapIsRejected) {
 
 // 5. 全 SINGLE:全部 Gated,不参与 aligner,不定原点,不初始化。
 TEST(AnchorPipeline, GatedSamplesDoNotFeedAligner) {
+  RegistryReset registry_reset_;
   Scene sc(1.0);
   for (auto& s : sc.synth.samples) s.quality = Quality::SINGLE;
   AnchorPipeline pl(default_config());   // min_quality=3 (FLOAT)
@@ -220,6 +232,7 @@ TEST(AnchorPipeline, GatedSamplesDoNotFeedAligner) {
 
 // 6. 配置了 enu_origin:enu_origin() 等于配置值而非首个样本;结果仍与真值一致(原点差被 T_world_enu 吸收)。
 TEST(AnchorPipeline, ConfiguredEnuOriginIsUsed) {
+  RegistryReset registry_reset_;
   Scene sc(1.0);
   PipelineConfig pc = default_config();
   pc.enu_origin = {sc.cfg.lat0 + 0.001, sc.cfg.lon0 - 0.002, sc.cfg.alt0 + 12.0};
@@ -243,6 +256,7 @@ TEST(AnchorPipeline, ConfiguredEnuOriginIsUsed) {
 
 // 7. 非法配置构造抛异常。
 TEST(AnchorPipeline, InvalidConfigThrows) {
+  RegistryReset registry_reset_;
   PipelineConfig pc;
   pc.noise.min_quality = 9;
   EXPECT_THROW(AnchorPipeline{pc}, std::invalid_argument);

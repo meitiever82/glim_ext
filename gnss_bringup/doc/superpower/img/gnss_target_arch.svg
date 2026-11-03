@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="860" font-family="Helvetica, Arial, sans-serif">
+  <rect width="1600" height="860" fill="#ffffff"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#666666"/>
+    </marker>
+    <marker id="arrowR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#B85450"/>
+    </marker>
+  </defs>
+
+  <text x="40" y="48" font-size="22" font-weight="bold" fill="#333333">GNSS 定位目标架构（生产线）</text>
+  <text x="40" y="72" font-size="13" fill="#777777">驱动保持原生 · 归一化在 gnss_bringup 适配器层 · 规则全部在 gnss_core 纯库 · 节点只是壳</text>
+
+  <!-- ====== arrows ====== -->
+  <!-- hw -> drivers -->
+  <line x1="250" y1="180" x2="336" y2="200" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="250" y1="310" x2="336" y2="330" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="250" y1="470" x2="336" y2="440" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="300" y="465" font-size="10" fill="#555" text-anchor="middle">差分注入</text>
+
+  <!-- drivers -> adapters -->
+  <line x1="580" y1="220" x2="666" y2="210" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="580" y1="350" x2="666" y2="300" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <!-- oemraw -> rtkrcv -->
+  <line x1="580" y1="260" x2="666" y2="420" stroke="#666" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+  <text x="610" y="345" font-size="10" fill="#555" text-anchor="middle">/bynav/oemraw</text>
+
+  <!-- adapters/rtkrcv -> judge & divergence -->
+  <line x1="890" y1="220" x2="966" y2="200" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="890" y1="300" x2="966" y2="230" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="890" y1="440" x2="966" y2="380" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="928" y="418" font-size="10" fill="#555" text-anchor="middle">独立解算</text>
+
+  <!-- judge -> outputs -->
+  <line x1="1190" y1="230" x2="1256" y2="190" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="1190" y1="290" x2="1256" y2="330" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <!-- divergence -> diag -->
+  <line x1="1190" y1="400" x2="1256" y2="480" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <!-- ops -> record -->
+  <line x1="1030" y1="560" x2="1256" y2="620" stroke="#666" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+
+  <!-- gnss_core dashed call -->
+  <line x1="1080" y1="620" x2="1080" y2="476" stroke="#82B366" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#arrow)"/>
+  <text x="1120" y="560" font-size="10" fill="#82B366" text-anchor="middle">调用（链接）</text>
+
+  <!-- ====== layer 1: hardware ====== -->
+  <rect x="40" y="130" width="210" height="100" rx="4" fill="#B0E3E6" stroke="#0E8088" stroke-width="1.5"/>
+  <text x="145" y="165" font-size="14" font-weight="bold" fill="#333" text-anchor="middle">北云接收机</text>
+  <text x="145" y="187" font-size="10" fill="#444" text-anchor="middle">INSPVAX / BESTPOS / HEADINGA</text>
+  <text x="145" y="203" font-size="10" fill="#444" text-anchor="middle">CORRIMUDATA / GPGGA 二进制流</text>
+
+  <rect x="40" y="270" width="210" height="80" rx="4" fill="#B0E3E6" stroke="#0E8088" stroke-width="1.5"/>
+  <text x="145" y="305" font-size="14" font-weight="bold" fill="#333" text-anchor="middle">华测 610 接收机</text>
+  <text x="145" y="325" font-size="10" fill="#444" text-anchor="middle">SatStatus 协议流</text>
+
+  <rect x="40" y="430" width="210" height="80" rx="4" fill="#B0E3E6" stroke="#0E8088" stroke-width="1.5"/>
+  <text x="145" y="462" font-size="14" font-weight="bold" fill="#333" text-anchor="middle">NTRIP 平台 / 基站</text>
+  <text x="145" y="482" font-size="10" fill="#444" text-anchor="middle">RTCM 差分数据</text>
+
+  <!-- ====== layer 2: drivers (third-party) ====== -->
+  <rect x="340" y="110" width="240" height="300" rx="6" fill="none" stroke="#999" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="360" y="134" font-size="13" font-weight="bold" fill="#666">third-party 驱动层（只解析发送，零算法）</text>
+
+  <rect x="360" y="150" width="200" height="130" rx="4" fill="#DAE8FC" stroke="#6C8EBF" stroke-width="1.5"/>
+  <text x="460" y="178" font-size="13" font-weight="bold" fill="#333" text-anchor="middle">bynav_ros_driver2</text>
+  <text x="460" y="198" font-size="9" fill="#444" text-anchor="middle">/bynav/inspvax · bestpos · heading2</text>
+  <text x="460" y="212" font-size="9" fill="#444" text-anchor="middle">/bynav/corrimudata · gpgga · oemraw</text>
+  <text x="460" y="226" font-size="9" fill="#444" text-anchor="middle">/gps/fix · /imu/data_raw</text>
+  <text x="460" y="244" font-size="9" fill="#666" text-anchor="middle">NTRIP 注入 + /soft_dtu/rtcm_data</text>
+  <text x="460" y="262" font-size="9" fill="#666" text-anchor="middle">原生 novatel_oem7_msgs，不归一化</text>
+
+  <rect x="360" y="300" width="200" height="90" rx="4" fill="#DAE8FC" stroke="#6C8EBF" stroke-width="1.5"/>
+  <text x="460" y="328" font-size="13" font-weight="bold" fill="#333" text-anchor="middle">gnss_chcnav（610 驱动）</text>
+  <text x="460" y="348" font-size="9" fill="#444" text-anchor="middle">/gnss_cgi610/rtk_fix</text>
+  <text x="460" y="364" font-size="9" fill="#444" text-anchor="middle">gnss_msgs/RtkFix 原生</text>
+
+  <!-- ====== layer 3: gnss_bringup ====== -->
+  <rect x="620" y="110" width="630" height="490" rx="6" fill="none" stroke="#999" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="640" y="134" font-size="13" font-weight="bold" fill="#666">gnss_bringup（节点编排层：适配 + 归一化 + 发布，规则一行不写）</text>
+
+  <!-- adapters -->
+  <rect x="660" y="150" width="230" height="80" rx="4" fill="#FFF2CC" stroke="#D6B656" stroke-width="1.5"/>
+  <text x="775" y="178" font-size="13" font-weight="bold" fill="#333" text-anchor="middle">bynav_adapter（归一化）</text>
+  <text x="775" y="198" font-size="9" fill="#444" text-anchor="middle">INSPVAX+HEADINGA+CORRIMU+GGA</text>
+  <text x="775" y="214" font-size="9" fill="#444" text-anchor="middle">→ RtkFix 扩展（含 ins_status/基线/IMU）</text>
+
+  <rect x="660" y="250" width="230" height="70" rx="4" fill="#FFF2CC" stroke="#D6B656" stroke-width="1.5"/>
+  <text x="775" y="278" font-size="13" font-weight="bold" fill="#333" text-anchor="middle">c610_adapter</text>
+  <text x="775" y="298" font-size="9" fill="#444" text-anchor="middle">RtkFix 直通 + 补齐缺省字段</text>
+
+  <!-- rtkrcv -->
+  <rect x="660" y="380" width="230" height="90" rx="4" fill="#FFF2CC" stroke="#D6B656" stroke-width="1.5"/>
+  <text x="775" y="408" font-size="13" font-weight="bold" fill="#333" text-anchor="middle">rtkrcv_node（独立解算）</text>
+  <text x="775" y="428" font-size="9" fill="#444" text-anchor="middle">RTKLIB 从 oemraw 裸流重解</text>
+  <text x="775" y="444" font-size="9" fill="#444" text-anchor="middle">→ RtkFix（对比第二条腿）</text>
+
+  <!-- judge -->
+  <rect x="970" y="160" width="220" height="110" rx="4" fill="#D5E8D4" stroke="#82B366" stroke-width="1.5"/>
+  <text x="1080" y="188" font-size="13" font-weight="bold" fill="#333" text-anchor="middle">judge 节点（壳）</text>
+  <text x="1080" y="208" font-size="9" fill="#444" text-anchor="middle">组装 Evidence → gnss_core::Judge</text>
+  <text x="1080" y="224" font-size="9" fill="#444" text-anchor="middle">一次判决 + 二次判决同一份规则</text>
+  <text x="1080" y="244" font-size="9" fill="#666" text-anchor="middle">发布 LocalizationData + Aux</text>
+
+  <!-- divergence -->
+  <rect x="970" y="300" width="220" height="110" rx="4" fill="#D5E8D4" stroke="#82B366" stroke-width="1.5"/>
+  <text x="1080" y="328" font-size="13" font-weight="bold" fill="#333" text-anchor="middle">对比节点（壳）</text>
+  <text x="1080" y="348" font-size="9" fill="#444" text-anchor="middle">device_divergence：板卡解 vs 独立解</text>
+  <text x="1080" y="364" font-size="9" fill="#444" text-anchor="middle">双路 FIXED 样本学习 σ，超限告警</text>
+  <text x="1080" y="384" font-size="9" fill="#666" text-anchor="middle">调 gnss_core divergence/trajectory</text>
+
+  <!-- ops row -->
+  <rect x="660" y="500" width="530" height="80" rx="4" fill="#F5F5F5" stroke="#666" stroke-width="1.2"/>
+  <text x="925" y="526" font-size="12" font-weight="bold" fill="#333" text-anchor="middle">运维节点（现成）：pos_writer · gnss_diag_node · gnss_cleanup_node</text>
+  <text x="925" y="546" font-size="10" fill="#444" text-anchor="middle">rtcm_bridge（RawStream 桥接）· record_gnss.sh（rosbag2 录制，主链路零磁盘依赖）</text>
+  <text x="925" y="564" font-size="10" fill="#444" text-anchor="middle">保留 14 天 + 85% 水位清理 · 启动宽限期 · 时钟回跳处理</text>
+
+  <!-- ====== outputs ====== -->
+  <rect x="1260" y="140" width="290" height="100" rx="4" fill="#FFE6CC" stroke="#D79B00" stroke-width="1.5"/>
+  <text x="1405" y="172" font-size="14" font-weight="bold" fill="#333" text-anchor="middle">定位结果（gnss_bringup 发布）</text>
+  <text x="1405" y="194" font-size="10" fill="#444" text-anchor="middle">/localization/localization_data（+aux）</text>
+  <text x="1405" y="212" font-size="10" fill="#444" text-anchor="middle">→ flofix_loc / 规划控制 · 50Hz</text>
+
+  <rect x="1260" y="290" width="290" height="90" rx="4" fill="#FFE6CC" stroke="#D79B00" stroke-width="1.5"/>
+  <text x="1405" y="320" font-size="14" font-weight="bold" fill="#333" text-anchor="middle">指标与质量</text>
+  <text x="1405" y="342" font-size="10" fill="#444" text-anchor="middle">固定率 / 静态σ / invalid_reason</text>
+  <text x="1405" y="360" font-size="10" fill="#444" text-anchor="middle">gnss_core::metrics 计算</text>
+
+  <rect x="1260" y="440" width="290" height="90" rx="4" fill="#FFE6CC" stroke="#D79B00" stroke-width="1.5"/>
+  <text x="1405" y="470" font-size="14" font-weight="bold" fill="#333" text-anchor="middle">诊断聚合</text>
+  <text x="1405" y="492" font-size="10" fill="#444" text-anchor="middle">/gnss/diagnostics（DiagnosticArray）</text>
+  <text x="1405" y="510" font-size="10" fill="#444" text-anchor="middle">发散告警 / 断流 / rtkrcv 健康 → 云端</text>
+
+  <rect x="1260" y="580" width="290" height="80" rx="4" fill="#FFE6CC" stroke="#D79B00" stroke-width="1.5"/>
+  <text x="1405" y="610" font-size="14" font-weight="bold" fill="#333" text-anchor="middle">落盘（rosbag2）</text>
+  <text x="1405" y="632" font-size="10" fill="#444" text-anchor="middle">RawStream + RtkFix + LocalizationData</text>
+  <text x="1405" y="648" font-size="10" fill="#444" text-anchor="middle">回放 = parity 验证数据源</text>
+
+  <!-- ====== gnss_core ====== -->
+  <rect x="660" y="620" width="530" height="130" rx="6" fill="none" stroke="#82B366" stroke-width="1.5" stroke-dasharray="8,4"/>
+  <text x="680" y="646" font-size="13" font-weight="bold" fill="#82B366">gnss_core（纯库，无 ROS —— 规则唯一存放处）</text>
+  <rect x="680" y="662" width="160" height="66" rx="4" fill="#D5E8D4" stroke="#82B366" stroke-width="1.2"/>
+  <text x="760" y="688" font-size="11" font-weight="bold" fill="#333" text-anchor="middle">judge</text>
+  <text x="760" y="706" font-size="9" fill="#444" text-anchor="middle">门控 / invalid_reason</text>
+  <rect x="860" y="662" width="160" height="66" rx="4" fill="#D5E8D4" stroke="#82B366" stroke-width="1.2"/>
+  <text x="940" y="688" font-size="11" font-weight="bold" fill="#333" text-anchor="middle">divergence · metrics</text>
+  <text x="940" y="706" font-size="9" fill="#444" text-anchor="middle">对比 / 固定率 / 静态σ</text>
+  <rect x="1040" y="662" width="130" height="66" rx="4" fill="#D5E8D4" stroke="#82B366" stroke-width="1.2"/>
+  <text x="1105" y="688" font-size="11" font-weight="bold" fill="#333" text-anchor="middle">geodetic</text>
+  <text x="1105" y="706" font-size="9" fill="#444" text-anchor="middle">坐标 / 时间</text>
+
+  <!-- bottom principles -->
+  <rect x="40" y="770" width="1510" height="66" rx="4" fill="#F5F5F5" stroke="#666" stroke-width="1.2"/>
+  <text x="795" y="795" font-size="12" font-weight="bold" fill="#333" text-anchor="middle">边界纪律：驱动发原生话题（不动第三方）· 归一化只在适配器 · 规则只在 gnss_core · LocalizationData 只由 gnss_bringup 发布</text>
+  <text x="795" y="816" font-size="11" fill="#555" text-anchor="middle">msg 冻结评审：RtkFix 扩展（速度/姿态/IMU/ins_status/基线）+ LocalizationData 新增（invalid_reason/zero_velocity）· 迁移：parity 双跑 → 逐步替换 → localization 仓只读</text>
+</svg>

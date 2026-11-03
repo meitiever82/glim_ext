@@ -19,6 +19,7 @@ option(ENABLE_GNSS "Enable GNSS module (ROS1 is not supported)" ON)
 option(ENABLE_RTK_GLOBAL "Enable quality-aware RTK global constraint module (ROS2 only; needs gnss_core + gnss_msgs)" ON)
 option(ENABLE_RTK_ODOMETRY "Enable quality-aware RTK odometry-frame constraint module (ROS2 only; needs gnss_core + gnss_msgs)" ON)
 option(ENABLE_FLATEARTHER "Enable flat earth assumption module" ON)
+option(ENABLE_SEMANTIC_MAP "Enable semantic voxel map / 100m submap module" ON)
 
 #################
 ## ROS-related ##
@@ -36,6 +37,11 @@ find_package(glim REQUIRED)
 
 add_library(glim_ext SHARED
   src/glim_ext/util/config_ext.cpp
+  src/glim_ext/fusion/fusion_status_bus.cpp
+  src/glim_ext/semantic/linefit_ground_segmentation.cpp
+  src/glim_ext/semantic/semantic_voxel_map.cpp
+  src/glim_ext/semantic/submap_manager.cpp
+  src/glim_ext/semantic/semantic_map_bus.cpp
 )
 target_include_directories(glim_ext PUBLIC
   include
@@ -123,6 +129,11 @@ if(ENABLE_FLATEARTHER)
   list(APPEND glim_ext_LIBRARIES flat_earther)
 endif()
 
+if(ENABLE_SEMANTIC_MAP)
+  add_subdirectory(modules/mapping/semantic_voxel_map)
+  list(APPEND glim_ext_LIBRARIES semantic_voxel_map)
+endif()
+
 #############
 ## Install ##
 #############
@@ -169,6 +180,13 @@ if(DEFINED ENV{ROS_VERSION})
     install(DIRECTORY config DESTINATION share/glim_ext)
     ament_export_libraries(${glim_ext_LIBRARIES})
     ament_export_include_directories(include)
+
+    if(BUILD_TESTING)
+      find_package(ament_cmake_gtest REQUIRED)
+      ament_add_gtest(test_semantic_map test/test_semantic_map.cpp)
+      target_link_libraries(test_semantic_map glim_ext)
+    endif()
+
     ament_package()
   elseif($ENV{ROS_VERSION} EQUAL 1)
     # ROS1

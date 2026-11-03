@@ -14,6 +14,7 @@
     "config_flat_earther": "config_flat_earther.json",
     "config_gnss_global": "config_gnss_global.json",
     "config_scan_context": "config_scan_context.json",
-    "config_dbow": "config_dbow.json"
+    "config_dbow": "config_dbow.json",
+    "config_semantic_map": "config_semantic_map.json"
   }
 }

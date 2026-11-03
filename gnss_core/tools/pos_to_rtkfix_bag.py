@@ -133,10 +133,16 @@ def main():
         rosbag2_py.StorageOptions(uri=args.out, storage_id=args.storage),
         rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"),
     )
-    # Jazzy 的 TopicMetadata 需要 id 位置参数(Humble 不需要);两者都接受 keyword 形式。
-    writer.create_topic(rosbag2_py.TopicMetadata(
-        id=0, name=args.topic, type="gnss_msgs/msg/RtkFix", serialization_format="cdr",
-        offered_qos_profiles=""))
+    # TopicMetadata 的 id 字段是 Jazzy+ 才有；Humble 完全没有（keyword 也不行）。
+    try:
+        topic_meta = rosbag2_py.TopicMetadata(
+            id=0, name=args.topic, type="gnss_msgs/msg/RtkFix", serialization_format="cdr",
+            offered_qos_profiles="")
+    except TypeError:
+        topic_meta = rosbag2_py.TopicMetadata(
+            name=args.topic, type="gnss_msgs/msg/RtkFix", serialization_format="cdr",
+            offered_qos_profiles="")
+    writer.create_topic(topic_meta)
 
     # 合成 RtkFix 序列(bag 接收时间 = header.stamp;元组第 2 项用于同时刻排序:LiDAR 侧先写)
     def rtk_iter():
@@ -160,9 +166,15 @@ def main():
             if tm.name == args.topic:
                 print(f"warning: source bag already has {args.topic}; its messages are dropped", file=sys.stderr)
                 continue
-            writer.create_topic(rosbag2_py.TopicMetadata(
-                id=i, name=tm.name, type=tm.type, serialization_format=tm.serialization_format,
-                offered_qos_profiles=getattr(tm, "offered_qos_profiles", "")))   # 保留源 QoS
+            try:   # TopicMetadata.id 是 Jazzy+ 才有，Humble 不认
+                topic_meta = rosbag2_py.TopicMetadata(
+                    id=i, name=tm.name, type=tm.type, serialization_format=tm.serialization_format,
+                    offered_qos_profiles=getattr(tm, "offered_qos_profiles", ""))
+            except TypeError:
+                topic_meta = rosbag2_py.TopicMetadata(
+                    name=tm.name, type=tm.type, serialization_format=tm.serialization_format,
+                    offered_qos_profiles=getattr(tm, "offered_qos_profiles", ""))
+            writer.create_topic(topic_meta)   # 保留源 QoS
 
         def lidar_iter():
             # SequentialReader 按接收时间升序输出

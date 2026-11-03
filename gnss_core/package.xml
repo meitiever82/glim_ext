@@ -3,7 +3,7 @@
   <name>gnss_core</name>
   <version>0.1.0</version>
   <description>Framework-free GNSS algorithms (no ROS, no GLIM)</description>
-  <maintainer email="dev@example.com">dev</maintainer>
+  <maintainer email="ruonan.guo@boonray.com">dev</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

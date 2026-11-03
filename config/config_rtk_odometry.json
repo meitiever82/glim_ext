@@ -34,10 +34,33 @@
   //                       without RTK, which is fine: it is fixed-lag, not the map).
   // enu_origin          : [] = first accepted fix; or [lat, lon, alt] to pin the ENU origin
   //
+  // --- absolute heading (2.1) ---
+  // heading_enabled     : inject a HeadingPriorFactor when the board reports heading_valid=true
+  // heading_sigma_floor : deg; lower bound on the heading sigma (board heading is only trustworthy
+  //                       above a few degrees: dual-antenna baseline is short and the solve is smoothed)
+  //
+  // --- relative constraints (2.1): shape, independent of the absolute gauge ---
+  // relative_enabled      : inject RelativeTranslationFactor between consecutive RTK epochs
+  // relative_sigma_floor  : m; lower bound on the differential noise (epoch differencing amplifies σ by √2)
+  // yaw_baseline          : m; travel before the *relative* ENU→odom yaw is solved and frozen. Separate
+  //                         from min_baseline (absolute gauge, 50 m): relative constraints need yaw early,
+  //                         and 10 m already pins it to ~1e-3 rad at 1 cm epoch noise.
+  // relative_max_pair_gap : s; skip the differencing pair when the two epochs are further apart
+  //
+  // --- absolute factor decimation (2.1) ---
+  // absolute_min_interval : s; minimum spacing between absolute position/heading factors. Relative
+  //                         factors carry the motion shape at RTK rate; the anchor only fixes the gauge.
+  //                         0 disables decimation (one absolute factor per accepted epoch).
+  //
   // --- odometry-specific ---
   // smoother_lag_margin : s; a factor is only inserted for frames newer than (smoother_lag - margin)
   //                       behind the latest frame, otherwise its key may already be marginalized.
   //                       smoother_lag itself is read from config_odometry.
+  //
+  // --- status / degradation (FusionStatus) ---
+  // rtk_outage_timeout : s without an accepted RtkFix (data time) before rtk_outage=true
+  // imu_gap_timeout    : s without an IMU sample before degraded_imu=true (silent when no IMU at all)
+  // degraded_lo_sigma  : m; horizontal position σ of the latest smoothed pose above which degraded_lo=true
   //
   // --- buffer / time sanity ---
   // fix_buffer_horizon  : s of RTK samples kept behind the latest sample. Must exceed the lag of global
@@ -63,7 +86,21 @@
 
     "T_imu_gnss": [0.0, 0.0, 0.0],
 
+    "heading_enabled": true,
+    "heading_sigma_floor": 2.0,
+
+    "relative_enabled": true,
+    "relative_sigma_floor": 0.05,
+    "yaw_baseline": 10.0,
+    "relative_max_pair_gap": 2.5,
+
+    "absolute_min_interval": 1.0,
+
     "smoother_lag_margin": 1.0,
+
+    "rtk_outage_timeout": 2.0,
+    "imu_gap_timeout": 0.2,
+    "degraded_lo_sigma": 0.1,
 
     "min_baseline": 50.0,
     "enu_origin": [],

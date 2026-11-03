@@ -1,0 +1,45 @@
+{
+  /*** semantic_map: geometric ground segmentation + 100m semantic voxel submap (stage 2.2) ***/
+  // Runs on odometry frames. Everything here is pure CPU (no ROS, no GPU).
+  //
+  // --- submap ---
+  // submap_radius            : m; 50 -> 100m x 100m window centred on the vehicle. When the centre
+  //                            drifts more than half of it, the submap is recentred: version++,
+  //                            retained voxels decay (0.95) and everything outside the radius is pruned.
+  // near_resolution          : m; voxel size within far_switch_distance of the sensor
+  // far_resolution           : m; voxel size beyond far_switch_distance
+  // far_switch_distance      : m; near/far switch distance from the sensor pose
+  // voxel_update_min_interval: s; minimum spacing between map updates (0.1 = 10Hz update rate)
+  //
+  // --- metadata exported to stage 4/5 (SubmapMeta) ---
+  // vehicle_id               : copied into every submap query result
+  // extrinsic_version        : version of the LiDAR-IMU extrinsics used; bump when they change
+  //
+  // --- ground segmentation (LineFit, spec 2.2 §3) ---
+  // ground_sectors           : azimuth sectors over [-pi, pi)
+  // ground_range_bin_width   : m; radial bin width used to pick the lowest return per bin
+  // ground_min_range         : m; points closer than this are ignored
+  // ground_max_range         : m; points farther than this are ignored
+  // ground_max_line_dist     : m; |z - line| below this counts as ground
+  // ground_max_slope         : |dz/dr|; sectors steeper than this are not treated as ground
+  // ground_min_points        : below this many ground returns the plane is reported invalid
+  //                            (confidence 0). Ramps/uneven floors: lower it only after field trials.
+  "semantic_map": {
+    "submap_radius": 50.0,
+    "near_resolution": 0.15,
+    "far_resolution": 0.4,
+    "far_switch_distance": 25.0,
+    "voxel_update_min_interval": 0.1,
+
+    "vehicle_id": "",
+    "extrinsic_version": 0,
+
+    "ground_sectors": 60,
+    "ground_range_bin_width": 0.5,
+    "ground_min_range": 1.0,
+    "ground_max_range": 60.0,
+    "ground_max_line_dist": 0.15,
+    "ground_max_slope": 0.35,
+    "ground_min_points": 100
+  }
+}

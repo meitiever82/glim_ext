@@ -34,6 +34,11 @@
   //                       so a longer baseline costs nothing here; 50 m is the default.
   // enu_origin          : [] = first accepted fix; or [lat, lon, alt] to pin the ENU origin
   //
+  // --- absolute heading (2.1) ---
+  // heading_enabled     : inject a HeadingPriorFactor when the board reports heading_valid=true
+  // heading_sigma_floor : deg; lower bound on the heading sigma (board heading is only trustworthy
+  //                       above a few degrees: dual-antenna baseline is short and the solve is smoothed)
+  //
   // --- buffer / time sanity ---
   // fix_buffer_horizon  : s of RTK samples kept behind the latest sample. Must exceed the lag of global
   //                       mapping behind the RTK stream plus the longest submap duration (a truck parked
@@ -57,6 +62,9 @@
     "robust_delta": 1.345,
 
     "T_imu_gnss": [0.0, 0.0, 0.0],
+
+    "heading_enabled": true,
+    "heading_sigma_floor": 2.0,
 
     "min_baseline": 50.0,
     "enu_origin": [],

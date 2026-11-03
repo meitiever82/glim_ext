@@ -26,6 +26,7 @@ struct RtkFixSample {
   double diff_age = 0.0;         // s
   int sats_used = 0;
   double heading = 0.0;          // deg
+  double heading_sigma = 0.0;    // deg,板卡自报航向标准差(0 = 源不提供)
   bool heading_valid = false;
 };
 
