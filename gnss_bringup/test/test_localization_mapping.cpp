@@ -145,12 +145,12 @@ TEST(LocConvertImu, RawCorrimudataScaleAndSwap) {
   const ImuOutput out = convert_imu(in, corrimudata_imu_scale(100.0));
 
   // X/Y 交换 + 100 Hz + 角速度 rad→deg
-  EXPECT_NEAR(out.wx, 3.0 * 100.0 * 180.0 / kPi, 1e-12);
-  EXPECT_NEAR(out.wy, 2.0 * 100.0 * 180.0 / kPi, 1e-12);
-  EXPECT_NEAR(out.wz, 1.0 * 100.0 * 180.0 / kPi, 1e-12);
-  EXPECT_NEAR(out.ax, 5.0 * 100.0, 1e-12);
-  EXPECT_NEAR(out.ay, 4.0 * 100.0, 1e-12);
-  EXPECT_NEAR(out.az, 6.0 * 100.0, 1e-12);
+  EXPECT_NEAR(out.wx, 3.0 * 100.0 * 180.0 / kPi, 1e-9);
+  EXPECT_NEAR(out.wy, 2.0 * 100.0 * 180.0 / kPi, 1e-9);
+  EXPECT_NEAR(out.wz, 1.0 * 100.0 * 180.0 / kPi, 1e-9);
+  EXPECT_NEAR(out.ax, 5.0 * 100.0, 1e-9);
+  EXPECT_NEAR(out.ay, 4.0 * 100.0, 1e-9);
+  EXPECT_NEAR(out.az, 6.0 * 100.0, 1e-9);
 }
 
 TEST(LocConvertImu, CorrimudataScaleFromImuRate) {

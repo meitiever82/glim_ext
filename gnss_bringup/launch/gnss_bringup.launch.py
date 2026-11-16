@@ -81,6 +81,8 @@ def generate_launch_description():
         # 依赖 robominer_msgs + novatel_oem7_msgs,缺包时二进制不存在。
         DeclareLaunchArgument("enable_localization", default_value="false"),
         DeclareLaunchArgument("localization_params_file", default_value=localization_params),
+        DeclareLaunchArgument("enable_metrics", default_value="true"),
+        DeclareLaunchArgument("enable_divergence", default_value="false"),
         # 方案 A:动态 map->base_link 由北云驱动独占,本包只补静态 world->map,
         # 兼容仍按 world 查询的下游。原点未对齐前不要开(见计划 §5)。
         DeclareLaunchArgument("enable_world_map_tf", default_value="true"),
@@ -90,6 +92,12 @@ def generate_launch_description():
         Node(package="gnss_bringup", executable="localization_bridge", name="localization_bridge",
              parameters=[LaunchConfiguration("localization_params_file")], output="screen",
              condition=IfCondition(LaunchConfiguration("enable_localization"))),
+        Node(package="gnss_bringup", executable="metrics_node", name="gnss_metrics",
+             parameters=[LaunchConfiguration("localization_params_file")], output="screen",
+             condition=IfCondition(LaunchConfiguration("enable_metrics"))),
+        Node(package="gnss_bringup", executable="divergence_node", name="gnss_divergence",
+             parameters=[LaunchConfiguration("localization_params_file")], output="screen",
+             condition=IfCondition(LaunchConfiguration("enable_divergence"))),
         Node(package="tf2_ros", executable="static_transform_publisher",
              name="world_to_map_static",
              arguments=["0", "0", "0", "0", "0", "0", "world", "map"],

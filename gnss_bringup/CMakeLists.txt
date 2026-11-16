@@ -86,6 +86,20 @@ if(robominer_msgs_FOUND AND novatel_oem7_msgs_FOUND)
   target_include_directories(localization_bridge PRIVATE include)
   ament_target_dependencies(localization_bridge rclcpp robominer_msgs novatel_oem7_msgs std_msgs)
   install(TARGETS localization_bridge DESTINATION lib/${PROJECT_NAME})
+
+  # Phase 2: 慢变质量指标节点
+  add_executable(metrics_node src/metrics_node.cpp)
+  target_include_directories(metrics_node PRIVATE include)
+  ament_target_dependencies(metrics_node rclcpp robominer_msgs)
+  install(TARGETS metrics_node DESTINATION lib/${PROJECT_NAME})
+
+  # Phase 2: 双路解偏差监测节点
+  add_executable(divergence_node src/divergence_node.cpp)
+  target_include_directories(divergence_node PRIVATE include)
+  ament_target_dependencies(divergence_node rclcpp gnss_msgs diagnostic_msgs)
+  target_link_libraries(divergence_node gnss_core::gnss_core)
+  install(TARGETS divergence_node DESTINATION lib/${PROJECT_NAME})
+
   set(GNSS_BRINGUP_HAS_ADAPTER ON)
 else()
   message(STATUS "ros_stream_adapter 未编译:缺 robominer_msgs 或 novatel_oem7_msgs(geacx 部署才需要,见 gnss_bringup README)")

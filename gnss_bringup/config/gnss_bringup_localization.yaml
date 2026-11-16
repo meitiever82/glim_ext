@@ -43,6 +43,30 @@ localization_bridge:
       bestpos: "/bynav/bestpos"
       corrimudata: "/bynav/corrimudata"
       heading2: "/bynav/heading2"
+      localization_data: "/localization/localization_data"
+      metrics: "/localization/metrics"
+      diagnostics: "/diagnostics"
+      rtkfix_device: "/gnss/rtkfix_device"
+      rtkfix_independent: "/gnss/rtkfix_independent"
+
+    # === 慢变指标 ===
+    metrics:
+      zero_velocity_threshold_mps: 0.2
+      min_valid_duration_s: 1.0
+      publish_rate_hz: 1.0
+      frame_id: "world"
+
+    # === 双路解偏差监测 ===
+    divergence:
+      sigma: 3.0
+      window_s: 600.0
+      min_samples: 60
+      sigma_floor_m: 0.05
+      sigma_max_m: 0.10
+      pair_max_dt_s: 2.0
+      epoch_max_dt_s: 0.1
+      publish_rate_hz: 1.0
+      min_quality_for_learn: 4  # FIXED
 
     # === 门控（与 beiyun_processor 逐条一致） ===
     gate:
