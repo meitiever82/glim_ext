@@ -1,1 +1,18 @@
 data/orb_slam/ORBvoc.txt*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# colcon / build artifacts
+build/
+install/
+log/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
