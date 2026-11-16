@@ -192,9 +192,10 @@ Phase 2 的核心目标（适配器 + judge + 对比/metrics 节点）已通过�
 | 设计目标 | 实现方式 | 文件 |
 |---|---|---|
 | 北云适配 + judge | `localization_bridge` 直接订阅 OEM7 驱动话题，内部完成字段映射与 `LocalizationGate` 判决，发布 `LocalizationData`/`_aux` | `src/localization_bridge_node.cpp`, `include/gnss_bringup/localization_gate.hpp` |
+| 通用 RtkFix judge（含 610） | `rtkfix_judge` 订阅 `gnss_msgs/RtkFix`，复用同一套 `LocalizationGate`，发布 `LocalizationData`/`_aux` | `src/rtkfix_judge_node.cpp` |
 | 慢变 metrics | `metrics_node` 订阅 `LocalizationData`，计算固定率、零速段静态 σ，发布 `LocalizationMetrics` | `src/metrics_node.cpp` |
 | 双路对比 divergence | `divergence_node` 订阅两路 `RtkFix`，用 `gnss_core::DivergenceMonitor` 学习经验 σ 并发布 `/diagnostics` | `src/divergence_node.cpp` |
-| 610 / 华测适配 | **未实现**。当前链路只覆盖北云 OEM7。若明天车端使用 610，需要临时启用旧 `localization_parser` 或紧急补一个 `c610_adapter` |
+| 610 / 华测适配 | **由 `rtkfix_judge` 覆盖**。610 驱动只要发布标准 `gnss_msgs/RtkFix` 即可接入；无需单独 c610_adapter |
 
 ## 启动方式（明天上车）
 
@@ -203,10 +204,18 @@ source /opt/ros/humble/setup.bash
 source <boonray_ws>/install/setup.bash   # 提供 robominer_msgs
 source <glim_ws>/install/setup.bash
 
-# 只起定位链（北云已有驱动话题时）
+# 北云 OEM7 场景
 ros2 launch gnss_bringup gnss_bringup.launch.py \
   enable_bridge:=false \
   enable_localization:=true \
+  enable_metrics:=true \
+  enable_divergence:=false \
+  localization_params_file:=<现场 yaml 路径>
+
+# 610 / 华测场景（驱动直接发布 gnss_msgs/RtkFix）
+ros2 launch gnss_bringup gnss_bringup.launch.py \
+  enable_bridge:=false \
+  enable_rtkfix_judge:=true \
   enable_metrics:=true \
   enable_divergence:=false \
   localization_params_file:=<现场 yaml 路径>
@@ -223,14 +232,15 @@ ros2 launch gnss_bringup gnss_bringup.launch.py \
 - `test_loc_alarm_state` 11 tests PASSED ✅
 - `localization/golden` 18 cases parity zero mismatch ✅
 - launch 文件 Python 语法检查通过 ✅
-- `install/gnss_bringup/lib/gnss_bringup/{localization_bridge,metrics_node,divergence_node}` 均存在 ✅
+- `install/gnss_bringup/lib/gnss_bringup/{localization_bridge,rtkfix_judge,metrics_node,divergence_node}` 均存在 ✅
 
 ## 上车前必须确认
 
-1. **北云驱动话题名**与 `config/gnss_bringup_localization.yaml` 中 `topics.inspvax/bestpos/corrimudata/heading2` 一致。
-2. **ENU 原点** `origin_lat/lon/height` 与北云驱动 map 原点一致，否则 `world→map` 静态 TF 失效、地图整体平移。
-3. **IMU 频率** `imu_rate_hz` 与整车 CORRIMU 输出频率一致（当前默认 100 Hz）。
-4. **rtkrcv 独立解话题** `/gnss/rtkfix_independent` 需要在开 `enable_divergence:=true` 时存在；否则 divergence 节点只会报 "none" 状态，不会崩溃。
+1. **选择正确节点**：北云 OEM7 开 `enable_localization:=true`；610 / 华测开 `enable_rtkfix_judge:=true`。两者不要同时开，否则会同时发布 `/localization/localization_data`。
+2. **北云驱动话题名**与 `config/gnss_bringup_localization.yaml` 中 `topics.inspvax/bestpos/corrimudata/heading2` 一致；610 场景确认 `topics.rtkfix` 与驱动发布的话题一致。
+3. **ENU 原点** `origin_lat/lon/height` 与北云驱动 map 原点一致，否则 `world→map` 静态 TF 失效、地图整体平移。
+4. **IMU 频率** `imu_rate_hz` 与整车 CORRIMU 输出频率一致（当前默认 100 Hz，仅北云场景）。
+5. **rtkrcv 独立解话题** `/gnss/rtkfix_independent` 需要在开 `enable_divergence:=true` 时存在；否则 divergence 节点只会报 "none" 状态，不会崩溃。
 5. 若车辆使用 **610（华测）**，Phase 2 未完成，需回退到旧 `localization_parser` 链路。
 
 ## 仍属 Plan 3/4 未做项
