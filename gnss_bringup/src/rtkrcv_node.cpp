@@ -209,8 +209,7 @@ private:
     // 表示让内核选(start_local_reservers() 之后立刻用 bound_port() 回填
     // conf_,见下面的说明)。
     conf_.obs_port = static_cast<int>(declare_port("obs_port", conf_.obs_port, /*allow_zero=*/true));
-    conf_.corr_port =
-        static_cast<int>(declare_port("corr_port", conf_.corr_port, /*allow_zero=*/true));
+    conf_.corr_port = static_cast<int>(declare_port("corr_port", conf_.corr_port, /*allow_zero=*/true));
     // final-fix-wave 第 1 项:sol_port 不是 listen 端口——这个节点是客户端,
     // 拿它去 connect_solution_stream() 里 connect() rtkrcv 的 outstr1
     // (tcpsvr)。0 在这个方向上没有任何操作系统语义,会一路传到
@@ -218,8 +217,7 @@ private:
     // 连不上——worker 只会一次次退避重连,日志里只有一行不痛不痒的
     // "connect() failed",现场表现为"配置检查全部通过、节点看起来在跑,
     // 但 ~/rtk_fix 永远没有输出"。已实测复现:-p sol_port:=0。
-    conf_.sol_port =
-        static_cast<int>(declare_port("sol_port", conf_.sol_port, /*allow_zero=*/false));
+    conf_.sol_port = static_cast<int>(declare_port("sol_port", conf_.sol_port, /*allow_zero=*/false));
     conf_.obs_format = node_->declare_parameter<std::string>("obs_format", conf_.obs_format);
     conf_.corr_format = node_->declare_parameter<std::string>("corr_format", conf_.corr_format);
     conf_.pos_mode = node_->declare_parameter<std::string>("pos_mode", conf_.pos_mode);
@@ -233,8 +231,7 @@ private:
 
     run_dir_ = node_->declare_parameter<std::string>("run_dir", "/tmp/rtkrcv_run");
     binary_ = node_->declare_parameter<std::string>("binary", "rtkrcv");
-    extra_args_ = node_->declare_parameter<std::vector<std::string>>(
-        "args", std::vector<std::string>{});
+    extra_args_ = node_->declare_parameter<std::vector<std::string>>("args", std::vector<std::string>{});
 
     restart_delay_s_ = declare_positive_seconds("restart_delay_s", 5.0);
     crash_loop_life_s_ = declare_positive_seconds("crash_loop_life_s", 30.0);
@@ -270,9 +267,8 @@ private:
     stat_poll_interval_s_ = declare_positive_seconds("stat_poll_interval_s", 0.2);
     health_no_solution_warn_s_ = declare_positive_seconds("health_no_solution_warn_s", 30.0);
 
-    if (run_dir_.empty()) {
+    if (run_dir_.empty())
       throw std::invalid_argument("run_dir 不能为空");
-    }
   }
 
   int64_t declare_port(const std::string& name, int default_value, bool allow_zero) {
@@ -283,8 +279,7 @@ private:
     // 合法",allow_zero 就是那个语义在这里的名字——sol_port 传 false 是因为
     // 它是 connect 方向,不是因为它本身会 listen。
     if (!gnss_bringup::is_valid_port_for_direction(v, allow_zero)) {
-      throw std::invalid_argument(
-          name + ": 非法端口号 " + std::to_string(v) + "(合法范围 0-65535" +
+      throw std::invalid_argument(name + ": 非法端口号 " + std::to_string(v) + "(合法范围 0-65535" +
           (allow_zero ? "" : ";这个端口是连接方向,不接受 0") + ")");
     }
     return v;
