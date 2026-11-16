@@ -1,0 +1,12 @@
+# docker-compose.yml
+services:
+  rtk-monitor:
+    build: .
+    network_mode: host        # SocketCAN + LAN services
+    restart: always
+    volumes:
+      - /data:/data           # config.yaml, gnsslog, rtk.db, mbtiles all live here
+    # NOTE: /data/config.yaml must set `web.static_dir: /app/web` — after
+    # `pip install .` the package no longer sits next to the repo's web/
+    # directory, so the default repository-relative path does not resolve
+    # inside the container. See docs/deploy.md §5.2.

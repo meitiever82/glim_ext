@@ -1,0 +1,24 @@
+[project]
+name = "gnss-hmi"
+version = "0.1.0"
+requires-python = ">=3.10"
+# P0 只读模式只用 ROS 话题，不需要 python-can；保留该依赖仅为兼容
+# rtk-monitor 基线的旧采集路径（配置显式启用时才导入）。
+dependencies = ["pyyaml>=6.0", "fastapi>=0.110", "uvicorn>=0.29"]
+
+[project.optional-dependencies]
+legacy = ["python-can>=4.0"]
+ros = ["rclpy"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx>=0.27", "websockets>=12"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["slow: long-running (docker build)"]

@@ -1,0 +1,36 @@
+# Local RTCM replay config — lights up the rtkrcv solving chain + skyplot from
+# recorded RTCM3 files, no vehicle required. See docs/replay-demo.md.
+#
+# Differs from config.yaml.example (the on-vehicle production config) in three
+# ways: it points corrections/raw_obs at localhost ports a feeder serves, it
+# ENABLES rtkrcv (production ships it disabled until the board format is
+# confirmed on-truck), and it uses a dev web port. Copy and adjust paths.
+
+data_root: ./data/replay          # relative is fine here (rtkrcv gets an
+db_path: ./data/replay.db         # absolute conf path regardless — see rtkrcv.py)
+
+corrections: {host: 127.0.0.1, port: 6201}   # base RTCM3, served by the feeder
+raw_obs:     {host: 127.0.0.1, port: 6202}   # rover RTCM3 (+ ephemeris), fed
+gnss_solution: {host: 127.0.0.1, port: 6203, listen: true}   # unused in replay
+
+can_channel: virtual:replay       # no CAN in this demo
+
+reserve:                          # local re-serve ports rtkrcv dials in on
+  corrections_port: 16010
+  raw_obs_port: 16011
+
+retention_days: 14
+disk_watermark_pct: 95.0
+
+rtkrcv:                           # ENABLED — build/extract an rtkrcv binary first
+  binary: "./tools/bin/rtkrcv"    #   (see docs/integration-rtkrcv.md; gitignored)
+  sol_port: 16020
+
+web: {port: 8083, host: 127.0.0.1}
+
+# Data being replayed is historical (e.g. a CORS pair from a past day), so its
+# GPST is hours/days behind the wall clock. Relax the diagnosis staleness gate
+# so solutions are not all flagged stale. (Leave at the spec default on-truck.)
+diagnosis: {sol_stale_s: 999999999}
+
+db_retention_days: 30

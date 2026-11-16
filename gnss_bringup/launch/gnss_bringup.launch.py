@@ -10,7 +10,7 @@ import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import AndSubstitution, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
@@ -51,6 +51,8 @@ def cleanup_node(context):
 
 def generate_launch_description():
     params = PathJoinSubstitution([FindPackageShare("gnss_bringup"), "config", "gnss_bringup.yaml"])
+    localization_params = PathJoinSubstitution(
+        [FindPackageShare("gnss_bringup"), "config", "gnss_bringup_localization.yaml"])
     return LaunchDescription([
         DeclareLaunchArgument("params_file", default_value=params),
         # RTKLIB 未装时(安装方法见 README「安装 RTKLIB-EX 2.5.1」,已验证/未验证的
@@ -75,9 +77,27 @@ def generate_launch_description():
         # 而二进制不存在时这里会以"找不到可执行文件"报错。
         DeclareLaunchArgument("enable_bridge", default_value="true"),
         DeclareLaunchArgument("enable_adapter", default_value="false"),
+        # 定位桥接(T2):默认关闭,影子阶段用 true 单独起,不影响既有启动栈。
+        # 依赖 robominer_msgs + novatel_oem7_msgs,缺包时二进制不存在。
+        DeclareLaunchArgument("enable_localization", default_value="false"),
+        DeclareLaunchArgument("localization_params_file", default_value=localization_params),
+        # 方案 A:动态 map->base_link 由北云驱动独占,本包只补静态 world->map,
+        # 兼容仍按 world 查询的下游。原点未对齐前不要开(见计划 §5)。
+        DeclareLaunchArgument("enable_world_map_tf", default_value="true"),
         Node(package="gnss_bringup", executable="rtcm_bridge", name="rtcm_bridge",
              parameters=[LaunchConfiguration("params_file")], output="screen",
              condition=IfCondition(LaunchConfiguration("enable_bridge"))),
+        Node(package="gnss_bringup", executable="localization_bridge", name="localization_bridge",
+             parameters=[LaunchConfiguration("localization_params_file")], output="screen",
+             condition=IfCondition(LaunchConfiguration("enable_localization"))),
+        Node(package="tf2_ros", executable="static_transform_publisher",
+             name="world_to_map_static",
+             arguments=["0", "0", "0", "0", "0", "0", "world", "map"],
+             # 只在定位桥接启用时才补静态 TF，保证默认启动栈行为完全不变
+             condition=IfCondition(AndSubstitution(
+                 LaunchConfiguration("enable_localization"),
+                 LaunchConfiguration("enable_world_map_tf"))),
+             ),
         Node(package="gnss_bringup", executable="ros_stream_adapter", name="ros_stream_adapter",
              parameters=[LaunchConfiguration("params_file")], output="screen",
              condition=IfCondition(LaunchConfiguration("enable_adapter"))),

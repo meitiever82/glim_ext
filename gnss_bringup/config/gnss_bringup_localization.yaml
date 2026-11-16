@@ -1,0 +1,61 @@
+# localization_bridge：北云驱动话题 → LocalizationData / LocalizationDataAux
+#
+# 契约与旧 localization_parser 一致（话题名、50 Hz、202012、心跳），
+# ENU 原点沿用旧配置，换场必须同步修改，否则地图整体平移。
+#
+# 上线前必须用 T0 数据确认：
+#   1) origin 与北云驱动 map 原点一致（TF 静态 world->map 才能取单位阵）；
+#   2) imu_rate_hz 与整车实际 IMU 频率一致（CORRIMU 是增量，乘错会整体缩放）。
+localization_bridge:
+  ros__parameters:
+    # === ENU 原点（旧 localization_parser.yaml） ===
+    origin_lat: 44.50323451
+    origin_lon: 92.91759315
+    origin_height: 753.8173
+
+    # 航向安装偏移（旧 rtk_offset:false 时 yaw 偏移仍参与计算）
+    rtk_offset_yaw: 0.0
+
+    world_frame_id: "world"
+    leap_seconds: 18
+
+    # 无 INSPVAX 超过该时长判 DataTimeout（旧实现按原始字节流判定）
+    data_timeout_sec: 0.8
+
+    # CORRIMU 是每个采样间隔的增量：角速度 rad/sample、速度 m/s/sample
+    # 实车 IMU 为 100 Hz（旧实现按 125 Hz 换算，角速度/加速度会偏大 25%）
+    imu_rate_hz: 100.0
+
+    # 发布频率（旧实现 50 Hz）
+    publish_rate_hz: 50.0
+    aux_rate_hz: 50.0
+    heartbeat_hz: 1
+
+    # === 话题 ===
+    localization_topic: "/localization/localization_data"
+    localization_topic_aux: "/localization/localization_data_aux"
+    fault_topic: "fault_code/localization_fault"
+    # 保持旧心跳话题名，部署脚本/监控无需改动
+    heartbeat_topic: "/localization/localization_parser/heartbeat"
+
+    topics:
+      inspvax: "/bynav/inspvax"
+      bestpos: "/bynav/bestpos"
+      corrimudata: "/bynav/corrimudata"
+      heading2: "/bynav/heading2"
+
+    # === 门控（与 beiyun_processor 逐条一致） ===
+    gate:
+      sticky_grace_time: 30.0
+      single_point_age_threshold: 10.0
+      xyz_threshold: 10000.0
+      stars_threshold: 10
+      heading_length: 1.6
+      heading_length_threshold: 0.2
+
+    # === 202012 告警状态机 ===
+    alarm_startup_grace_s: 10.0
+    alarm_recover_stable_s: 2.0
+    alarm_min_interval_s: 10.0
+    alarm_cooldown_s: 300.0
+    fault_code: 12

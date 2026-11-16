@@ -1,0 +1,58 @@
+# gnss_bringup HMI —— P0 只读配置
+#
+# 数据来源只有 ROS 话题：不连 TCP/CAN，不起 rtkrcv，不做本地诊断，
+# 不写 SQLite（storage.enabled=false）。运行时先 source ROS overlay，
+# 使 `import rclpy, gnss_msgs` 可用。
+
+data_root: /var/log/gnss_hmi          # run.log 所在目录
+db_path: /var/log/gnss_hmi/gnss_hmi.db
+
+# 旧自采集路径全部显式关闭（rtk-monitor 基线兼容项）。
+corrections:   {host: 127.0.0.1, port: 0, enabled: false}
+raw_obs:       {host: 127.0.0.1, port: 0, enabled: false}
+gnss_solution: {host: 127.0.0.1, port: 0, listen: true, enabled: false}
+can_channel: can0
+can_enabled: false
+
+reserve:
+  corrections_port: 0
+  raw_obs_port: 0
+
+retention_days: 14
+disk_watermark_pct: 85.0
+
+rtkrcv:
+  binary: ""            # 空 = 不启动独立解算
+  sol_port: 15020
+
+diagnosis:
+  local_fallback: false # 诊断只信 /gnss/diagnostics
+
+publish:
+  enabled: false        # 只读：不向外部发布
+
+storage:
+  enabled: false        # P0：不落盘
+
+web:
+  port: 8080
+  host: 0.0.0.0
+  tiles_path: ""
+  static_dir: ""
+
+db_retention_days: 30
+
+ros:
+  enabled: true
+  node_name: gnss_hmi
+  use_sim_time: false   # rosbag2 --clock 回放时置 true
+  stale_s: 3.0          # 超过 3 s 无新解 → 数据中断
+  startup_grace_s: 10.0
+  topics:
+    - {topic: /rtkrcv_node/rtk_fix,     kind: rtkfix,     source: app,   qos: reliable}
+    - {topic: /gnss_cgi610/rtk_fix,     kind: rtkfix,     source: fused, qos: auto}
+    - {topic: /rtkrcv_node/stat,        kind: stat,                     qos: reliable}
+    - {topic: /gnss/diagnostics,        kind: diagnostic,               qos: auto}
+    - {topic: /rtkrcv_node/diagnostics, kind: diagnostic,               qos: auto}
+    - {topic: /gnss/rtcm_corrections,   kind: rtcm_rate,                qos: auto}
+    - {topic: /gnss/raw_obs,            kind: rtcm_rate,                qos: auto}

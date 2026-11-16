@@ -15,6 +15,7 @@ list(APPEND CMAKE_MODULE_PATH "/usr/share/cmake/geographiclib")
 find_package(gnss_core REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 # 不依赖 ROS 的 I/O 与进程管理,便于单测
 add_library(gnss_bringup_io SHARED
@@ -78,6 +79,13 @@ if(robominer_msgs_FOUND AND novatel_oem7_msgs_FOUND)
   add_executable(ros_stream_adapter src/ros_stream_adapter.cpp)
   ament_target_dependencies(ros_stream_adapter rclcpp gnss_msgs robominer_msgs novatel_oem7_msgs)
   install(TARGETS ros_stream_adapter DESTINATION lib/${PROJECT_NAME})
+
+  # 定位桥接(T2):北云驱动话题 → LocalizationData / _aux / 202012 / 心跳。
+  # 纯逻辑(门控/映射/告警)在 include/gnss_bringup 下,不依赖 ROS。
+  add_executable(localization_bridge src/localization_bridge_node.cpp)
+  target_include_directories(localization_bridge PRIVATE include)
+  ament_target_dependencies(localization_bridge rclcpp robominer_msgs novatel_oem7_msgs std_msgs)
+  install(TARGETS localization_bridge DESTINATION lib/${PROJECT_NAME})
   set(GNSS_BRINGUP_HAS_ADAPTER ON)
 else()
   message(STATUS "ros_stream_adapter 未编译:缺 robominer_msgs 或 novatel_oem7_msgs(geacx 部署才需要,见 gnss_bringup README)")
@@ -162,6 +170,17 @@ if(BUILD_TESTING)
   # sol 流状态日志去重闸门:纯逻辑,不碰 ROS
   ament_add_gtest(test_sol_stream_log_gate test/test_sol_stream_log_gate.cpp)
   target_include_directories(test_sol_stream_log_gate PRIVATE include)
+
+  # 定位替代(T1):localization_types/mapping/gate/loc_alarm_state 全部是纯逻辑,
+  # 不依赖 ROS,可脱离节点单测(与 pos_rotation/pos_source_writer 同样处理)。
+  ament_add_gtest(test_localization_mapping test/test_localization_mapping.cpp)
+  target_include_directories(test_localization_mapping PRIVATE include)
+
+  ament_add_gtest(test_localization_gate test/test_localization_gate.cpp)
+  target_include_directories(test_localization_gate PRIVATE include)
+
+  ament_add_gtest(test_loc_alarm_state test/test_loc_alarm_state.cpp)
+  target_include_directories(test_loc_alarm_state PRIVATE include)
 
   # rtkrcv_health.hpp:健康评估纯函数
   ament_add_gtest(test_rtkrcv_health test/test_rtkrcv_health.cpp)

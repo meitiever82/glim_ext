@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gnss-hmi</title>
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="/vendor/uplot/uPlot.min.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="banner" class="banner hidden">数据中断，重连中…</div>
+<header id="statusbar"></header>
+<main>
+  <div id="map"></div>
+  <aside>
+    <section id="skyplot-box"><h3>天空图</h3><canvas id="skyplot" width="300" height="300"></canvas></section>
+    <section id="linkcard-box"><h3>链路</h3><div id="linkcard"></div></section>
+    <section id="eventlist-box"><h3>事件</h3><div id="eventlist"></div></section>
+  </aside>
+</main>
+<footer>
+  <div id="timelines">
+    <div class="chart" id="chart-sats"></div><div class="chart" id="chart-age"></div>
+    <div class="chart" id="chart-sigma"></div><div class="chart" id="chart-ratio"></div>
+    <div class="chart" id="chart-latency"></div><div class="chart" id="chart-corr"></div>
+  </div>
+  <div id="replaybar"></div>
+</footer>
+<script src="/vendor/leaflet/leaflet.js"></script>
+<script src="/vendor/uplot/uPlot.iife.min.js"></script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
