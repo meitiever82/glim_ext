@@ -43,7 +43,7 @@ localization_bridge:
       bestpos: "/bynav/bestpos"
       corrimudata: "/bynav/corrimudata"
       heading2: "/bynav/heading2"
-      localization_data: "/localization/localization_data"
+      rtkfix: "/gnss/rtkfix"
       metrics: "/localization/metrics"
       diagnostics: "/diagnostics"
       rtkfix_device: "/gnss/rtkfix_device"

@@ -81,6 +81,7 @@ def generate_launch_description():
         # 依赖 robominer_msgs + novatel_oem7_msgs,缺包时二进制不存在。
         DeclareLaunchArgument("enable_localization", default_value="false"),
         DeclareLaunchArgument("localization_params_file", default_value=localization_params),
+        DeclareLaunchArgument("enable_rtkfix_judge", default_value="false"),
         DeclareLaunchArgument("enable_metrics", default_value="true"),
         DeclareLaunchArgument("enable_divergence", default_value="false"),
         # 方案 A:动态 map->base_link 由北云驱动独占,本包只补静态 world->map,
@@ -92,6 +93,9 @@ def generate_launch_description():
         Node(package="gnss_bringup", executable="localization_bridge", name="localization_bridge",
              parameters=[LaunchConfiguration("localization_params_file")], output="screen",
              condition=IfCondition(LaunchConfiguration("enable_localization"))),
+        Node(package="gnss_bringup", executable="rtkfix_judge", name="rtkfix_judge",
+             parameters=[LaunchConfiguration("localization_params_file")], output="screen",
+             condition=IfCondition(LaunchConfiguration("enable_rtkfix_judge"))),
         Node(package="gnss_bringup", executable="metrics_node", name="gnss_metrics",
              parameters=[LaunchConfiguration("localization_params_file")], output="screen",
              condition=IfCondition(LaunchConfiguration("enable_metrics"))),

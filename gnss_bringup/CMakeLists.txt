@@ -100,6 +100,12 @@ if(robominer_msgs_FOUND AND novatel_oem7_msgs_FOUND)
   target_link_libraries(divergence_node gnss_core::gnss_core)
   install(TARGETS divergence_node DESTINATION lib/${PROJECT_NAME})
 
+  # Phase 2: 通用 RtkFix 源判决节点（610 等）
+  add_executable(rtkfix_judge src/rtkfix_judge_node.cpp)
+  target_include_directories(rtkfix_judge PRIVATE include)
+  ament_target_dependencies(rtkfix_judge rclcpp gnss_msgs robominer_msgs std_msgs)
+  install(TARGETS rtkfix_judge DESTINATION lib/${PROJECT_NAME})
+
   set(GNSS_BRINGUP_HAS_ADAPTER ON)
 else()
   message(STATUS "ros_stream_adapter 未编译:缺 robominer_msgs 或 novatel_oem7_msgs(geacx 部署才需要,见 gnss_bringup README)")
