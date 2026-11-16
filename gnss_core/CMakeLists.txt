@@ -72,6 +72,11 @@ add_executable(gnss_report tools/gnss_report.cpp)
 target_link_libraries(gnss_report gnss_core)
 install(TARGETS gnss_report DESTINATION lib/${PROJECT_NAME})
 
+# --- 期 1: judge 离线回放 CLI 骨架 ---
+add_executable(judge_replay tools/judge_replay.cpp)
+target_link_libraries(judge_replay gnss_core)
+install(TARGETS judge_replay DESTINATION lib/${PROJECT_NAME})
+
 install(PROGRAMS tools/pos_to_rtkfix_bag.py tools/run_injection_suite.sh tools/traj_rmse.py
         DESTINATION lib/${PROJECT_NAME})
 
