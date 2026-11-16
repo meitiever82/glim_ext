@@ -1,11 +1,15 @@
-# localization_bridge：北云驱动话题 → LocalizationData / LocalizationDataAux
+# GNSS 定位链参数（北云/610/华测通用）
 #
 # 契约与旧 localization_parser 一致（话题名、50 Hz、202012、心跳），
 # ENU 原点沿用旧配置，换场必须同步修改，否则地图整体平移。
 #
 # 上线前必须用 T0 数据确认：
-#   1) origin 与北云驱动 map 原点一致（TF 静态 world->map 才能取单位阵）；
-#   2) imu_rate_hz 与整车实际 IMU 频率一致（CORRIMU 是增量，乘错会整体缩放）。
+#   1) origin 与北云/610 驱动 map 原点一致（TF 静态 world->map 才能取单位阵）；
+#   2) 北云场景：imu_rate_hz 与整车实际 IMU 频率一致（CORRIMU 是增量，乘错会整体缩放）。
+
+# ============================================================================
+# 北云 OEM7 场景：直接订阅 bynav_ros_driver 发布的 OEM7 话题
+# ============================================================================
 localization_bridge:
   ros__parameters:
     # === ENU 原点（旧 localization_parser.yaml） ===
@@ -43,30 +47,6 @@ localization_bridge:
       bestpos: "/bynav/bestpos"
       corrimudata: "/bynav/corrimudata"
       heading2: "/bynav/heading2"
-      rtkfix: "/gnss/rtkfix"
-      metrics: "/localization/metrics"
-      diagnostics: "/diagnostics"
-      rtkfix_device: "/gnss/rtkfix_device"
-      rtkfix_independent: "/gnss/rtkfix_independent"
-
-    # === 慢变指标 ===
-    metrics:
-      zero_velocity_threshold_mps: 0.2
-      min_valid_duration_s: 1.0
-      publish_rate_hz: 1.0
-      frame_id: "world"
-
-    # === 双路解偏差监测 ===
-    divergence:
-      sigma: 3.0
-      window_s: 600.0
-      min_samples: 60
-      sigma_floor_m: 0.05
-      sigma_max_m: 0.10
-      pair_max_dt_s: 2.0
-      epoch_max_dt_s: 0.1
-      publish_rate_hz: 1.0
-      min_quality_for_learn: 4  # FIXED
 
     # === 门控（与 beiyun_processor 逐条一致） ===
     gate:
@@ -83,3 +63,84 @@ localization_bridge:
     alarm_min_interval_s: 10.0
     alarm_cooldown_s: 300.0
     fault_code: 12
+
+# ============================================================================
+# 610 / 华测 / 通用 RtkFix 场景：驱动已发布 gnss_msgs/RtkFix
+# ============================================================================
+rtkfix_judge:
+  ros__parameters:
+    # === ENU 原点（与 localization_bridge 保持一致） ===
+    origin_lat: 44.50323451
+    origin_lon: 92.91759315
+    origin_height: 753.8173
+
+    rtk_offset_yaw: 0.0
+    world_frame_id: "world"
+    data_timeout_sec: 0.8
+
+    publish_rate_hz: 50.0
+    aux_rate_hz: 50.0
+    heartbeat_hz: 1
+
+    localization_topic: "/localization/localization_data"
+    localization_topic_aux: "/localization/localization_data_aux"
+    fault_topic: "fault_code/localization_fault"
+    heartbeat_topic: "/localization/localization_parser/heartbeat"
+
+    topics:
+      rtkfix: "/gnss/rtkfix"
+
+    gate:
+      sticky_grace_time: 30.0
+      single_point_age_threshold: 10.0
+      xyz_threshold: 10000.0
+      stars_threshold: 10
+      heading_length: 1.6
+      heading_length_threshold: 0.2
+
+    alarm_startup_grace_s: 10.0
+    alarm_recover_stable_s: 2.0
+    alarm_min_interval_s: 10.0
+    alarm_cooldown_s: 300.0
+    fault_code: 12
+
+# ============================================================================
+# 慢变质量指标：订阅 LocalizationData，发布 LocalizationMetrics
+# ============================================================================
+gnss_metrics:
+  ros__parameters:
+    world_frame_id: "world"
+    topics:
+      localization_data: "/localization/localization_data"
+      metrics: "/localization/metrics"
+    metrics:
+      zero_velocity_threshold_mps: 0.2
+      min_valid_duration_s: 1.0
+      publish_rate_hz: 1.0
+      frame_id: "world"
+
+# ============================================================================
+# 双路解偏差监测：订阅设备解 + 独立解，发布 /diagnostics
+# ============================================================================
+gnss_divergence:
+  ros__parameters:
+    # ENU 原点，用于计算水平偏差
+    origin_lat: 44.50323451
+    origin_lon: 92.91759315
+    origin_height: 753.8173
+
+    topics:
+      rtkfix_device: "/gnss/rtkfix_device"
+      rtkfix_independent: "/gnss/rtkfix_independent"
+      diagnostics: "/diagnostics"
+
+    divergence:
+      sigma: 3.0
+      window_s: 600.0
+      min_samples: 60
+      sigma_floor_m: 0.05
+      sigma_max_m: 0.10
+      pair_max_dt_s: 2.0
+      epoch_max_dt_s: 0.1
+      publish_rate_hz: 1.0
+      min_quality_for_learn: 4  # FIXED
