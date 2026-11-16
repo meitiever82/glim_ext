@@ -194,13 +194,18 @@ ps aux | grep rtkrcv
 镜像 Dockerfile 随交付包附送（Task 9）。构建命令：
 
 ```bash
-docker build -t rtk-monitor:latest .
+docker build -t gnss-hmi:latest .
 ```
 
-**重要**：Dockerfile 构建阶段需要从 GitHub 克隆并编译 RTKLIB（demo5，已固定到具体 commit，
-见 Dockerfile 中 `RTKLIB_DEMO5_SHA` 注释），镜像须在有网环境预构建（ARM64 主机或使用
-`docker buildx` 交叉构建），矿区现场网络通常无法访问外网，无法在现场重新构建镜像——现场
-只需 `docker load`/`docker compose up -d` 已构建好的镜像。
+**重要**：Dockerfile 构建阶段需要从 GitHub 克隆并编译 RTKLIB（RTKLIB-EX v2.5.1，
+rtklibexplorer 维护，原 demo5 分支；钉 tag 并校验 commit sha，见 Dockerfile 中
+`RTKLIB_SHA`），镜像须在有网环境预构建（ARM64 主机或使用 `docker buildx` 交叉构建），
+矿区现场网络通常无法访问外网，无法在现场重新构建镜像——现场只需
+`docker load`/`docker compose up -d` 已构建好的镜像。
+
+**镜像里没有 ROS**（`rclpy` / `/opt/ros` 均未安装），因此容器方案只覆盖 TCP/CAN 自采集
+模式；`ros.enabled: true` 的只读订阅模式请继续用 systemd（`deploy/gnss-hmi.service`）。
+
 
 ### 5.2 启动容器
 
@@ -209,7 +214,7 @@ docker build -t rtk-monitor:latest .
 ```yaml
 version: '3.8'
 services:
-  rtk-monitor:
+  gnss-hmi:
     build: .
     restart: always
     network_mode: host
@@ -237,7 +242,7 @@ docker compose up -d --build
 
 ```bash
 # 查看容器日志
-docker logs -f rtk-monitor
+docker logs -f gnss-hmi
 
 # 验证 Web 服务
 curl http://localhost:8080
@@ -302,10 +307,10 @@ docker compose down
    <binary_path> -h
    ```
    
-3. 查看日志中的 rtkrcv 启动错误（容器运行用 `docker logs -f rtk-monitor`；
+3. 查看日志中的 rtkrcv 启动错误（容器运行用 `docker logs -f gnss-hmi`；
    裸机运行看进程 stderr，见 [§4.3](#43-查看日志)）：
    ```bash
-   docker logs rtk-monitor 2>&1 | grep -i "rtkrcv\|solver" | tail -20
+   docker logs gnss-hmi 2>&1 | grep -i "rtkrcv\|solver" | tail -20
    ```
 
 4. 如果 rtkrcv 无法编译或运行，参考 [rtkrcv 真机集成核对清单](integration-rtkrcv.md#rtkrcv-真机集成核对清单) 逐项核对

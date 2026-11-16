@@ -1,0 +1,12 @@
+# Docker Compose 运行方式。
+# 仅覆盖 TCP/CAN 自采集模式:镜像里没有 ROS(rclpy / /opt/ros),
+# ros.enabled: true 的只读模式请用 systemd(deploy/gnss-hmi.service)。
+services:
+  gnss-hmi:
+    build: .
+    network_mode: host        # SocketCAN + 局域网 TCP 端口
+    restart: always
+    volumes:
+      - /data:/data           # config.yaml、gnsslog、hmi.db、mbtiles 都放这里
+    # NOTE: /data/config.yaml 必须显式设置 `web.static_dir: /app/web`——pip install .
+    # 之后包不再与仓库 web/ 相邻,默认的仓库相对路径在容器里解析不到。见 docs/deploy.md §5.2
