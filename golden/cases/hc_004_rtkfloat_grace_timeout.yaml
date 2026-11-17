@@ -1,0 +1,40 @@
+case: hc_004_rtkfloat_grace_timeout
+class: keep
+brand: huace
+description: RTK 浮点宽限超时——fix 后降级浮点（sta=0x52），rtk_float_grace=1.5s 内沿用，超时 → 无效 + GraceTimeout
+
+config:
+  origin_lat: 44.50323451
+  origin_lon: 92.91759315
+  origin_height: 753.8173
+  xyz_threshold: 10000
+  stars_threshold: 10
+  unfixed_time: 5.0
+  combined_nav_mod_time: 30.0
+  rtk_float_grace_time: 1.5     # 参数扫描：短宽限
+  sticky_grace_time: 30.0
+  single_point_age_threshold: 10.0
+  heading_length: 1.6
+  heading_length_threshold: 0.2
+  data_timeout_sec: 10.0        # 隔离 DataTimeout
+  parse_fail_threshold: 200
+  leap_seconds: 18
+
+frames:
+  # 先建立固定解
+  - t: 0.05
+    type: gpchc
+    fields: {sta: "42", warning: "0000", solnsvs: "20", solnsvs2: "18", age: "1"}
+  # 降级浮点
+  - t: 0.5
+    type: gpchc
+    fields: {sta: "52", warning: "0000", solnsvs: "20", solnsvs2: "18", age: "1"}
+  # 宽限期内（1.4s < 1.5s）
+  - t: 1.4
+    type: gpchc
+    fields: {sta: "52", warning: "0000", solnsvs: "20", solnsvs2: "18", age: "1"}
+  # 超时（2.1s > 1.5s）
+  - t: 2.1
+    type: gpchc
+    fields: {sta: "52", warning: "0000", solnsvs: "20", solnsvs2: "18", age: "1"}
+observe_until: 2.4

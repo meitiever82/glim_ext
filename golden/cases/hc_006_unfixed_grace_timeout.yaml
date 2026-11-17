@@ -1,0 +1,38 @@
+case: hc_006_unfixed_grace_timeout
+class: keep
+brand: huace
+description: 其他类型（单点 sta=0x12）走 unfixed_time=5s 宽限——此处配置 1s 验证，1.6s 超时 → GraceTimeout
+
+config:
+  origin_lat: 44.50323451
+  origin_lon: 92.91759315
+  origin_height: 753.8173
+  xyz_threshold: 10000
+  stars_threshold: 10
+  unfixed_time: 1.0              # 参数扫描：短宽限
+  combined_nav_mod_time: 30.0
+  rtk_float_grace_time: 20.0
+  sticky_grace_time: 30.0
+  single_point_age_threshold: 10.0
+  heading_length: 1.6
+  heading_length_threshold: 0.2
+  data_timeout_sec: 10.0
+  parse_fail_threshold: 200
+  leap_seconds: 18
+
+frames:
+  - t: 0.05
+    type: gpchc
+    fields: {sta: "42", warning: "0000", solnsvs: "20", solnsvs2: "18", age: "1"}
+  - t: 0.5
+    type: gpchc
+    fields: {sta: "12", warning: "0000", solnsvs: "20", solnsvs2: "18", age: "1"}
+  # 宽限内（0.9s < 1.0s）
+  - t: 0.9
+    type: gpchc
+    fields: {sta: "12", warning: "0000", solnsvs: "20", solnsvs2: "18", age: "1"}
+  # 超时（1.6s > 1.0s）
+  - t: 1.6
+    type: gpchc
+    fields: {sta: "12", warning: "0000", solnsvs: "20", solnsvs2: "18", age: "1"}
+observe_until: 1.9

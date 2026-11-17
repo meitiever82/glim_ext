@@ -1,0 +1,78 @@
+case: by_004_sticky_timeout
+class: keep
+provenance:
+  recorder_version: 1
+  note: source_commit/config_sha256 由录制脚本填充
+outputs:
+  - is_valid: true
+    rtk_status: 4
+    fault_code: 0
+    latitude: 44.503234509999999
+    longitude: 92.917593150000002
+    altitude: 753.81730000000005
+    x: -0
+    y: 0
+    z: 0
+    yaw: 0
+    pitch: -0
+    roll: 0
+    speed: 0
+    solnsvs: 18
+    solnsvs2: 20
+    age: 1
+    t: 0.050098905999999999
+    frame: 3
+  - is_valid: true
+    rtk_status: 4
+    fault_code: 0
+    latitude: 44.503234509999999
+    longitude: 92.917593150000002
+    altitude: 753.81730000000005
+    x: -0
+    y: 0
+    z: 0
+    yaw: 0
+    pitch: -0
+    roll: 0
+    speed: 0
+    solnsvs: 18
+    solnsvs2: 20
+    age: 1
+    t: 0.50035066299999997
+    frame: 4
+  - is_valid: true
+    rtk_status: 4
+    fault_code: 0
+    latitude: 44.503234509999999
+    longitude: 92.917593150000002
+    altitude: 753.81730000000005
+    x: -0
+    y: 0
+    z: 0
+    yaw: 0
+    pitch: -0
+    roll: 0
+    speed: 0
+    solnsvs: 18
+    solnsvs2: 20
+    age: 1
+    t: 1.500367703
+    frame: 5
+  - is_valid: false
+    rtk_status: 2
+    fault_code: 2
+    latitude: 44.503234509999999
+    longitude: 92.917593150000002
+    altitude: 753.81730000000005
+    x: -0
+    y: 0
+    z: 0
+    yaw: 0
+    pitch: -0
+    roll: 0
+    speed: 0
+    solnsvs: 18
+    solnsvs2: 20
+    age: 1
+    t: 2.7018575669999998
+    frame: 6

@@ -1,0 +1,24 @@
+case: hc_007_enu_out_of_bounds
+class: keep
+provenance:
+  recorder_version: 1
+  note: source_commit/config_sha256 由录制脚本填充
+outputs:
+  - is_valid: false
+    rtk_status: 4
+    fault_code: 6
+    latitude: 45.503234509999999
+    longitude: 92.917593150000002
+    altitude: 0
+    x: -3.0468072509393096e-11
+    y: 111126.19858118679
+    z: -1723.6293661043601
+    yaw: 90
+    pitch: -0
+    roll: 0
+    speed: 0
+    solnsvs: 20
+    solnsvs2: 18
+    age: 1
+    t: 0.050439666000000001
+    frame: 0

@@ -1,0 +1,42 @@
+case: by_001_rtkfixed_basic
+class: keep
+provenance:
+  recorder_version: 1
+  note: source_commit/config_sha256 由录制脚本填充
+outputs:
+  - is_valid: true
+    rtk_status: 4
+    fault_code: 0
+    latitude: 44.503234509999999
+    longitude: 92.917593150000002
+    altitude: 753.81730000000005
+    x: -0
+    y: 0
+    z: 0
+    yaw: 0
+    pitch: -0
+    roll: 0
+    speed: 0
+    solnsvs: 18
+    solnsvs2: 20
+    age: 1
+    t: 0.050046160999999999
+    frame: 3
+  - is_valid: true
+    rtk_status: 4
+    fault_code: 0
+    latitude: 44.503234519999999
+    longitude: 92.917593159999996
+    altitude: 753.81740000000002
+    x: 0.00079534505550697882
+    y: 0.0011113524219945204
+    z: 0.00010000079374820848
+    yaw: 0
+    pitch: -0
+    roll: 0
+    speed: 0
+    solnsvs: 18
+    solnsvs2: 20
+    age: 1
+    t: 0.100051709
+    frame: 4

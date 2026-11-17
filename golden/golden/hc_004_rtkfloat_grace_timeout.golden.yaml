@@ -1,0 +1,78 @@
+case: hc_004_rtkfloat_grace_timeout
+class: keep
+provenance:
+  recorder_version: 1
+  note: source_commit/config_sha256 由录制脚本填充
+outputs:
+  - is_valid: true
+    rtk_status: 4
+    fault_code: 0
+    latitude: 44.503234509999999
+    longitude: 92.917593150000002
+    altitude: 0
+    x: -1.744382416291046e-11
+    y: -1.1857537174364552e-10
+    z: -753.81729999997208
+    yaw: 90
+    pitch: -0
+    roll: 0
+    speed: 0
+    solnsvs: 20
+    solnsvs2: 18
+    age: 1
+    t: 0.050452408999999997
+    frame: 0
+  - is_valid: true
+    rtk_status: 5
+    fault_code: 0
+    latitude: 44.503234509999999
+    longitude: 92.917593150000002
+    altitude: 0
+    x: -1.744382416291046e-11
+    y: -1.1857537174364552e-10
+    z: -753.81729999997208
+    yaw: 90
+    pitch: -0
+    roll: 0
+    speed: 0
+    solnsvs: 20
+    solnsvs2: 18
+    age: 1
+    t: 0.50171731399999997
+    frame: 1
+  - is_valid: true
+    rtk_status: 5
+    fault_code: 0
+    latitude: 44.503234509999999
+    longitude: 92.917593150000002
+    altitude: 0
+    x: -1.744382416291046e-11
+    y: -1.1857537174364552e-10
+    z: -753.81729999997208
+    yaw: 90
+    pitch: -0
+    roll: 0
+    speed: 0
+    solnsvs: 20
+    solnsvs2: 18
+    age: 1
+    t: 1.401387269
+    frame: 2
+  - is_valid: false
+    rtk_status: 5
+    fault_code: 2
+    latitude: 44.503234509999999
+    longitude: 92.917593150000002
+    altitude: 0
+    x: -1.744382416291046e-11
+    y: -1.1857537174364552e-10
+    z: -753.81729999997208
+    yaw: 90
+    pitch: -0
+    roll: 0
+    speed: 0
+    solnsvs: 20
+    solnsvs2: 18
+    age: 1
+    t: 2.1017508180000002
+    frame: 3

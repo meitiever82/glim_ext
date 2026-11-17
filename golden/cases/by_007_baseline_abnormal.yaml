@@ -1,0 +1,40 @@
+case: by_007_baseline_abnormal
+class: keep
+brand: beiyun
+description: 基线异常——NARROW_INT 基线 2.1m 偏离标称 1.6m 超阈值 0.2m → 无效 + BaselineAbnormal
+
+config:
+  origin_lat: 44.50323451
+  origin_lon: 92.91759315
+  origin_height: 753.8173
+  xyz_threshold: 10000
+  stars_threshold: 10
+  unfixed_time: 5.0
+  combined_nav_mod_time: 30.0
+  rtk_float_grace_time: 20.0
+  sticky_grace_time: 30.0
+  single_point_age_threshold: 10.0
+  heading_length: 1.6
+  heading_length_threshold: 0.2
+  data_timeout_sec: 0.8
+  parse_fail_threshold: 200
+  leap_seconds: 18
+
+frames:
+  - t: 0.0
+    type: gpgga
+    fields: {sats: "18", age: "1.0", quality: "4", lat: "4430.1940706", lat_ns: "N", lon: "09255.0555890", lon_ew: "E", alt: "753.8"}
+  - t: 0.01
+    type: gpfpd
+    fields: {nsv1: "18"}
+  - t: 0.02
+    type: headinga
+    fields: {heading_type: "NARROW_INT", length: "2.1", solnsvs: "18", obs: "20"}
+  - t: 0.05
+    type: inspvaxa
+    fields:
+      ins_status: INS_SOLUTION_GOOD
+      pos_type: INS_RTKFIXED
+      lat: "44.50323451"
+      lon: "92.91759315"
+      alt: "753.8173"

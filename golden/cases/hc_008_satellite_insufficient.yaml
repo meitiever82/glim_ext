@@ -1,0 +1,26 @@
+case: hc_008_satellite_insufficient
+class: keep
+brand: huace
+description: 卫星数不足——nsv1=8 < 10 → 无效 + SatelliteInsufficient（双天线都查）
+
+config:
+  origin_lat: 44.50323451
+  origin_lon: 92.91759315
+  origin_height: 753.8173
+  xyz_threshold: 10000
+  stars_threshold: 10
+  unfixed_time: 5.0
+  combined_nav_mod_time: 30.0
+  rtk_float_grace_time: 20.0
+  sticky_grace_time: 30.0
+  single_point_age_threshold: 10.0
+  heading_length: 1.6
+  heading_length_threshold: 0.2
+  data_timeout_sec: 0.8
+  parse_fail_threshold: 200
+  leap_seconds: 18
+
+frames:
+  - t: 0.05
+    type: gpchc
+    fields: {sta: "42", warning: "0000", solnsvs: "8", solnsvs2: "18", age: "1"}

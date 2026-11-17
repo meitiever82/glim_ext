@@ -1,0 +1,29 @@
+case: hc_001_rtk_fix_basic
+class: keep
+brand: huace
+description: RTK 固定解直通——sta=0x42（高4位4=RTK固定，低4位2=组合导航），warning=0 → valid
+
+config:
+  origin_lat: 44.50323451
+  origin_lon: 92.91759315
+  origin_height: 753.8173
+  xyz_threshold: 10000
+  stars_threshold: 10
+  unfixed_time: 5.0
+  combined_nav_mod_time: 30.0
+  rtk_float_grace_time: 20.0
+  sticky_grace_time: 30.0
+  single_point_age_threshold: 10.0
+  heading_length: 1.6
+  heading_length_threshold: 0.2
+  data_timeout_sec: 0.8
+  parse_fail_threshold: 200
+  leap_seconds: 18
+
+frames:
+  - t: 0.05
+    type: gpchc
+    fields: {sta: "42", warning: "0000", solnsvs: "20", solnsvs2: "18", age: "1"}
+  - t: 0.1
+    type: gpchc
+    fields: {sta: "42", warning: "0000", solnsvs: "20", solnsvs2: "18", age: "1"}
