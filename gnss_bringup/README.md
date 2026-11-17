@@ -1,6 +1,11 @@
 # gnss_bringup
 
-三个 ROS2 节点,构成 GNSS 数据面的第一段:
+GNSS 数据面与定位链的 ROS2 包,包含原始数据桥接、RTKLIB 独立解算、`.pos` 落盘,
+以及直接输出 `robominer_msgs/LocalizationData` 的定位节点。
+
+## 节点总览
+
+### 原始数据面
 
 - **`rtcm_bridge`**——把裸 TCP 字节流(平台差分、板卡原始观测)桥接到 ROS 话题
   (`gnss_msgs/RawStream`)。不做任何解析,支持连接(`listen=false`)或监听
@@ -12,8 +17,25 @@
   UTC 自然日轮转,写成 RTKLIB 兼容的 `.pos` 文本摘要(见下面「`.pos` 输出」
   一节)。
 
+### 定位链（输出 `LocalizationData`）
+
+- **`localization_bridge`**——北云 OEM7 场景。订阅 `novatel_oem7_msgs` 驱动话题
+  (`/bynav/inspvax`、`bestpos`、`corrimudata`、`heading2`),内部做 BLH→ENU、
+  IMU 缩放、航向换算与 `LocalizationGate` 门控,发布 `/localization/localization_data`、
+  `/_aux`、202012 故障码与心跳。门控逻辑与旧 `localization_parser` 的
+  `beiyun_processor` 逐条对齐。
+- **`rtkfix_judge`**——610 / 华测 / 通用 `gnss_msgs/RtkFix` 场景。订阅已归一化的
+  `RtkFix`,复用同一套 `LocalizationGate`,输出同样的 `LocalizationData` 话题。
+  与 `localization_bridge` 二选一,不要同时启用。
+- **`metrics_node`**——订阅 `/localization/localization_data`,计算 RTK 固定率、
+  零速段静态水平 σ（Welford）,发布 `robominer_msgs/LocalizationMetrics`。
+- **`divergence_node`**——订阅两路 `gnss_msgs/RtkFix`（设备解 + rtkrcv 独立解）,
+  用 `gnss_core::DivergenceMonitor` 学习经验 σ 并监测持续偏差,发布 `/diagnostics`。
+
 全量原始流(两路裸流 + 各路 `RtkFix` + `~/stat`)的记录另见「rosbag2 录制」
 一节的 `scripts/record_gnss.sh`。
+
+另见 `hmi/README.md`——只读 Web HMI,可实时查看双解、天空图、事件日志与回放。
 
 ## 构建(2026-09-12 更新:不再需要 source driver_ws)
 
@@ -68,16 +90,43 @@ rtkrcv --version     # 应输出:rtkrcv RTKLIB EX 2.5.1
 
 ```bash
 source install/setup.bash
+
+# 默认：rtcm_bridge + pos_writer + diag + cleanup（不开 RTKLIB 时加 enable_rtkrcv:=false）
 ros2 launch gnss_bringup gnss_bringup.launch.py
+
+# 北云 OEM7 车上定位链
+ros2 launch gnss_bringup gnss_bringup.launch.py \
+  enable_bridge:=false \
+  enable_localization:=true \
+  enable_metrics:=true
+
+# 610 / 华测车上定位链
+ros2 launch gnss_bringup gnss_bringup.launch.py \
+  enable_bridge:=false \
+  enable_rtkfix_judge:=true \
+  enable_metrics:=true
 ```
 
-参数集中在 `config/gnss_bringup.yaml`,launch 文件默认加载它;可用
-`params_file:=<path>` 覆盖整份文件,或 `-p <name>:=<value>` 覆盖单个参数。
+参数集中在 `config/gnss_bringup.yaml`;定位节点参数在 `config/gnss_bringup_localization.yaml`。
+可用 `params_file:=<path>` / `localization_params_file:=<path>` 覆盖整份文件,
+或 `-p <name>:=<value>` 覆盖单个参数。
 
 `enable_rtkrcv:=false` 只起 `rtcm_bridge`(RTKLIB 未安装、或只想验证桥接这一段时用,
 见下面"不装 RTKLIB 也能跑起来"一节)。`enable_pos_writer:=false` 关掉 `.pos`
 落盘(默认 `true`,与 `enable_rtkrcv` 相反——`pos_writer` 只依赖
 `gnss_msgs/RtkFix`,不依赖 RTKLIB 本身,默认随桥一起起来)。
+
+定位链启动参数:
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `enable_localization` | `false` | 北云 OEM7 定位桥 |
+| `enable_rtkfix_judge` | `false` | 610 / 通用 RtkFix 定位判决 |
+| `enable_metrics` | `true` | `LocalizationMetrics` 慢变指标 |
+| `enable_divergence` | `false` | 双路 RtkFix 偏差监测 |
+
+> **注意**：`enable_localization` 与 `enable_rtkfix_judge` 不要同时设为 `true`,
+> 否则会同时发布同一个 `/localization/localization_data`。
 
 ## 部署要求(必读):`rtkrcv_node` 必须跑在 systemd + cgroup `KillMode` 下
 
