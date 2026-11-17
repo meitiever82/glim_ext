@@ -5,7 +5,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <gnss_msgs/msg/raw_stream.hpp>
 #include "gnss_bringup/rtcm_bridge_params.hpp"
-#include "gnss_bringup/utils/tcp_stream.hpp"
+#include "utils/tcp_stream.hpp"
 
 namespace {
 

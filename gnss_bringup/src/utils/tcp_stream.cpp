@@ -1,4 +1,4 @@
-#include "gnss_bringup/utils/tcp_stream.hpp"
+#include "utils/tcp_stream.hpp"
 
 #include <arpa/inet.h>
 #include <fcntl.h>

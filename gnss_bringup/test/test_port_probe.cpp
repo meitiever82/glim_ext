@@ -4,8 +4,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
-#include "gnss_bringup/utils/local_reserver.hpp"
-#include "gnss_bringup/utils/port_probe.hpp"
+#include "utils/local_reserver.hpp"
+#include "utils/port_probe.hpp"
 using namespace gnss_bringup;
 
 TEST(PortProbe, DetectsAListeningPort) {
