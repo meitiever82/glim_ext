@@ -19,12 +19,12 @@ find_package(std_msgs REQUIRED)
 
 # 不依赖 ROS 的 I/O 与进程管理,便于单测
 add_library(gnss_bringup_io SHARED
-  src/tcp_stream.cpp
-  src/local_reserver.cpp
-  src/rtkrcv_conf.cpp
-  src/process_supervisor.cpp
-  src/port_probe.cpp
-  src/executable_lookup.cpp
+  src/utils/tcp_stream.cpp
+  src/utils/local_reserver.cpp
+  src/utils/rtkrcv_conf.cpp
+  src/utils/process_supervisor.cpp
+  src/utils/port_probe.cpp
+  src/utils/executable_lookup.cpp
 )
 target_include_directories(gnss_bringup_io PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -80,12 +80,23 @@ if(robominer_msgs_FOUND AND novatel_oem7_msgs_FOUND)
   ament_target_dependencies(ros_stream_adapter rclcpp gnss_msgs robominer_msgs novatel_oem7_msgs)
   install(TARGETS ros_stream_adapter DESTINATION lib/${PROJECT_NAME})
 
-  # 定位桥接(T2):北云驱动话题 → LocalizationData / _aux / 202012 / 心跳。
-  # 纯逻辑(门控/映射/告警)在 include/gnss_bringup 下,不依赖 ROS。
-  add_executable(localization_bridge src/localization_bridge_node.cpp)
-  target_include_directories(localization_bridge PRIVATE include)
-  ament_target_dependencies(localization_bridge rclcpp robominer_msgs novatel_oem7_msgs std_msgs)
-  install(TARGETS localization_bridge DESTINATION lib/${PROJECT_NAME})
+  # Phase 2: 北云 OEM7 → 统一 RtkFix
+  add_executable(bynav_adapter src/bynav_adapter_node.cpp)
+  target_include_directories(bynav_adapter PRIVATE include)
+  ament_target_dependencies(bynav_adapter rclcpp gnss_msgs novatel_oem7_msgs)
+  install(TARGETS bynav_adapter DESTINATION lib/${PROJECT_NAME})
+
+  # Phase 2: 华测 610 → 统一 RtkFix
+  add_executable(huace_adapter src/huace_adapter_node.cpp)
+  target_include_directories(huace_adapter PRIVATE include)
+  ament_target_dependencies(huace_adapter rclcpp gnss_msgs)
+  install(TARGETS huace_adapter DESTINATION lib/${PROJECT_NAME})
+
+  # Phase 2: 统一 RtkFix → LocalizationData
+  add_executable(localization_node src/localization_node.cpp)
+  target_include_directories(localization_node PRIVATE include)
+  ament_target_dependencies(localization_node rclcpp gnss_msgs robominer_msgs std_msgs)
+  install(TARGETS localization_node DESTINATION lib/${PROJECT_NAME})
 
   # Phase 2: 慢变质量指标节点
   add_executable(metrics_node src/metrics_node.cpp)
@@ -99,12 +110,6 @@ if(robominer_msgs_FOUND AND novatel_oem7_msgs_FOUND)
   ament_target_dependencies(divergence_node rclcpp gnss_msgs diagnostic_msgs)
   target_link_libraries(divergence_node gnss_core::gnss_core)
   install(TARGETS divergence_node DESTINATION lib/${PROJECT_NAME})
-
-  # Phase 2: 通用 RtkFix 源判决节点（610 等）
-  add_executable(rtkfix_judge src/rtkfix_judge_node.cpp)
-  target_include_directories(rtkfix_judge PRIVATE include)
-  ament_target_dependencies(rtkfix_judge rclcpp gnss_msgs robominer_msgs std_msgs)
-  install(TARGETS rtkfix_judge DESTINATION lib/${PROJECT_NAME})
 
   set(GNSS_BRINGUP_HAS_ADAPTER ON)
 else()

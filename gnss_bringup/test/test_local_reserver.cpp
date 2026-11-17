@@ -13,7 +13,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-#include "gnss_bringup/local_reserver.hpp"
+#include "gnss_bringup/utils/local_reserver.hpp"
 using namespace gnss_bringup;
 
 // --- fix round 2: 部署 close() 追踪器,给 double-close 回归测试当探针 ---

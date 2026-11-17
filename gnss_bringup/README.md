@@ -19,18 +19,23 @@ GNSS 数据面与定位链的 ROS2 包,包含原始数据桥接、RTKLIB 独立�
 
 ### 定位链（输出 `LocalizationData`）
 
-- **`localization_bridge`**——北云 OEM7 场景。订阅 `novatel_oem7_msgs` 驱动话题
-  (`/bynav/inspvax`、`bestpos`、`corrimudata`、`heading2`),内部做 BLH→ENU、
-  IMU 缩放、航向换算与 `LocalizationGate` 门控,发布 `/localization/localization_data`、
-  `/_aux`、202012 故障码与心跳。门控逻辑与旧 `localization_parser` 的
-  `beiyun_processor` 逐条对齐。
-- **`rtkfix_judge`**——610 / 华测 / 通用 `gnss_msgs/RtkFix` 场景。订阅已归一化的
-  `RtkFix`,复用同一套 `LocalizationGate`,输出同样的 `LocalizationData` 话题。
-  与 `localization_bridge` 二选一,不要同时启用。
+统一架构：接收机 adapter 把各厂商专有输出转成 `gnss_msgs/RtkFix`，
+`localization_node` 再统一做 `LocalizationGate` 门控并输出 `LocalizationData`。
+
+- **`bynav_adapter`**——北云 OEM7 场景。订阅 `novatel_oem7_msgs` 驱动话题
+  (`/bynav/inspvax`、`bestpos`、`corrimudata`、`heading2`)，做 BLH/IMU 缩放/
+  航向换算，发布扩展后的 `gnss_msgs/RtkFix` 到 `/gnss/rtkfix`。
+- **`huace_adapter`**——610 / 华测场景。订阅 610 驱动发布的 `gnss_msgs/RtkFix`
+  (`/gnss/rtkfix_huace`)，做防御性归一化后同样发布到 `/gnss/rtkfix`。
+- **`localization_node`**——订阅统一的 `/gnss/rtkfix`，复用旧 `localization_parser`
+  的 `LocalizationGate` 门控逻辑，发布 `/localization/localization_data`、
+  `/_aux`、202012 故障码与心跳。
 - **`metrics_node`**——订阅 `/localization/localization_data`,计算 RTK 固定率、
   零速段静态水平 σ（Welford）,发布 `robominer_msgs/LocalizationMetrics`。
 - **`divergence_node`**——订阅两路 `gnss_msgs/RtkFix`（设备解 + rtkrcv 独立解）,
   用 `gnss_core::DivergenceMonitor` 学习经验 σ 并监测持续偏差,发布 `/diagnostics`。
+
+`bynav_adapter` 与 `huace_adapter` 二选一,不要同时启用。
 
 全量原始流(两路裸流 + 各路 `RtkFix` + `~/stat`)的记录另见「rosbag2 录制」
 一节的 `scripts/record_gnss.sh`。
@@ -97,13 +102,15 @@ ros2 launch gnss_bringup gnss_bringup.launch.py
 # 北云 OEM7 车上定位链
 ros2 launch gnss_bringup gnss_bringup.launch.py \
   enable_bridge:=false \
-  enable_localization:=true \
+  enable_bynav_adapter:=true \
+  enable_localization_node:=true \
   enable_metrics:=true
 
 # 610 / 华测车上定位链
 ros2 launch gnss_bringup gnss_bringup.launch.py \
   enable_bridge:=false \
-  enable_rtkfix_judge:=true \
+  enable_huace_adapter:=true \
+  enable_localization_node:=true \
   enable_metrics:=true
 ```
 
@@ -120,13 +127,14 @@ ros2 launch gnss_bringup gnss_bringup.launch.py \
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `enable_localization` | `false` | 北云 OEM7 定位桥 |
-| `enable_rtkfix_judge` | `false` | 610 / 通用 RtkFix 定位判决 |
+| `enable_bynav_adapter` | `false` | 北云 OEM7 → RtkFix |
+| `enable_huace_adapter` | `false` | 610 / 华测 → RtkFix |
+| `enable_localization_node` | `false` | RtkFix → LocalizationData |
 | `enable_metrics` | `true` | `LocalizationMetrics` 慢变指标 |
 | `enable_divergence` | `false` | 双路 RtkFix 偏差监测 |
 
-> **注意**：`enable_localization` 与 `enable_rtkfix_judge` 不要同时设为 `true`,
-> 否则会同时发布同一个 `/localization/localization_data`。
+> **注意**：`enable_bynav_adapter` 与 `enable_huace_adapter` 不要同时设为 `true`，
+> 否则会向同一个 `/gnss/rtkfix` 发布两份数据。
 
 ## 部署要求(必读):`rtkrcv_node` 必须跑在 systemd + cgroup `KillMode` 下
 

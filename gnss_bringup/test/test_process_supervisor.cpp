@@ -15,8 +15,8 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include "gnss_bringup/local_reserver.hpp"
-#include "gnss_bringup/process_supervisor.hpp"
+#include "gnss_bringup/utils/local_reserver.hpp"
+#include "gnss_bringup/utils/process_supervisor.hpp"
 using namespace gnss_bringup;
 
 namespace {

@@ -3,7 +3,7 @@
 #include <cmath>
 #include <limits>
 #include <sstream>
-#include "gnss_bringup/rtkrcv_conf.hpp"
+#include "gnss_bringup/utils/rtkrcv_conf.hpp"
 using namespace gnss_bringup;
 
 namespace {

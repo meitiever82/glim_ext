@@ -6,7 +6,7 @@
 #include <fstream>
 #include <string>
 #include <vector>
-#include "gnss_bringup/executable_lookup.hpp"
+#include "gnss_bringup/utils/executable_lookup.hpp"
 using gnss_bringup::resolve_executable;
 
 namespace {

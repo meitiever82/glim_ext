@@ -51,16 +51,16 @@
 #include <gnss_msgs/msg/raw_stream.hpp>
 #include <gnss_msgs/msg/rtk_fix.hpp>
 
-#include "gnss_bringup/executable_lookup.hpp"     // resolve_executable:启动前确认 binary 能被解析
-#include "gnss_bringup/local_reserver.hpp"
-#include "gnss_bringup/port_probe.hpp"             // probe_local_port:启动时探测 sol_port 是否已被孤儿/第二实例占着
-#include "gnss_bringup/process_supervisor.hpp"
+#include "gnss_bringup/utils/executable_lookup.hpp"     // resolve_executable:启动前确认 binary 能被解析
+#include "gnss_bringup/utils/local_reserver.hpp"
+#include "gnss_bringup/utils/port_probe.hpp"             // probe_local_port:启动时探测 sol_port 是否已被孤儿/第二实例占着
+#include "gnss_bringup/utils/process_supervisor.hpp"
 #include "gnss_bringup/rtcm_bridge_params.hpp"   // is_valid_port_for_direction:与 rtcm_bridge_node 共用的端口校验
 #include "gnss_bringup/rtk_fix_mapping.hpp"       // to_rtk_fix + LineSplitter + plan_stat_tail
-#include "gnss_bringup/rtkrcv_conf.hpp"
+#include "gnss_bringup/utils/rtkrcv_conf.hpp"
 #include "gnss_bringup/rtkrcv_health.hpp"         // evaluate_rtkrcv_health:~/diagnostics 的纯评估函数
 #include "gnss_bringup/sol_stream_log_gate.hpp"   // sol 流状态日志去重
-#include "gnss_bringup/tcp_stream.hpp"
+#include "gnss_bringup/utils/tcp_stream.hpp"
 #include "gnss_core/rtkstat.hpp"                  // parse_llh_solution
 
 namespace {

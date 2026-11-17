@@ -1,4 +1,4 @@
-#include "gnss_bringup/process_supervisor.hpp"
+#include "gnss_bringup/utils/process_supervisor.hpp"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -14,7 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 
-#include "gnss_bringup/executable_lookup.hpp"
+#include "gnss_bringup/utils/executable_lookup.hpp"
 
 namespace gnss_bringup {
 

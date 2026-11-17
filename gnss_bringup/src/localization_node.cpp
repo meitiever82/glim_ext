@@ -1,11 +1,12 @@
-// rtkfix_judge_node: 通用 RtkFix → LocalizationData 判决节点。
+// localization_node: 统一 RtkFix → LocalizationData 判决节点。
 //
 // 覆盖场景：
-//   - 610（华测）驱动直接发布 gnss_msgs/RtkFix
-//   - 其他已归一化到 RtkFix 的 GNSS 源
+//   - bynav_adapter 输出的扩展 RtkFix
+//   - huace_adapter 输出的归一化 RtkFix
+//   - 任何其他已发布 gnss_msgs/RtkFix 的 GNSS 源
 //
-// 职责：只做字段映射 + LocalizationGate + 202012 告警；
-// 不处理 OEM7 专有话题（那是 localization_bridge 的工作）。
+// 职责：字段映射 + LocalizationGate + 202012 告警；
+// 不处理接收机专有话题（由上游 adapter 完成）。
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -61,9 +62,9 @@ auto ClampToU8(double v) -> uint8_t {
   return static_cast<uint8_t>(std::clamp(v, 0.0, 255.0));
 }
 
-class RtkFixJudgeNode : public rclcpp::Node {
+class LocalizationNode : public rclcpp::Node {
  public:
-  RtkFixJudgeNode() : rclcpp::Node("rtkfix_judge") {
+  LocalizationNode() : rclcpp::Node("localization_node") {
     LoadParams();
     converter_ = std::make_unique<EnuConverter>(Blh{origin_lat_, origin_lon_, origin_height_});
     gate_ = std::make_unique<LocalizationGate>(gate_params_);
@@ -72,7 +73,7 @@ class RtkFixJudgeNode : public rclcpp::Node {
     CreateSubscriptions();
     CreateTimers();
     RCLCPP_INFO(get_logger(),
-                "rtkfix_judge: input=%s output=%s (fallback for 610/RtkFix sources)",
+                "localization_node: input=%s output=%s (unified RtkFix -> LocalizationData)",
                 input_topic_.c_str(), output_topic_.c_str());
   }
 
@@ -367,7 +368,7 @@ class RtkFixJudgeNode : public rclcpp::Node {
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<gnss_bringup::RtkFixJudgeNode>());
+  rclcpp::spin(std::make_shared<gnss_bringup::LocalizationNode>());
   rclcpp::shutdown();
   return 0;
 }

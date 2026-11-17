@@ -1,13 +1,17 @@
 # gnss_bringup 车端部署 SOP
 
-版本：v1.0（2026-11-17）
+版本：v2.0（2026-11-17）
 适用：ROS2 Humble + Ubuntu 22.04，北云 OEM7 或华测 610 组合导航
-变更：首次整理定位链（localization_bridge / rtkfix_judge / metrics_node / divergence_node）车端部署流程。
+变更：v2.0 将定位链拆分为 adapter + localization_node 架构：
+  - 北云 OEM7 用 `bynav_adapter` 输出统一 `gnss_msgs/RtkFix`
+  - 华测 610 用 `huace_adapter` 输出统一 `gnss_msgs/RtkFix`
+  - `localization_node` 统一做门控并输出 `LocalizationData`
+  - 不再使用 `localization_bridge` / `rtkfix_judge`
 
 ⚠️ 三条铁律：
 1. **开发、测试、提交在 `glim_ws` 完成**，验证通过后再同步到 `localization` 生产仓库。
 2. **ENU 原点必须和现场 map 原点一致**，换场地必须同步改 `gnss_bringup_localization.yaml`。
-3. **`enable_localization` 与 `enable_rtkfix_judge` 不要同时开**，会同时发布同一个 `/localization/localization_data`。
+3. **`enable_bynav_adapter` 与 `enable_huace_adapter` 不要同时开**，会向同一个 `/gnss/rtkfix` 发布两份数据。
 
 ---
 
@@ -50,10 +54,12 @@ git push origin 803-fix
 
 | 项目 | 北云 OEM7 | 华测 610 |
 |---|---|---|
-| 主节点 | `localization_bridge` | `rtkfix_judge` |
+| adapter | `bynav_adapter` | `huace_adapter` |
+| 定位节点 | `localization_node` | `localization_node` |
 | 驱动话题 | `/bynav/inspvax` 等 | `/gnss/rtkfix` |
 | IMU 源 | `corrimudata` | 已含在 `RtkFix` |
-| 启用参数 | `enable_localization:=true` | `enable_rtkfix_judge:=true` |
+| 启用 adapter | `enable_bynav_adapter:=true` | `enable_huace_adapter:=true` |
+| 启用定位节点 | `enable_localization_node:=true` | `enable_localization_node:=true` |
 
 ### A2 确认 ENU 原点
 
@@ -123,7 +129,8 @@ cp src/glim_ext/gnss_bringup/config/gnss_bringup_localization.yaml \
 ```bash
 ros2 launch gnss_bringup gnss_bringup.launch.py \
   enable_bridge:=false \
-  enable_localization:=true \
+  enable_bynav_adapter:=true \
+  enable_localization_node:=true \
   enable_metrics:=true \
   enable_divergence:=false \
   localization_params_file:=<现场 yaml 路径>
@@ -134,7 +141,8 @@ ros2 launch gnss_bringup gnss_bringup.launch.py \
 ```bash
 ros2 launch gnss_bringup gnss_bringup.launch.py \
   enable_bridge:=false \
-  enable_rtkfix_judge:=true \
+  enable_huace_adapter:=true \
+  enable_localization_node:=true \
   enable_metrics:=true \
   enable_divergence:=false \
   localization_params_file:=<现场 yaml 路径>
@@ -145,14 +153,15 @@ ros2 launch gnss_bringup gnss_bringup.launch.py \
 ```bash
 ros2 launch gnss_bringup gnss_bringup.launch.py \
   enable_bridge:=false \
-  enable_localization:=true \
+  enable_bynav_adapter:=true \
+  enable_localization_node:=true \
   enable_metrics:=true \
   enable_divergence:=true \
   enable_rtkrcv:=true \
   localization_params_file:=<现场 yaml 路径>
 ```
 
-> 华测场景将 `enable_localization` 换成 `enable_rtkfix_judge`。
+> 华测场景将 `enable_bynav_adapter` 换成 `enable_huace_adapter`。
 
 ---
 
@@ -231,11 +240,11 @@ ros2 launch localization_parser localization_parser.launch.py
 
 | 症状 | 原因 | 处置 |
 |---|---|---|
-| `/localization/localization_data` 无数据 | 节点未启用或驱动话题名不对 | 检查 `enable_localization`/`enable_rtkfix_judge`；用 `ros2 topic list` 核对话题名 |
+| `/localization/localization_data` 无数据 | 节点未启用或驱动话题名不对 | 检查 `enable_bynav_adapter`/`enable_huace_adapter`/`enable_localization_node`；用 `ros2 topic list` 核对话题名 |
 | `is_valid` 一直 false | INS 未收敛 / 卫星不足 / 原点错误 | 查看 `LocalizationDataAux.fault_code`；确认 `origin_lat/lon/height` |
 | `x/y/z` 数值巨大 | ENU 原点与驱动 map 原点不一致 | 对齐原点后重启 |
 | 速度/角速度明显偏大（北云） | `imu_rate_hz` 与实际不符 | 改为正确 CORRIMU 频率 |
 | `metrics` 固定率为 0 | 设备未进入 fixed | 检查天线、差分、环境遮挡 |
 | `divergence` 持续告警 | 设备解与 rtkrcv 独立解偏差大 | 检查基站坐标、差分链路、rtkrcv 配置 |
-| 同时起 `localization_bridge` 和 `rtkfix_judge` | 两节点发布同名话题 | 只启用其中一个 |
+| 同时起 `bynav_adapter` 和 `huace_adapter` | 两 adapter 发布同名 `/gnss/rtkfix` | 只启用其中一个 |
 | colcon 找不到 `robominer_msgs` | 未 source boonray_ws overlay | `source <boonray_ws>/install/setup.bash` 后再编 |

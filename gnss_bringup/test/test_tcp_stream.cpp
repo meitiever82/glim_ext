@@ -12,7 +12,7 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include "gnss_bringup/tcp_stream.hpp"
+#include "gnss_bringup/utils/tcp_stream.hpp"
 using namespace gnss_bringup;
 
 // final-fix-wave 第 2 项回归测试用的探针。

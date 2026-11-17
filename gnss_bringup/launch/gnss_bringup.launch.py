@@ -75,13 +75,15 @@ def generate_launch_description():
         # 注意:ros_stream_adapter 只在构建时找到 robominer_msgs 与
         # novatel_oem7_msgs 才会编出来(见 CMakeLists.txt),enable_adapter:=true
         # 而二进制不存在时这里会以"找不到可执行文件"报错。
-        DeclareLaunchArgument("enable_bridge", default_value="true"),
+        DeclareLaunchArgument("enable_bridge", default_value="false"),
         DeclareLaunchArgument("enable_adapter", default_value="false"),
-        # 定位桥接(T2):默认关闭,影子阶段用 true 单独起,不影响既有启动栈。
-        # 依赖 robominer_msgs + novatel_oem7_msgs,缺包时二进制不存在。
-        DeclareLaunchArgument("enable_localization", default_value="false"),
         DeclareLaunchArgument("localization_params_file", default_value=localization_params),
-        DeclareLaunchArgument("enable_rtkfix_judge", default_value="false"),
+        # 定位链：adapter + localization_node。二选一，不要同时启用两个 adapter。
+        # 北云 OEM7 场景：enable_bynav_adapter:=true
+        # 华测 610 场景：enable_huace_adapter:=true
+        DeclareLaunchArgument("enable_bynav_adapter", default_value="false"),
+        DeclareLaunchArgument("enable_huace_adapter", default_value="false"),
+        DeclareLaunchArgument("enable_localization_node", default_value="false"),
         DeclareLaunchArgument("enable_metrics", default_value="true"),
         DeclareLaunchArgument("enable_divergence", default_value="false"),
         # 方案 A:动态 map->base_link 由北云驱动独占,本包只补静态 world->map,
@@ -90,12 +92,15 @@ def generate_launch_description():
         Node(package="gnss_bringup", executable="rtcm_bridge", name="rtcm_bridge",
              parameters=[LaunchConfiguration("params_file")], output="screen",
              condition=IfCondition(LaunchConfiguration("enable_bridge"))),
-        Node(package="gnss_bringup", executable="localization_bridge", name="localization_bridge",
+        Node(package="gnss_bringup", executable="bynav_adapter", name="bynav_adapter",
              parameters=[LaunchConfiguration("localization_params_file")], output="screen",
-             condition=IfCondition(LaunchConfiguration("enable_localization"))),
-        Node(package="gnss_bringup", executable="rtkfix_judge", name="rtkfix_judge",
+             condition=IfCondition(LaunchConfiguration("enable_bynav_adapter"))),
+        Node(package="gnss_bringup", executable="huace_adapter", name="huace_adapter",
              parameters=[LaunchConfiguration("localization_params_file")], output="screen",
-             condition=IfCondition(LaunchConfiguration("enable_rtkfix_judge"))),
+             condition=IfCondition(LaunchConfiguration("enable_huace_adapter"))),
+        Node(package="gnss_bringup", executable="localization_node", name="localization_node",
+             parameters=[LaunchConfiguration("localization_params_file")], output="screen",
+             condition=IfCondition(LaunchConfiguration("enable_localization_node"))),
         Node(package="gnss_bringup", executable="metrics_node", name="gnss_metrics",
              parameters=[LaunchConfiguration("localization_params_file")], output="screen",
              condition=IfCondition(LaunchConfiguration("enable_metrics"))),
@@ -105,9 +110,9 @@ def generate_launch_description():
         Node(package="tf2_ros", executable="static_transform_publisher",
              name="world_to_map_static",
              arguments=["0", "0", "0", "0", "0", "0", "world", "map"],
-             # 只在定位桥接启用时才补静态 TF，保证默认启动栈行为完全不变
+             # 只在定位链启用时才补静态 TF，保证默认启动栈行为完全不变
              condition=IfCondition(AndSubstitution(
-                 LaunchConfiguration("enable_localization"),
+                 LaunchConfiguration("enable_localization_node"),
                  LaunchConfiguration("enable_world_map_tf"))),
              ),
         Node(package="gnss_bringup", executable="ros_stream_adapter", name="ros_stream_adapter",

@@ -1,4 +1,9 @@
-# GNSS 定位链参数（北云/610/华测通用）
+# GNSS 定位链参数（北云/华测通用）
+#
+# 架构：
+#   北云 OEM7 话题 ──► bynav_adapter ──┐
+#                                     ├─► /gnss/rtkfix ──► localization_node ──► LocalizationData
+#   华测 610 RtkFix ──► huace_adapter ─┘
 #
 # 契约与旧 localization_parser 一致（话题名、50 Hz、202012、心跳），
 # ENU 原点沿用旧配置，换场必须同步修改，否则地图整体平移。
@@ -8,9 +13,34 @@
 #   2) 北云场景：imu_rate_hz 与整车实际 IMU 频率一致（CORRIMU 是增量，乘错会整体缩放）。
 
 # ============================================================================
-# 北云 OEM7 场景：直接订阅 bynav_ros_driver 发布的 OEM7 话题
+# 北云 OEM7 → 统一 RtkFix
 # ============================================================================
-localization_bridge:
+bynav_adapter:
+  ros__parameters:
+    world_frame_id: "world"
+    leap_seconds: 18
+    imu_rate_hz: 100.0
+
+    topics:
+      inspvax: "/bynav/inspvax"
+      bestpos: "/bynav/bestpos"
+      corrimudata: "/bynav/corrimudata"
+      heading2: "/bynav/heading2"
+      rtkfix: "/gnss/rtkfix"
+
+# ============================================================================
+# 华测 610 → 统一 RtkFix
+# ============================================================================
+huace_adapter:
+  ros__parameters:
+    topics:
+      rtkfix_huace: "/gnss/rtkfix_huace"
+      rtkfix: "/gnss/rtkfix"
+
+# ============================================================================
+# 统一 RtkFix → LocalizationData
+# ============================================================================
+localization_node:
   ros__parameters:
     # === ENU 原点（旧 localization_parser.yaml） ===
     origin_lat: 44.50323451
@@ -21,14 +51,9 @@ localization_bridge:
     rtk_offset_yaw: 0.0
 
     world_frame_id: "world"
-    leap_seconds: 18
 
-    # 无 INSPVAX 超过该时长判 DataTimeout（旧实现按原始字节流判定）
+    # 无 RtkFix 超过该时长判 DataTimeout
     data_timeout_sec: 0.8
-
-    # CORRIMU 是每个采样间隔的增量：角速度 rad/sample、速度 m/s/sample
-    # 实车 IMU 为 100 Hz（旧实现按 125 Hz 换算，角速度/加速度会偏大 25%）
-    imu_rate_hz: 100.0
 
     # 发布频率（旧实现 50 Hz）
     publish_rate_hz: 50.0
@@ -43,10 +68,7 @@ localization_bridge:
     heartbeat_topic: "/localization/localization_parser/heartbeat"
 
     topics:
-      inspvax: "/bynav/inspvax"
-      bestpos: "/bynav/bestpos"
-      corrimudata: "/bynav/corrimudata"
-      heading2: "/bynav/heading2"
+      rtkfix: "/gnss/rtkfix"
 
     # === 门控（与 beiyun_processor 逐条一致） ===
     gate:
@@ -58,46 +80,6 @@ localization_bridge:
       heading_length_threshold: 0.2
 
     # === 202012 告警状态机 ===
-    alarm_startup_grace_s: 10.0
-    alarm_recover_stable_s: 2.0
-    alarm_min_interval_s: 10.0
-    alarm_cooldown_s: 300.0
-    fault_code: 12
-
-# ============================================================================
-# 610 / 华测 / 通用 RtkFix 场景：驱动已发布 gnss_msgs/RtkFix
-# ============================================================================
-rtkfix_judge:
-  ros__parameters:
-    # === ENU 原点（与 localization_bridge 保持一致） ===
-    origin_lat: 44.50323451
-    origin_lon: 92.91759315
-    origin_height: 753.8173
-
-    rtk_offset_yaw: 0.0
-    world_frame_id: "world"
-    data_timeout_sec: 0.8
-
-    publish_rate_hz: 50.0
-    aux_rate_hz: 50.0
-    heartbeat_hz: 1
-
-    localization_topic: "/localization/localization_data"
-    localization_topic_aux: "/localization/localization_data_aux"
-    fault_topic: "fault_code/localization_fault"
-    heartbeat_topic: "/localization/localization_parser/heartbeat"
-
-    topics:
-      rtkfix: "/gnss/rtkfix"
-
-    gate:
-      sticky_grace_time: 30.0
-      single_point_age_threshold: 10.0
-      xyz_threshold: 10000.0
-      stars_threshold: 10
-      heading_length: 1.6
-      heading_length_threshold: 0.2
-
     alarm_startup_grace_s: 10.0
     alarm_recover_stable_s: 2.0
     alarm_min_interval_s: 10.0
