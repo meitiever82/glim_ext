@@ -60,15 +60,14 @@ localization_node:
     aux_rate_hz: 50.0
     heartbeat_hz: 1
 
-    # === 话题 ===
-    localization_topic: "/localization/localization_data"
-    localization_topic_aux: "/localization/localization_data_aux"
-    fault_topic: "fault_code/localization_fault"
-    # 保持旧心跳话题名，部署脚本/监控无需改动
-    heartbeat_topic: "/localization/localization_parser/heartbeat"
-
+    # === 话题（节点只读 topics.* 嵌套键，勿改回扁平键） ===
     topics:
       rtkfix: "/gnss/rtkfix"
+      localization_data: "/localization/localization_data"
+      localization_data_aux: "/localization/localization_data_aux"
+      fault: "fault_code/localization_fault"
+      # 保持旧心跳话题名，部署脚本/监控无需改动
+      heartbeat: "/localization/localization_parser/heartbeat"
 
     # === 门控（与 beiyun_processor 逐条一致） ===
     gate:

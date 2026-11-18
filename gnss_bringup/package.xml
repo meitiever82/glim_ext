@@ -11,6 +11,7 @@
   <depend>gnss_msgs</depend>
   <depend>gnss_core</depend>
   <depend>diagnostic_msgs</depend>
+  <depend>robominer_msgs</depend>
   <depend>std_srvs</depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
