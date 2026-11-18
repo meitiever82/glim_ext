@@ -85,3 +85,14 @@
 | 5 | 条件允许时在矿区原点补一次同项测试（含旧链有效性对比） | 双方 |
 
 数据留存：`nvidia@80:~/loc_test/bags/`（old_/new_20261118_013008，共 2.3G）、`~/loc_test/ana_{old,new}.json`、`ana_pair.json`、日志 `~/loc_test/logs/20261118_012519/`。
+
+## 8. 复测闭环（2026-11-18 中午，nvidia@121）
+
+| 验证项 | 结果 |
+|---|---|
+| 旧链 is_valid 恢复（GPFPD/HEADINGA 补流后） | ✓ `is_valid=true`、`fault_code=0`、`solnsvs=42/43`、x/y 厘米级，零告警 |
+| 新链默认 yaml 死键修复（803-fix 9e339e0） | ✓ 非默认话题名 `/localization/localization_data_test99` 经 yaml 生效；默认名 `/localization/localization_data`+aux+heartbeat+metrics 正常发布 |
+| ws_new 串行构建（含新版 msgs overlay） | ✓ 4 包全过（8.5 min） |
+
+121 车已还原（chrony 启用、robotruck 拉起、生产定位恢复）。121 部署复用了 80 的全部经验
+（含 ICOM 补丁脚本 `patch_icom_feed.py`、timesync 软链修复），全程约 40 分钟。
