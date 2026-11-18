@@ -165,15 +165,17 @@ class ByNavAdapterNode : public rclcpp::Node {
     out.sats_main = has_bestpos_ ? bestpos_.num_sol_svs : 0;
     out.sats_aux = has_heading2_ ? heading2_.num_sv_obs : 0;
 
+    // 航向与旧 localization_parser 一致：主 yaw 用 INSPVAX azimuth，
+    // HEADING2 仅用于基线长度/双天线固定解标志/辅助星数。
+    out.heading = msg.azimuth;
     if (has_heading2_) {
-      out.heading = heading2_.heading;
-      out.heading_sigma = heading2_.pitch;
+      out.heading_sigma = heading2_.heading_stdev;
       out.heading_valid = heading_narrow_int_from_oem7(heading2_.pos_type.type);
       out.baseline_length = heading2_.length;
       out.heading_type = out.heading_valid ? RtkFix::HEADING_TYPE_NARROW_INT
                                            : RtkFix::HEADING_TYPE_OTHER;
     } else {
-      out.heading = msg.azimuth;
+      out.heading_sigma = 0.0f;
       out.heading_valid = false;
       out.heading_type = RtkFix::HEADING_TYPE_NONE;
     }
@@ -185,7 +187,7 @@ class ByNavAdapterNode : public rclcpp::Node {
     out.vel_up = msg.up_velocity;
 
     out.roll = msg.roll;
-    out.pitch = -msg.pitch;  // 与旧 localization_parser 同符号约定
+    out.pitch = msg.pitch;  // localization_node 统一做符号转换
 
     const auto imu = ImuNow();
     out.gyro_x = imu.wx;
