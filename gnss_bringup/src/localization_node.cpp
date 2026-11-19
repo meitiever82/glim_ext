@@ -8,6 +8,7 @@
 // 职责：字段映射 + LocalizationGate + 202012 告警；
 // 不处理接收机专有话题（由上游 adapter 完成）。
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -273,11 +274,14 @@ class LocalizationNode : public rclcpp::Node {
       msg.age = ClampToU8(r.diff_age);
       msg.gga_age = 0;
       msg.rtk_status.status = static_cast<uint8_t>(gate_out_.rtk_status);
+      FillStaticStd(msg, r.sigma_enu);
     } else {
       const bool timeout = (snap == Snapshot::kTimeout);
       msg.is_valid = false;
       msg.rtk_status.status =
           static_cast<uint8_t>(timeout ? RtkStatus::DataTimeout : RtkStatus::RtkInit);
+      msg.static_std_horizontal = -1.0;
+      msg.static_std_vertical = -1.0;
     }
 
     main_pub_->publish(msg);
@@ -300,6 +304,15 @@ class LocalizationNode : public rclcpp::Node {
     aux.part_solnsvs2 = r.sats_aux;
     aux.fault_code = static_cast<uint8_t>(gate_out_.fault_code);
     aux_pub_->publish(aux);
+  }
+
+  static void FillStaticStd(LocalizationData& msg,
+                            const std::array<double, 3>& sigma_enu) {
+    const double sde = std::isfinite(sigma_enu[0]) ? sigma_enu[0] : 0.0;
+    const double sdn = std::isfinite(sigma_enu[1]) ? sigma_enu[1] : 0.0;
+    const double sdu = std::isfinite(sigma_enu[2]) ? sigma_enu[2] : 0.0;
+    msg.static_std_horizontal = std::hypot(sde, sdn);
+    msg.static_std_vertical = sdu;
   }
 
   void PublishAux() {
