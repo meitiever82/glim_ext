@@ -1,4 +1,3 @@
-#include "utils/process_supervisor.hpp"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -15,6 +14,7 @@
 #include <cstdlib>
 
 #include "utils/executable_lookup.hpp"
+#include "utils/process_supervisor.hpp"
 
 namespace gnss_bringup {
 
